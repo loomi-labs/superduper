@@ -61,6 +61,11 @@ void main() {
     expect(bikeSub.read().light, isTrue,
         reason: 'the bike must echo the written light state');
 
+    // The poll's own write-back is fire-and-forget, so let it land before the
+    // rider touches the bike: otherwise it arrives after the rider input and
+    // overwrites it, which is a race in this test, not in the app.
+    await Future<void>.delayed(Duration.zero);
+
     // Rider bumps assist on the bike itself; the next poll picks it up.
     // writeStateData inside the poll is fire-and-forget, so yield once for
     // the new state to land.

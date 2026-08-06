@@ -57,7 +57,7 @@ final class BikeProvider extends $NotifierProvider<Bike, BikeState> {
   }
 }
 
-String _$bikeHash() => r'66df00f1c2391df26bc6f2fb51655bd9f4d49fd8';
+String _$bikeHash() => r'74a757809b95baa67bdc16c29fc2062d0c2ca919';
 
 final class BikeFamily extends $Family
     with $ClassFamilyOverride<Bike, BikeState, BikeState, BikeState, String> {

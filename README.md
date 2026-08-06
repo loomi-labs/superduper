@@ -27,7 +27,7 @@ Features:
 - No account or internet connection required
 - Quickly switch between multiple bikes
 - Lock settings, like Mode, to automatically switch when the bike is turned on and the app is running
-- (Android only) Background Lock, which will keep your bike on whatever settings you set it at, even the phone is locked
+- (Android only) Background Lock, which will keep your bike on whatever settings you set it at, even the phone is locked. CH bikes turn it on by themselves while the dynamic mode is selected
 - Open source
 
 ## Getting Started
@@ -75,6 +75,36 @@ Throttle means the motor will run when you press the throttle, regardless of if 
 | 3    | 850W  | Yes | No       | 45 km/h     |
 | 4    | Off-Road | Yes | Yes  | No Limit    |
 
+#### CH:
+
+| Mode | Class | PAS | Throttle | Speed Limit          |
+| ---- | ----- | --- | -------- | -------------------- |
+| 1    | Dynamic | Yes | Yes    | ~25 km/h (see below) |
+| 2    | 2     | Yes | Yes      | 20 mph (32 km/h)     |
+| 3    | Off-Road | Yes | Yes   | No Limit             |
+
+#### CH Dynamic Mode
+
+Mode 1 for CH bikes is not a mode in the bike's firmware, it's the app switching between two of
+the modes the bike already has. While it's selected, the app watches your speed over Bluetooth.
+At or below 23 km/h the bike runs the US Class 2 profile, so the throttle works. Above 23 km/h
+the app switches the bike to the EU EPAC profile, which is pedal assist only with a 25 km/h
+limit. When you slow back down, it switches back.
+
+If the Bluetooth connection drops, the bike simply stays in whichever profile was written last.
+The worst case is that it stays in US Class 2 with its 20 mph (32 km/h) limit, it never ends up
+unlimited.
+
+On Android, selecting the dynamic mode automatically turns on Background Lock (and shows its
+notification), so the switching keeps working while your phone is locked or in your pocket. New
+bikes start in mode 1, so this also happens the first time you open a newly added bike, without
+you selecting anything. It's turned off again when you leave the dynamic mode, unless you had
+turned Background Lock on yourself. On iOS there is no background service, so if the app is closed or the phone is locked
+the switching stops and the bike stays in the profile that was written last.
+
+CH is the region newly added bikes start with. You can change the region at any time in the bike's
+Edit sheet.
+
 ### Assist
 
 Changes the amount of assist your bike will provide while pedaling.
@@ -102,6 +132,8 @@ Finally, older bike firmware may not be supported. Make sure your bike firmware 
 The setting lock feature tells Superduper to ignore whatever the bike is set to and use the settings you have set in the app. This is useful for when the bike starts up and settings reset, like lights and mode. However, the app only enforces the setting lock when the app is open. If you close the app, the bike will go back to whatever settings it was set to. To use it, long press the setting button you want to lock.
 
 Background Lock is a feature that will keep the bike on the settings you set in the app, even if the app is closed. This is useful for when you want to leave the bike on a certain setting, like lights and mode, but don't want to keep the app open. For now, this feature is only available on Android. It also takes extra battery to keep the app running in the background.
+
+It is usually yours to turn on and off, with one exception: on Android, a CH bike in the dynamic mode turns Background Lock on automatically, because the speed switching has to keep running while your phone is locked. It is turned off again when you leave the dynamic mode, unless you had turned it on yourself. See [CH Dynamic Mode](#ch-dynamic-mode).
 
 ### What's up with the bike names?
 

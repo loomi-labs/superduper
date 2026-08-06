@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:superduper/utils/logger.dart';
@@ -15,7 +17,11 @@ bool isFakeBike(String deviceId) =>
 /// In-memory stand-in for a bike's state register. Kept alive so it survives
 /// the auto-dispose of ConnectionHandler.
 @Riverpod(keepAlive: true)
-FakeBikeStore fakeBikeStore(Ref ref) => FakeBikeStore();
+FakeBikeStore fakeBikeStore(Ref ref) {
+  final store = FakeBikeStore();
+  ref.onDispose(store.dispose);
+  return store;
+}
 
 class FakeBikeStore {
   /// Layout matches what the bike returns for register 3: index 2 is assist,
@@ -27,9 +33,39 @@ class FakeBikeStore {
   static const _modeIdx = 5;
 
   final Map<String, List<int>> _registers = {};
+  final Map<String, double> _speeds = {};
+  final Map<String, StreamController<double>> _speedControllers = {};
 
   List<int> _register(String deviceId) =>
       _registers.putIfAbsent(deviceId, () => List<int>.from(_defaultRegister));
+
+  StreamController<double> _speedController(String deviceId) =>
+      _speedControllers.putIfAbsent(
+          deviceId, () => StreamController<double>.broadcast());
+
+  /// Speed the fake bike currently reports, in km/h.
+  double speedKmh(String deviceId) => _speeds[deviceId] ?? 0;
+
+  /// The "rider" changed speed: stands in for a speed notification from the
+  /// bike, driven from the debug page.
+  void setSpeed(String deviceId, double kmh) {
+    _speeds[deviceId] = kmh;
+    log.d(SDLogger.bluetooth, 'Fake bike $deviceId speed: $kmh km/h');
+    _speedController(deviceId).add(kmh);
+  }
+
+  /// Speed notifications of a single fake bike, mirroring the real bike's
+  /// notification stream.
+  Stream<double> speedStream(String deviceId) =>
+      _speedController(deviceId).stream;
+
+  void dispose() {
+    for (var controller in _speedControllers.values) {
+      controller.close();
+    }
+    _speedControllers.clear();
+    _speeds.clear();
+  }
 
   /// Current register contents, as a real read would return them.
   List<int> read(String deviceId) {
@@ -59,7 +95,10 @@ class FakeBikeStore {
     log.d(SDLogger.bluetooth, 'Fake bike $deviceId light: $register');
   }
 
-  /// The rider changed the mode on the bike itself. Preserves the EU offset.
+  /// The mode changed outside this app. The bike has no mode button, so this
+  /// stands in for another app (e.g. the official one on a second phone)
+  /// writing a mode, or the controller powering up in a different one.
+  /// Preserves the EU offset.
   void cycleMode(String deviceId) {
     final register = _register(deviceId);
     final raw = register[_modeIdx];

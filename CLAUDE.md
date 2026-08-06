@@ -42,3 +42,19 @@ All source lives flat in `lib/`. State management is Riverpod (annotation/codege
 - **`debug.dart`** — debug page that fabricates bikes with random MAC addresses for UI work without hardware.
 
 `docs/` is a separate Hugo site (`make docs`), unrelated to the app code.
+
+## Driving the UI (Flutter Driver — "Playwright for Flutter")
+
+For agent-driven end-to-end testing against fake bikes, no hardware needed:
+
+```sh
+flutter run -d linux -t test_driver/app.dart --print-dtd
+```
+
+`test_driver/app.dart` enables the Flutter Driver extension. Connect the Dart MCP to the
+printed DTD URI (`dtd` tool → `connect`), then drive the app with `flutter_driver_command`
+(tap/scroll/waitFor/get_text) and inspect with `widget_inspector`. Two gotchas: call
+`set_frame_sync` with `enabled: false` first (the scan spinner animates forever and blocks
+synced commands), and find widgets by the real text/tooltips/keys from `get_widget_tree` —
+debug-page fake-bike rows are keyed by device id (`ByValueKey`). Simulate speed with each
+fake bike's slider; watch BLE traffic in the `flutter run` log (`[Bluetooth]` lines).

@@ -17,6 +17,7 @@ _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
   name: json['name'] as String,
   region: $enumDecodeNullable(_$BikeRegionEnumMap, json['region']),
   modeLock: json['modeLock'] as bool? ?? false,
+  modeLockAuto: json['modeLockAuto'] as bool? ?? false,
   color: (json['color'] as num?)?.toInt() ?? 0,
 );
 
@@ -32,7 +33,12 @@ Map<String, dynamic> _$BikeStateToJson(_BikeState instance) =>
       'name': instance.name,
       'region': _$BikeRegionEnumMap[instance.region],
       'modeLock': instance.modeLock,
+      'modeLockAuto': instance.modeLockAuto,
       'color': instance.color,
     };
 
-const _$BikeRegionEnumMap = {BikeRegion.us: 200, BikeRegion.eu: 201};
+const _$BikeRegionEnumMap = {
+  BikeRegion.us: 200,
+  BikeRegion.eu: 201,
+  BikeRegion.ch: 202,
+};

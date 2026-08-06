@@ -5,6 +5,20 @@ import 'package:form_builder_validators/form_builder_validators.dart';
 import 'package:superduper/bike.dart';
 import 'package:superduper/colors.dart';
 
+/// Modes are stored as a 0-based index and regions do not all have the same
+/// number of them (CH has 3, the others 4). Changing region can therefore leave
+/// a bike on an index the new region does not have; fall back to the region's
+/// *last* mode rather than its first. Both ends of the range are off-road and
+/// write the same wire byte ([chWireOffroad]), so the rider keeps the mode they
+/// were actually in — whereas index 0 on a CH bike is the dynamic mode, which
+/// would hand the speed limiter and the Background Lock to a settings save.
+/// A bike without a region behaves like the 4-mode ones, matching
+/// [BikeState.modeCount].
+int clampModeToRegion(int mode, BikeRegion? region) {
+  final modeCount = region?.modeCount ?? BikeRegion.us.modeCount;
+  return mode < modeCount ? mode : modeCount - 1;
+}
+
 void show(BuildContext context, BikeState bike) {
   showModalBottomSheet<void>(
       isScrollControlled: true,
@@ -332,11 +346,14 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
               ElevatedButton.icon(
                 onPressed: () {
                   if (_formKey.currentState?.saveAndValidate() ?? false) {
+                    final region = _formKey.currentState?.value['region']
+                        as BikeRegion?;
                     bikeNotifier.writeStateData(
                         widget.bike.copyWith(
                             name: _formKey.currentState?.value['name'],
                             color: _selectedColorIndex,
-                            region: _formKey.currentState?.value['region']),
+                            region: region,
+                            mode: clampModeToRegion(widget.bike.mode, region)),
                         saveToBike: false);
                     Navigator.pop(context);
                   }

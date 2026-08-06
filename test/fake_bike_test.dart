@@ -17,9 +17,10 @@ void main() {
   test('default register is the default state', () {
     final store = FakeBikeStore();
     expect(store.read(fakeId), [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    expect(
-        BikeState.defaultState(fakeId).updateFromData(store.read(fakeId)),
-        BikeState.defaultState(fakeId).copyWith(region: BikeRegion.us));
+    // Default region is CH, whose mode table has no entry for wire byte 0, so
+    // mode and region stay untouched and the round trip is the identity.
+    expect(BikeState.defaultState(fakeId).updateFromData(store.read(fakeId)),
+        BikeState.defaultState(fakeId));
   });
 
   test('write echoes into the read register', () {
@@ -98,6 +99,77 @@ void main() {
       store.cycleMode(fakeId);
       expect(store.read(fakeId)[5], expected);
     }
+  });
+
+  test('speed defaults to zero and setSpeed updates it', () {
+    final store = FakeBikeStore();
+    expect(store.speedKmh(fakeId), 0);
+    store.setSpeed(fakeId, 23.5);
+    expect(store.speedKmh(fakeId), 23.5);
+  });
+
+  test('speedStream emits on every setSpeed', () async {
+    final store = FakeBikeStore();
+    expect(store.speedStream(fakeId).isBroadcast, isTrue);
+    final first = <double>[];
+    final second = <double>[];
+    final subs = [
+      store.speedStream(fakeId).listen(first.add),
+      store.speedStream(fakeId).listen(second.add),
+    ];
+    store.setSpeed(fakeId, 5.5);
+    store.setSpeed(fakeId, 0);
+    await Future<void>.delayed(Duration.zero);
+    expect(first, [5.5, 0]);
+    expect(second, [5.5, 0]);
+    for (var sub in subs) {
+      await sub.cancel();
+    }
+  });
+
+  test('speeds are per device', () async {
+    final store = FakeBikeStore();
+    const otherId = 'fa:ke:aa:bb:cc:dd';
+    final seen = <double>[];
+    final sub = store.speedStream(otherId).listen(seen.add);
+    store.setSpeed(fakeId, 9);
+    await Future<void>.delayed(Duration.zero);
+    expect(store.speedKmh(otherId), 0);
+    expect(seen, isEmpty);
+    await sub.cancel();
+  });
+
+  test('ConnectionHandler streams the fake bike speed', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final provider = connectionHandlerProvider(fakeId);
+    container.listen(provider, (_, _) {}, fireImmediately: true);
+    final handler = container.read(provider.notifier);
+
+    final speeds = <double>[];
+    final sub = handler.speedStream.listen(speeds.add);
+    addTearDown(sub.cancel);
+
+    // Fake bikes have no ride data to request, but the call must be safe.
+    await handler.requestRideData();
+
+    final store = container.read(fakeBikeStoreProvider);
+    store.setSpeed(fakeId, 12.5);
+    store.setSpeed(fakeId, 24.0);
+    await Future<void>.delayed(Duration.zero);
+    expect(speeds, [12.5, 24.0]);
+  });
+
+  test('bikeSpeed provider exposes the speed stream', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final sub = container.listen(bikeSpeedProvider(fakeId), (_, _) {},
+        fireImmediately: true);
+    expect(sub.read(), const AsyncValue<double>.loading());
+
+    container.read(fakeBikeStoreProvider).setSpeed(fakeId, 30.0);
+    expect(await container.read(bikeSpeedProvider(fakeId).future), 30.0);
+    expect(sub.read().value, 30.0);
   });
 
   test('ConnectionHandler fakes a connection and echoes writes', () async {

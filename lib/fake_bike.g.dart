@@ -55,4 +55,4 @@ final class FakeBikeStoreProvider
   }
 }
 
-String _$fakeBikeStoreHash() => r'b455ada32f003bd58ac92893b7b15a4bb4be49ea';
+String _$fakeBikeStoreHash() => r'54d5411fe3c046696e901c8a992b10a42266f69c';

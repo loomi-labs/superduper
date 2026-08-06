@@ -51,7 +51,7 @@ final class BikesDBProvider
   }
 }
 
-String _$bikesDBHash() => r'68d0f459b163bb1f35c5e2ae819318d5f26c786d';
+String _$bikesDBHash() => r'48b105d80cfd55289ea8baebf5fca10ac5428e7f';
 
 abstract class _$BikesDB extends $Notifier<List<BikeState>> {
   List<BikeState> build();
@@ -103,7 +103,7 @@ final class SettingsDBProvider
   }
 }
 
-String _$settingsDBHash() => r'edad9433dc33333134820de0bd0ed8d2c60b67d2';
+String _$settingsDBHash() => r'be5fefb75813f8c2cd654f28ea321b83930aa96b';
 
 abstract class _$SettingsDB extends $Notifier<SettingsModel> {
   SettingsModel build();

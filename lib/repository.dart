@@ -43,43 +43,84 @@ Stream<List<BluetoothDevice>> connectedDevices(Ref ref) =>
 
 @riverpod
 class ConnectionHandler extends _$ConnectionHandler {
+  // Ride data request: select the ride data register, then ask the bike to
+  // stream it. Speed arrives as notifications on the register notifier.
+  static const _rideDataId = [2, 3];
+  static const _rideDataRequest = [2, 3, 0, 0, 0, 0, 0, 0, 0, 0];
+
+  /// Settings write: the official app selects the settings register by writing
+  /// the settings command byte to registerId before every write (see the
+  /// reverse engineering report, "Write Settings"). Skipping it only worked as
+  /// long as nothing else ever selected another register.
+  static const _settingsId = [209];
+
   Timer? _reconnectTimer;
   late BluetoothDevice _device;
   StreamSubscription<BluetoothConnectionState>? _deviceSub;
+  StreamSubscription<List<int>>? _notifySub;
+  final StreamController<double> _speedController =
+      StreamController<double>.broadcast();
+
+  /// Guards [connect] against overlapping connection attempts.
+  bool _connecting = false;
+
+  /// Serializes the post-connect work of [_becomeReady]: `_readyAgain` records
+  /// a (re)connect that arrived while a pass was still running, so it is re-run
+  /// afterwards instead of dropped.
+  bool _becomingReady = false;
+  bool _readyAgain = false;
+
+  /// Speed reported by the bike, in km/h. Broadcast: the control loop and the
+  /// UI can both listen.
+  Stream<double> get speedStream {
+    if (isFakeBike(deviceId)) {
+      return ref.read(fakeBikeStoreProvider).speedStream(deviceId);
+    }
+    return _speedController.stream;
+  }
 
   @override
   SDBluetoothConnectionState build(String deviceId) {
+    ref.onDispose(_dispose);
     if (isFakeBike(deviceId)) {
       // No real device: never touch _device, never start timers.
       log.d(SDLogger.bluetooth, 'Fake bike $deviceId is always connected');
       return SDBluetoothConnectionState.connected;
     }
-    state = SDBluetoothConnectionState.connecting;
-    ref.onDispose(_dispose);
     _device = BluetoothDevice.fromId(deviceId);
-    _deviceSub = _device.connectionState.listen((dstate) {
-      log.d(SDLogger.bluetooth, 'Connection state: $dstate');
-      if (dstate == BluetoothConnectionState.connected) {
-        state = SDBluetoothConnectionState.connected;
-      } else if (dstate == BluetoothConnectionState.disconnected) {
-        state = SDBluetoothConnectionState.disconnected;
+    _deviceSub = _device.connectionState.listen(_onDeviceConnectionState);
+    // Backstop only: disconnects reconnect immediately, see
+    // _onDeviceConnectionState. Retries anything that is not fully ready, not
+    // just disconnects, so a failed readiness pass cannot strand the bike.
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 10), (t) {
+      if (state != SDBluetoothConnectionState.connected) {
+        connect();
       }
     });
-    _reconnectTimer =
-        _reconnectTimer ??
-        Timer.periodic(const Duration(seconds: 10), (t) {
-          if (state == SDBluetoothConnectionState.disconnected) {
-            connect();
-          }
-        });
     connect();
     return SDBluetoothConnectionState.connecting;
+  }
+
+  void _onDeviceConnectionState(BluetoothConnectionState dstate) {
+    log.d(SDLogger.bluetooth, 'Connection state: $dstate');
+    if (!ref.mounted) return;
+    if (dstate == BluetoothConnectionState.connected) {
+      // Not "connected" for our purposes yet: services and notifications have
+      // to be set up first, otherwise writes are silently dropped.
+      _becomeReady();
+    } else if (dstate == BluetoothConnectionState.disconnected) {
+      _cancelNotifications();
+      state = SDBluetoothConnectionState.disconnected;
+      connect();
+    }
   }
 
   void _dispose() {
     log.d(SDLogger.bluetooth, "DISPOSE ConnectionHandler");
     _deviceSub?.cancel();
     _reconnectTimer?.cancel();
+    _cancelNotifications();
+    _speedController.close();
   }
 
   Future<void> connect() async {
@@ -87,42 +128,173 @@ class ConnectionHandler extends _$ConnectionHandler {
       state = SDBluetoothConnectionState.connected;
       return;
     }
-    log.d(SDLogger.bluetooth, "Connecting to ${_device.remoteId}");
-    if (_device.isConnected) {
-      if (!ref.mounted) return;
-      state = SDBluetoothConnectionState.connected;
+    if (_connecting) {
+      log.d(SDLogger.bluetooth, 'Already connecting to ${_device.remoteId}');
       return;
     }
-
-    state = SDBluetoothConnectionState.connecting;
-
+    _connecting = true;
     try {
+      log.d(SDLogger.bluetooth, "Connecting to ${_device.remoteId}");
+      if (_device.isConnected) {
+        await _becomeReady();
+        return;
+      }
+
+      state = SDBluetoothConnectionState.connecting;
       await _device.connect(mtu: null, license: License.free);
       if (!ref.mounted) return;
       await _device.connectionState
           .where((val) => val == BluetoothConnectionState.connected)
           .first;
       if (!ref.mounted) return;
+      log.i(SDLogger.bluetooth, 'Connected to ${_device.remoteId.str}');
+      await _becomeReady();
+    } catch (e) {
+      log.e(SDLogger.bluetooth, 'Error connecting', e);
+      if (!ref.mounted) return;
+      state = SDBluetoothConnectionState.disconnected;
+    } finally {
+      _connecting = false;
+    }
+  }
+
+  /// Runs the readiness pass for every (re)connect. A connect event arriving
+  /// while a pass is still running must not be dropped: the running pass may
+  /// belong to a connection that is already gone, so the pass is re-run once
+  /// for the newer connection instead.
+  Future<void> _becomeReady() async {
+    if (_becomingReady) {
+      _readyAgain = true;
+      return;
+    }
+    _becomingReady = true;
+    try {
+      do {
+        _readyAgain = false;
+        await _prepareConnection();
+      } while (_readyAgain && ref.mounted);
+    } finally {
+      _becomingReady = false;
+      _readyAgain = false;
+    }
+  }
+
+  /// Everything between a raw BLE connection and a usable one: MTU, service
+  /// discovery and the speed notifications. Only when all of it succeeds is the
+  /// bike reported as [SDBluetoothConnectionState.connected], so callers never
+  /// write into an undiscovered service, and a bike without a working
+  /// notification channel stays in a state the retry path picks up.
+  Future<void> _prepareConnection() async {
+    try {
       if (Platform.isAndroid) {
         await _device.requestMtu(512);
         if (!ref.mounted) return;
       }
-      log.i(SDLogger.bluetooth, 'Connected to ${_device.remoteId.str}');
-      state = SDBluetoothConnectionState.connected;
       await _device.discoverServices();
+      if (!ref.mounted) return;
+      await _subscribeNotifications();
+      if (!ref.mounted) return;
+      state = SDBluetoothConnectionState.connected;
+      await requestRideData();
     } catch (e) {
-      log.e(SDLogger.bluetooth, 'Error connecting', e);
+      log.e(SDLogger.bluetooth, 'Error preparing ${_device.remoteId}', e);
       if (!ref.mounted) return;
       state = SDBluetoothConnectionState.disconnected;
     }
   }
 
+  Future<void> _subscribeNotifications() async {
+    _cancelNotifications();
+    if (_device.servicesList.isEmpty) {
+      // Nothing was discovered at all: servicesList is cleared on disconnect,
+      // so the link almost certainly dropped around discovery. Failing keeps
+      // the bike out of the connected state, so the retry path re-arms it
+      // instead of leaving a connection whose writes are dropped too.
+      throw Exception('No services discovered on ${_device.remoteId}');
+    }
+    var char = _registerNotifier();
+    if (char == null) {
+      // Discovery worked, this bike simply has no register notifier: older
+      // firmware. Everything except the speed stream works, so connect anyway —
+      // refusing would strand a bike that was fine before speed existed. The
+      // CH dynamic mode cannot switch on such hardware; its watchdog keeps
+      // re-requesting ride data harmlessly.
+      log.w(
+        SDLogger.bluetooth,
+        'No register notifier characteristic on ${_device.remoteId}, '
+        'continuing without speed',
+      );
+      return;
+    }
+    await char.setNotifyValue(true);
+    _notifySub = char.onValueReceived.listen(_onNotification);
+    log.d(
+      SDLogger.bluetooth,
+      'Subscribed to notifications of ${_device.remoteId}',
+    );
+  }
+
+  void _cancelNotifications() {
+    _notifySub?.cancel();
+    _notifySub = null;
+  }
+
+  BluetoothCharacteristic? _registerNotifier() {
+    for (var service in _device.servicesList) {
+      if (service.uuid != UUID_METRICS_SERVICE) continue;
+      for (var char in service.characteristics) {
+        if (char.uuid == UUID_CHARACTERISTIC_REGISTER_NOTIFIER) return char;
+      }
+    }
+    return null;
+  }
+
+  void _onNotification(List<int> data) {
+    var speed = parseSpeedNotification(data);
+    if (speed == null) return;
+    if (_speedController.isClosed) return;
+    _speedController.add(speed);
+  }
+
+  /// Asks the bike to start streaming ride data (speed among it). Has to be
+  /// re-sent after every reconnect.
+  Future<void> requestRideData() async {
+    if (isFakeBike(deviceId)) return;
+    var bt = ref.read(bluetoothRepositoryProvider);
+    await bt.write(
+      _device,
+      data: _rideDataId,
+      serviceId: UUID_METRICS_SERVICE,
+      characteristicId: UUID_CHARACTERISTIC_REGISTER_ID,
+    );
+    await bt.write(
+      _device,
+      data: _rideDataRequest,
+      serviceId: UUID_METRICS_SERVICE,
+      characteristicId: UUID_CHARACTERISTIC_REGISTER,
+    );
+    log.d(SDLogger.bluetooth, 'Requested ride data from ${_device.remoteId}');
+  }
+
+  /// Writes a settings packet, selecting the settings register first.
   Future<void> write(List<int> data) async {
     if (isFakeBike(deviceId)) {
       ref.read(fakeBikeStoreProvider).write(deviceId, data);
       return;
     }
-    await ref.read(bluetoothRepositoryProvider).write(_device, data: data);
+    var bt = ref.read(bluetoothRepositoryProvider);
+    await bt.write(
+      _device,
+      data: _settingsId,
+      serviceId: UUID_METRICS_SERVICE,
+      characteristicId: UUID_CHARACTERISTIC_REGISTER_ID,
+    );
+    await bt.write(
+      _device,
+      data: data,
+      serviceId: UUID_METRICS_SERVICE,
+      characteristicId: UUID_CHARACTERISTIC_REGISTER,
+    );
   }
 
   Future<List<int>?> read() async {
@@ -143,6 +315,11 @@ class ConnectionHandler extends _$ConnectionHandler {
     );
   }
 }
+
+/// Speed of a single bike in km/h, so consumers can `ref.listen` to it.
+@riverpod
+Stream<double> bikeSpeed(Ref ref, String deviceId) =>
+    ref.watch(connectionHandlerProvider(deviceId).notifier).speedStream;
 
 @riverpod
 BluetoothRepository bluetoothRepository(Ref ref) => BluetoothRepository(ref);

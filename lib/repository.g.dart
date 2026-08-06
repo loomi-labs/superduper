@@ -212,7 +212,7 @@ final class ConnectionHandlerProvider
   }
 }
 
-String _$connectionHandlerHash() => r'df3670bfe777bcae0a9150ec466b9cb7af3603db';
+String _$connectionHandlerHash() => r'2f34af6317b042fb95926c88bbe1d67b15c64fd4';
 
 final class ConnectionHandlerFamily extends $Family
     with
@@ -264,6 +264,84 @@ abstract class _$ConnectionHandler
             >;
     return element.handleCreate(ref, () => build(_$args));
   }
+}
+
+/// Speed of a single bike in km/h, so consumers can `ref.listen` to it.
+
+@ProviderFor(bikeSpeed)
+final bikeSpeedProvider = BikeSpeedFamily._();
+
+/// Speed of a single bike in km/h, so consumers can `ref.listen` to it.
+
+final class BikeSpeedProvider
+    extends $FunctionalProvider<AsyncValue<double>, double, Stream<double>>
+    with $FutureModifier<double>, $StreamProvider<double> {
+  /// Speed of a single bike in km/h, so consumers can `ref.listen` to it.
+  BikeSpeedProvider._({
+    required BikeSpeedFamily super.from,
+    required String super.argument,
+  }) : super(
+         retry: null,
+         name: r'bikeSpeedProvider',
+         isAutoDispose: true,
+         dependencies: null,
+         $allTransitiveDependencies: null,
+       );
+
+  @override
+  String debugGetCreateSourceHash() => _$bikeSpeedHash();
+
+  @override
+  String toString() {
+    return r'bikeSpeedProvider'
+        ''
+        '($argument)';
+  }
+
+  @$internal
+  @override
+  $StreamProviderElement<double> $createElement($ProviderPointer pointer) =>
+      $StreamProviderElement(pointer);
+
+  @override
+  Stream<double> create(Ref ref) {
+    final argument = this.argument as String;
+    return bikeSpeed(ref, argument);
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is BikeSpeedProvider && other.argument == argument;
+  }
+
+  @override
+  int get hashCode {
+    return argument.hashCode;
+  }
+}
+
+String _$bikeSpeedHash() => r'f988d270d9f9a7b1feab1c1e179aa514d568a562';
+
+/// Speed of a single bike in km/h, so consumers can `ref.listen` to it.
+
+final class BikeSpeedFamily extends $Family
+    with $FunctionalFamilyOverride<Stream<double>, String> {
+  BikeSpeedFamily._()
+    : super(
+        retry: null,
+        name: r'bikeSpeedProvider',
+        dependencies: null,
+        $allTransitiveDependencies: null,
+        isAutoDispose: true,
+      );
+
+  /// Speed of a single bike in km/h, so consumers can `ref.listen` to it.
+
+  BikeSpeedProvider call(String deviceId) =>
+      BikeSpeedProvider._(argument: deviceId, from: this);
+
+  @override
+  String toString() => r'bikeSpeedProvider';
 }
 
 @ProviderFor(bluetoothRepository)

@@ -28,6 +28,8 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_driver:
+    sdk: flutter
   build_runner:
   flutter_launcher_icons: ^0.14.0
   flutter_lints: ^6.0.0

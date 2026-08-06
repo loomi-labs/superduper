@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show KeepAliveLink;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:superduper/db.dart';
@@ -20,23 +21,197 @@ part 'bike.g.dart';
 
 @riverpod
 class Bike extends _$Bike {
+  /// A speed stream quieter than this is assumed to have died: the bike stops
+  /// streaming ride data on its own, and after every reconnect.
+  static const _speedTimeout = Duration(seconds: 5);
+
+  /// Grace period after a (re)connect before the notifier touches the register.
+  /// The transport requests ride data itself as part of becoming ready, and that
+  /// request selects a different register than a state read does — see
+  /// [_withRegister].
+  static const _connectSettle = Duration(seconds: 1);
+
   Timer? _updateDebounce;
   Timer? _updateTimer;
   bool _writing = false;
+
+  /// The wire mode byte the app currently asserts on the bike while the CH
+  /// dynamic mode is active. The phone is the speed limiter there, so this is
+  /// the source of truth for which of [chWireLow]/[chWireHigh] the bike is
+  /// supposed to be in — the read-back cannot tell them apart.
+  int _dynamicWire = chWireLow;
+
+  /// When the last speed sample arrived, for the staleness watchdog.
+  DateTime? _lastSpeedAt;
+
+  /// Whether the one-off work of entering dynamic mode has been done for the
+  /// mode that is active now, so rebuilds and repeated writes do not re-run it
+  /// (and do not ask for the notification permission again).
+  bool _dynamicActive = false;
+
+  /// Holds this provider alive while the control loop has to keep running
+  /// without a mounted UI. Riverpod drops keepAlive links on every rebuild, so
+  /// this is re-acquired from [build].
+  KeepAliveLink? _keepAlive;
+
+  StreamSubscription<double>? _speedSub;
+
+  /// Set once the bike was deleted from the app. This notifier can outlive its
+  /// record (see [deleteStateData]), and a single late write or save would
+  /// bring the bike back.
+  bool _deleted = false;
+
+  /// Tail of the queue of register accesses this notifier has started. Reading
+  /// state and requesting ride data both mean "select a register, then use it",
+  /// on one shared characteristic: interleaved, a state read comes back with
+  /// ride data, which the poll would then write to the bike as settings.
+  Future<void> _registerQueue = Future<void>.value();
 
   @override
   BikeState build(String id) {
     ref.onDispose(() {
       _updateTimer?.cancel();
       _updateDebounce?.cancel();
+      _speedSub?.cancel();
+      _speedSub = null;
+      // The link itself is already released by riverpod here (both on rebuild
+      // and on dispose); only drop the stale handle.
+      _keepAlive = null;
     });
     _resetReadTimer();
-    var bike = ref.watch(bikesDBProvider.notifier).getBike(id);
-    ref.watch(connectionHandlerProvider(id));
-    if (bike != null) {
-      return bike;
+    var bike = ref.read(bikesDBProvider.notifier).getBike(id) ??
+        BikeState.defaultState(id);
+    // Deliberately listen instead of watch: a watch would invalidate this
+    // notifier on every connection state change, and with no UI listening
+    // riverpod skips the rebuild and disposes the provider instead — killing
+    // the speed limiter on the first BLE dropout after BikePage is popped. A
+    // listen subscription still keeps the transport alive.
+    ref.listen(connectionHandlerProvider(id), _onConnectionState);
+    // Speed is taken straight off the handler's broadcast stream rather than
+    // through bikeSpeedProvider (which the UI uses): riverpod pauses a
+    // StreamProvider as soon as nothing actively listens to it, and a provider
+    // that is only kept alive does not count. Going through it would silently
+    // stop the limiter the moment BikePage is popped.
+    _speedSub = ref
+        .read(connectionHandlerProvider(id).notifier)
+        .speedStream
+        .listen(_onSpeedSample);
+    _syncKeepAlive(bike);
+    if (bike.isDynamicMode) {
+      // Dynamic mode is usually already active on the first build: it is the
+      // default mode of a CH bike and it comes back from bikes.json that way.
+      // Its setup must not depend on a transition through writeStateData.
+      _enterDynamicMode();
     }
-    return BikeState.defaultState(id);
+    return bike;
+  }
+
+  void _onConnectionState(
+      SDBluetoothConnectionState? previous, SDBluetoothConnectionState next) {
+    if (previous == next || next != SDBluetoothConnectionState.connected) {
+      return;
+    }
+    if (_deleted) {
+      return;
+    }
+    // Re-take the speed stream from the handler as it is now: a subscription
+    // made before the dropout may belong to a controller that is gone, which
+    // would leave the dynamic mode blind for the rest of the session.
+    _speedSub?.cancel();
+    _speedSub = ref
+        .read(connectionHandlerProvider(id).notifier)
+        .speedStream
+        .listen(_onSpeedSample);
+    // The bike may have power-cycled into its own default mode, so re-assert
+    // ours. Every region needs this, not just the dynamic mode: without it a
+    // reconnected bike keeps whatever it came up with until the next poll, and
+    // that poll does not force, so a difference the read cannot see (a wire
+    // byte that maps back to the same mode) is never corrected at all. Done
+    // here rather than on BikePage, so it also happens while no UI is mounted.
+    unawaited(_reassertAfterReconnect());
+  }
+
+  bool get _isConnected =>
+      ref.read(connectionHandlerProvider(id)) ==
+      SDBluetoothConnectionState.connected;
+
+  /// Runs [action] after every register access this notifier has already
+  /// started, so a select-then-use sequence is never cut in half by another one.
+  Future<T> _withRegister<T>(Future<T> Function() action) {
+    final previous = _registerQueue;
+    final done = Completer<void>();
+    _registerQueue = done.future;
+    return previous.then((_) => action()).whenComplete(done.complete);
+  }
+
+  /// Asks the bike to (re)start streaming ride data, without overlapping a
+  /// state read.
+  Future<void> _requestRideData() => _withRegister(
+      () => ref.read(connectionHandlerProvider(id).notifier).requestRideData());
+
+  Future<void> _reassertAfterReconnect() async {
+    // Let the transport's own connect-time ride data request finish first: it
+    // leaves a different register selected than a read expects.
+    await Future<void>.delayed(_connectSettle);
+    if (!ref.mounted || !_isConnected) {
+      return;
+    }
+    log.d(SDLogger.bike, 'Reconnected, re-asserting state');
+    await updateStateDataNow(force: true);
+  }
+
+  /// Rides the CH dynamic mode: US Class 2 below the threshold, EPAC above it.
+  /// Writes only when the threshold is crossed, never per sample.
+  void _onSpeedSample(double speedKmh) {
+    _lastSpeedAt = DateTime.now();
+    if (!state.isDynamicMode) {
+      return;
+    }
+    // A sample can still be delivered right after a disconnect, so gate on the
+    // connection as it is now instead of trusting the sample.
+    if (!_isConnected) {
+      return;
+    }
+    var newWire = chDynamicWire(speedKmh, _dynamicWire);
+    if (newWire == _dynamicWire) {
+      return;
+    }
+    log.d(SDLogger.bike,
+        'Dynamic mode at $speedKmh km/h: wire $_dynamicWire -> $newWire');
+    _dynamicWire = newWire;
+    // Same settings, new wire byte: writeStateData takes it from _dynamicWire.
+    writeStateData(state);
+  }
+
+  /// The bike stops streaming ride data on its own; without speed samples the
+  /// dynamic mode is blind, so re-arm the stream when it dries up.
+  void _checkSpeedStream() {
+    if (!state.isDynamicMode || !_isConnected) {
+      return;
+    }
+    var last = _lastSpeedAt;
+    if (last != null && DateTime.now().difference(last) < _speedTimeout) {
+      return;
+    }
+    log.d(SDLogger.bike, 'No speed samples, requesting ride data again');
+    unawaited(_requestRideData());
+  }
+
+  /// Dynamic mode and Background Lock both need the control loop to keep
+  /// running when the UI is gone.
+  void _syncKeepAlive(BikeState bike) {
+    var needed = bike.modeLock || bike.isDynamicMode;
+    if (needed == (_keepAlive != null)) {
+      return;
+    }
+    if (needed) {
+      log.d(SDLogger.bike, 'Keeping bike $id alive without UI');
+      _keepAlive = ref.keepAlive();
+    } else {
+      log.d(SDLogger.bike, 'Releasing bike $id');
+      _keepAlive?.close();
+      _keepAlive = null;
+    }
   }
 
   void _resetReadTimer() {
@@ -44,6 +219,10 @@ class Bike extends _$Bike {
       _updateTimer?.cancel();
     }
     _updateTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      if (!ref.mounted) {
+        return;
+      }
+      _checkSpeedStream();
       if (_writing) {
         return;
       }
@@ -57,6 +236,9 @@ class Bike extends _$Bike {
   }
 
   Future<void> updateStateData({bool force = false}) async {
+    if (_deleted) {
+      return;
+    }
     var status = ref.read(connectionHandlerProvider(state.id));
     if (status != SDBluetoothConnectionState.connected) {
       return;
@@ -70,13 +252,28 @@ class Bike extends _$Bike {
   }
 
   Future<void> updateStateDataNow({bool force = false}) async {
-    var data =
-        await ref.read(connectionHandlerProvider(state.id).notifier).read();
-    if (data == null || data.isEmpty) {
+    if (_deleted) {
+      return;
+    }
+    var data = await _withRegister(
+        () => ref.read(connectionHandlerProvider(state.id).notifier).read());
+    if (data == null) {
+      return;
+    }
+    if (!isSettingsPacket(data)) {
+      // Not the settings register: a ride data frame from a read that raced a
+      // register selection, or a truncated answer. Using it would parse speed
+      // bytes as settings and write them back to the bike.
+      log.w(SDLogger.bike, 'Ignoring non settings read: $data');
       return;
     }
     var newState = state.updateFromData(data);
-    if (newState == state && !force) {
+    var healWire = _needsWireHeal(data);
+    if (healWire) {
+      log.d(SDLogger.bike,
+          'Bike is on wire ${data[5]}, re-asserting mode ${state.mode}');
+    }
+    if (newState == state && !force && !healWire) {
       return;
     }
     log.d(SDLogger.bike, 'State update from data: $data');
@@ -94,10 +291,58 @@ class Bike extends _$Bike {
     writeStateData(newState);
   }
 
+  /// True when the bike has to be pushed back onto the packet the app asserts,
+  /// even though the read-back reports no mode change.
+  ///
+  /// In the CH region the app owns the mode, because CH modes are the app's own
+  /// composition of the bike's profiles. Two cases the mode comparison in
+  /// [updateStateDataNow] cannot see:
+  ///
+  /// * a wire byte the CH read-back does not map ([chMapsToMode]). The state
+  ///   keeps the mode it had, so nothing looks wrong, while the bike is on
+  ///   whatever profile that byte selects (e.g. EU 35/45 km/h from wire 5/6).
+  ///   The bike itself has no mode button — an unmapped byte means another app
+  ///   (the official one writes any of 0-7) set it, or the controller powered
+  ///   up in a different mode. True for every CH mode, dynamic or not.
+  /// * dynamic mode sitting on the other of [chWireLow]/[chWireHigh] than the
+  ///   app asserted, i.e. a lost transition write: models.dart maps both bytes
+  ///   to dynamic mode.
+  ///
+  /// A mapped byte is otherwise the rider's: [chWireUsOffroad] and
+  /// [chWireOffroad] are followed to off-road, [chWireLow]/[chWireHigh] follow
+  /// the sticky dynamic-mode rules.
+  bool _needsWireHeal(List<int> data) {
+    if (state.region != BikeRegion.ch || data.length <= 5) {
+      return false;
+    }
+    var raw = data[5];
+    if (!chMapsToMode(raw)) {
+      return true;
+    }
+    if (state.isDynamicMode && (raw == chWireLow || raw == chWireHigh)) {
+      return raw != _dynamicWire;
+    }
+    return false;
+  }
+
   void writeStateData(BikeState newState, {saveToBike = true}) async {
+    if (_deleted) {
+      // The record is gone; saving would put it back into bikes.json.
+      return;
+    }
     _resetDebounce();
     if (state.id != newState.id) {
       throw Exception('Bike id mismatch');
+    }
+    var wasDynamic = state.isDynamicMode;
+    var entering = newState.isDynamicMode && !wasDynamic;
+    var leaving = wasDynamic && !newState.isDynamicMode;
+    // Dynamic mode always starts on the low (throttle) wire byte; the next
+    // speed sample moves it up if the rider is already fast.
+    var wire = entering ? chWireLow : _dynamicWire;
+    if (leaving && state.modeLockAuto) {
+      // Only the lock dynamic mode turned on is turned off again.
+      newState = newState.copyWith(modeLock: false, modeLockAuto: false);
     }
     var status = ref.read(connectionHandlerProvider(state.id));
     if (saveToBike) {
@@ -106,12 +351,93 @@ class Bike extends _$Bike {
       }
       _writing = true;
       final repo = ref.read(connectionHandlerProvider(state.id).notifier);
-      await repo.write(newState.toWriteData());
-      log.d(SDLogger.bike, 'Wrote data to bike: ${newState.toWriteData()}');
+      final data = newState.toWriteData(belowThreshold: wire == chWireLow);
+      try {
+        // Through the queue: a settings write is a select-then-write sequence
+        // on the same characteristic reads and ride data requests use.
+        await _withRegister(() => repo.write(data));
+      } catch (e) {
+        // A latched _writing would silence the poll for good, and with it the
+        // dynamic-mode self-heal that is meant to recover from exactly this.
+        _writing = false;
+        log.e(SDLogger.bike, 'Error writing to bike', e);
+        return;
+      }
+      // The bike may have been deleted while the write was in flight; saving
+      // now would bring it back.
+      if (!ref.mounted || _deleted) {
+        return;
+      }
+      log.d(SDLogger.bike, 'Wrote data to bike: $data');
     }
+    _dynamicWire = wire;
+    var lockChanged = state.modeLock != newState.modeLock;
     ref.read(bikesDBProvider.notifier).saveBike(newState);
     state = newState;
+    _syncKeepAlive(newState);
+    if (lockChanged) {
+      _syncBackgroundLock(newState.modeLock);
+    }
+    if (leaving) {
+      _dynamicActive = false;
+    }
+    if (entering) {
+      _enterDynamicMode();
+    }
     updateStateData();
+  }
+
+  /// One-off work for dynamic mode being active: ask for the speed stream it
+  /// lives on, and put the phone in a state where it keeps running. Idempotent —
+  /// both a transition and a fresh build land here.
+  void _enterDynamicMode() {
+    if (_dynamicActive) {
+      return;
+    }
+    _dynamicActive = true;
+    log.d(SDLogger.bike, 'Dynamic mode is active');
+    // Deferred: this also runs from build, where state cannot be read yet.
+    unawaited(Future<void>.microtask(() async {
+      if (!ref.mounted) {
+        return;
+      }
+      await _requestRideData();
+      if (!ref.mounted) {
+        return;
+      }
+      await _enableAutoBackgroundLock();
+    }));
+  }
+
+  /// Dynamic mode has to keep limiting the speed while the phone sits in a
+  /// pocket, which on Android needs the foreground service. A lock the rider
+  /// turned on themselves is left alone (and never auto-disabled).
+  Future<void> _enableAutoBackgroundLock() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    if (!ref.mounted || !state.isDynamicMode || state.modeLock) {
+      return;
+    }
+    await Permission.notification.request();
+    await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+    if (!ref.mounted || !state.isDynamicMode || state.modeLock) {
+      return;
+    }
+    log.i(SDLogger.bike, 'Dynamic mode: turning Background Lock on');
+    writeStateData(state.copyWith(modeLock: true, modeLockAuto: true),
+        saveToBike: false);
+  }
+
+  /// Keeps the foreground service in step with [BikeState.modeLock] even when
+  /// no BikePage is mounted to do it. Idempotent, so it can overlap with the
+  /// widget path.
+  void _syncBackgroundLock(bool enabled) {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    _initBackgroundLockService();
+    unawaited(_syncBackgroundLockService(enabled));
   }
 
   void toggleLight() async {
@@ -150,13 +476,33 @@ class Bike extends _$Bike {
 
   void toggleBackgroundLock() async {
     log.d(SDLogger.bike, 'Toggling background lock: ${!state.modeLock}');
-    writeStateData(state.copyWith(modeLock: !state.modeLock),
+    // The rider took over the lock, so dynamic mode stops managing it.
+    writeStateData(
+        state.copyWith(modeLock: !state.modeLock, modeLockAuto: false),
         saveToBike: false);
   }
 
+  /// Deletes the bike and tears this notifier down with it.
+  ///
+  /// Removing the record is not enough: dynamic mode and the Background Lock
+  /// hold the notifier alive without any UI, so its poll, its speed samples and
+  /// the foreground service would all keep running — and the first write would
+  /// call [BikesDB.saveBike], putting the deleted bike straight back into
+  /// bikes.json.
   void deleteStateData(BikeState bike) {
     log.i(SDLogger.bike, 'Deleting bike: ${bike.name}');
+    _deleted = true;
+    _updateTimer?.cancel();
+    _updateDebounce?.cancel();
+    _speedSub?.cancel();
+    _speedSub = null;
     ref.read(bikesDBProvider.notifier).deleteBike(bike);
+    if (bike.modeLock) {
+      _syncBackgroundLock(false);
+    }
+    // Last: with no UI listening this disposes the provider.
+    _keepAlive?.close();
+    _keepAlive = null;
   }
 }
 
@@ -271,16 +617,9 @@ class BikePageState extends ConsumerState<BikePage> {
   @override
   Widget build(BuildContext context) {
     var bike = ref.watch(bikeProvider(widget.bikeID));
-    var bikeControl = ref.watch(bikeProvider(widget.bikeID).notifier);
-    ref.listen(connectionHandlerProvider(bike.id), (previous, next) {
-      if (previous != SDBluetoothConnectionState.connected &&
-          next == SDBluetoothConnectionState.connected) {
-        // add a delay
-        Future.delayed(const Duration(milliseconds: 1000), () {
-          bikeControl.updateStateDataNow(force: true);
-        });
-      }
-    });
+    // No reconnect listener here: the Bike notifier re-asserts state for every
+    // bike on reconnect (_onConnectionState), whether or not this page is
+    // mounted.
     return ForegroundNotificationWrapper(
       enabled: bike.modeLock,
       child: Scaffold(
@@ -581,25 +920,50 @@ class EnhancedModeControlWidget extends ConsumerWidget {
     var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
     final bool isActiveMode = bike.viewMode != '1';
 
-    return Row(
+    return Column(
       children: [
-        Expanded(
-          child: DiscoverCard(
-            colorIndex: bike.color,
-            title: "Mode",
-            metric: "${bike.viewMode}/4",
-            titleIcon: Icons.electric_bike,
-            selected: isActiveMode,
-            onTap: () {
-              bikeControl.toggleMode();
-            },
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: DiscoverCard(
+                colorIndex: bike.color,
+                title: "Mode",
+                metric: "${bike.viewMode}/${bike.modeCount}",
+                titleIcon: Icons.electric_bike,
+                selected: isActiveMode,
+                onTap: () {
+                  bikeControl.toggleMode();
+                },
+              ),
+            ),
+            EnhancedLockWidget(
+              locked: bike.modeLocked,
+              onTap: bikeControl.toggleModeLocked,
+              activeColor: Colors.white,
+            )
+          ],
         ),
-        EnhancedLockWidget(
-          locked: bike.modeLocked,
-          onTap: bikeControl.toggleModeLocked,
-          activeColor: Colors.white,
-        )
+        // iOS has no background service, so the dynamic mode's speed switching
+        // only runs while the app is in the foreground.
+        if (Platform.isIOS && bike.isDynamicMode)
+          Padding(
+            padding: const EdgeInsets.only(top: 12.0, left: 8.0, right: 8.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Text(
+                    "Dynamic mode switching stops when the app is closed or the phone is locked. The bike stays in the profile written last.",
+                    style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }

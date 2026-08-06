@@ -15,7 +15,7 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$BikeState {
 
- String get id; int get mode; bool get modeLocked; bool get light; bool get lightLocked; int get assist; bool get assistLocked; String get name; BikeRegion? get region; bool get modeLock; int get color;
+ String get id; int get mode; bool get modeLocked; bool get light; bool get lightLocked; int get assist; bool get assistLocked; String get name; BikeRegion? get region; bool get modeLock; bool get modeLockAuto; int get color;
 /// Create a copy of BikeState
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -28,16 +28,16 @@ $BikeStateCopyWith<BikeState> get copyWith => _$BikeStateCopyWithImpl<BikeState>
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.mode, mode) || other.mode == mode)&&(identical(other.modeLocked, modeLocked) || other.modeLocked == modeLocked)&&(identical(other.light, light) || other.light == light)&&(identical(other.lightLocked, lightLocked) || other.lightLocked == lightLocked)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.assistLocked, assistLocked) || other.assistLocked == assistLocked)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.modeLock, modeLock) || other.modeLock == modeLock)&&(identical(other.color, color) || other.color == color));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.mode, mode) || other.mode == mode)&&(identical(other.modeLocked, modeLocked) || other.modeLocked == modeLocked)&&(identical(other.light, light) || other.light == light)&&(identical(other.lightLocked, lightLocked) || other.lightLocked == lightLocked)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.assistLocked, assistLocked) || other.assistLocked == assistLocked)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.modeLock, modeLock) || other.modeLock == modeLock)&&(identical(other.modeLockAuto, modeLockAuto) || other.modeLockAuto == modeLockAuto)&&(identical(other.color, color) || other.color == color));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,id,mode,modeLocked,light,lightLocked,assist,assistLocked,name,region,modeLock,color);
+int get hashCode => Object.hash(runtimeType,id,mode,modeLocked,light,lightLocked,assist,assistLocked,name,region,modeLock,modeLockAuto,color);
 
 @override
 String toString() {
-  return 'BikeState(id: $id, mode: $mode, modeLocked: $modeLocked, light: $light, lightLocked: $lightLocked, assist: $assist, assistLocked: $assistLocked, name: $name, region: $region, modeLock: $modeLock, color: $color)';
+  return 'BikeState(id: $id, mode: $mode, modeLocked: $modeLocked, light: $light, lightLocked: $lightLocked, assist: $assist, assistLocked: $assistLocked, name: $name, region: $region, modeLock: $modeLock, modeLockAuto: $modeLockAuto, color: $color)';
 }
 
 
@@ -48,7 +48,7 @@ abstract mixin class $BikeStateCopyWith<$Res>  {
   factory $BikeStateCopyWith(BikeState value, $Res Function(BikeState) _then) = _$BikeStateCopyWithImpl;
 @useResult
 $Res call({
- String id, int mode, bool modeLocked, bool light, bool lightLocked, int assist, bool assistLocked, String name, BikeRegion? region, bool modeLock, int color
+ String id, int mode, bool modeLocked, bool light, bool lightLocked, int assist, bool assistLocked, String name, BikeRegion? region, bool modeLock, bool modeLockAuto, int color
 });
 
 
@@ -65,7 +65,7 @@ class _$BikeStateCopyWithImpl<$Res>
 
 /// Create a copy of BikeState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? mode = null,Object? modeLocked = null,Object? light = null,Object? lightLocked = null,Object? assist = null,Object? assistLocked = null,Object? name = null,Object? region = freezed,Object? modeLock = null,Object? color = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? mode = null,Object? modeLocked = null,Object? light = null,Object? lightLocked = null,Object? assist = null,Object? assistLocked = null,Object? name = null,Object? region = freezed,Object? modeLock = null,Object? modeLockAuto = null,Object? color = null,}) {
   return _then(_self.copyWith(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as String,mode: null == mode ? _self.mode : mode // ignore: cast_nullable_to_non_nullable
@@ -77,6 +77,7 @@ as int,assistLocked: null == assistLocked ? _self.assistLocked : assistLocked //
 as bool,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
 as String,region: freezed == region ? _self.region : region // ignore: cast_nullable_to_non_nullable
 as BikeRegion?,modeLock: null == modeLock ? _self.modeLock : modeLock // ignore: cast_nullable_to_non_nullable
+as bool,modeLockAuto: null == modeLockAuto ? _self.modeLockAuto : modeLockAuto // ignore: cast_nullable_to_non_nullable
 as bool,color: null == color ? _self.color : color // ignore: cast_nullable_to_non_nullable
 as int,
   ));
@@ -163,10 +164,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id,  int mode,  bool modeLocked,  bool light,  bool lightLocked,  int assist,  bool assistLocked,  String name,  BikeRegion? region,  bool modeLock,  int color)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id,  int mode,  bool modeLocked,  bool light,  bool lightLocked,  int assist,  bool assistLocked,  String name,  BikeRegion? region,  bool modeLock,  bool modeLockAuto,  int color)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _BikeState() when $default != null:
-return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLocked,_that.assist,_that.assistLocked,_that.name,_that.region,_that.modeLock,_that.color);case _:
+return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLocked,_that.assist,_that.assistLocked,_that.name,_that.region,_that.modeLock,_that.modeLockAuto,_that.color);case _:
   return orElse();
 
 }
@@ -184,10 +185,10 @@ return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLock
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id,  int mode,  bool modeLocked,  bool light,  bool lightLocked,  int assist,  bool assistLocked,  String name,  BikeRegion? region,  bool modeLock,  int color)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id,  int mode,  bool modeLocked,  bool light,  bool lightLocked,  int assist,  bool assistLocked,  String name,  BikeRegion? region,  bool modeLock,  bool modeLockAuto,  int color)  $default,) {final _that = this;
 switch (_that) {
 case _BikeState():
-return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLocked,_that.assist,_that.assistLocked,_that.name,_that.region,_that.modeLock,_that.color);case _:
+return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLocked,_that.assist,_that.assistLocked,_that.name,_that.region,_that.modeLock,_that.modeLockAuto,_that.color);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -204,10 +205,10 @@ return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLock
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id,  int mode,  bool modeLocked,  bool light,  bool lightLocked,  int assist,  bool assistLocked,  String name,  BikeRegion? region,  bool modeLock,  int color)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id,  int mode,  bool modeLocked,  bool light,  bool lightLocked,  int assist,  bool assistLocked,  String name,  BikeRegion? region,  bool modeLock,  bool modeLockAuto,  int color)?  $default,) {final _that = this;
 switch (_that) {
 case _BikeState() when $default != null:
-return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLocked,_that.assist,_that.assistLocked,_that.name,_that.region,_that.modeLock,_that.color);case _:
+return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLocked,_that.assist,_that.assistLocked,_that.name,_that.region,_that.modeLock,_that.modeLockAuto,_that.color);case _:
   return null;
 
 }
@@ -219,7 +220,7 @@ return $default(_that.id,_that.mode,_that.modeLocked,_that.light,_that.lightLock
 @JsonSerializable()
 
 class _BikeState extends BikeState {
-  const _BikeState({required this.id, required this.mode, this.modeLocked = false, required this.light, this.lightLocked = false, required this.assist, this.assistLocked = false, required this.name, this.region, this.modeLock = false, this.color = 0}): assert(mode <= 3),assert(mode >= 0),assert(assist >= 0),assert(assist <= 4),assert(color >= 0),super._();
+  const _BikeState({required this.id, required this.mode, this.modeLocked = false, required this.light, this.lightLocked = false, required this.assist, this.assistLocked = false, required this.name, this.region, this.modeLock = false, this.modeLockAuto = false, this.color = 0}): assert(mode <= 3),assert(mode >= 0),assert(assist >= 0),assert(assist <= 4),assert(color >= 0),super._();
   factory _BikeState.fromJson(Map<String, dynamic> json) => _$BikeStateFromJson(json);
 
 @override final  String id;
@@ -232,6 +233,7 @@ class _BikeState extends BikeState {
 @override final  String name;
 @override final  BikeRegion? region;
 @override@JsonKey() final  bool modeLock;
+@override@JsonKey() final  bool modeLockAuto;
 @override@JsonKey() final  int color;
 
 /// Create a copy of BikeState
@@ -247,16 +249,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.mode, mode) || other.mode == mode)&&(identical(other.modeLocked, modeLocked) || other.modeLocked == modeLocked)&&(identical(other.light, light) || other.light == light)&&(identical(other.lightLocked, lightLocked) || other.lightLocked == lightLocked)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.assistLocked, assistLocked) || other.assistLocked == assistLocked)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.modeLock, modeLock) || other.modeLock == modeLock)&&(identical(other.color, color) || other.color == color));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.mode, mode) || other.mode == mode)&&(identical(other.modeLocked, modeLocked) || other.modeLocked == modeLocked)&&(identical(other.light, light) || other.light == light)&&(identical(other.lightLocked, lightLocked) || other.lightLocked == lightLocked)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.assistLocked, assistLocked) || other.assistLocked == assistLocked)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.modeLock, modeLock) || other.modeLock == modeLock)&&(identical(other.modeLockAuto, modeLockAuto) || other.modeLockAuto == modeLockAuto)&&(identical(other.color, color) || other.color == color));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,id,mode,modeLocked,light,lightLocked,assist,assistLocked,name,region,modeLock,color);
+int get hashCode => Object.hash(runtimeType,id,mode,modeLocked,light,lightLocked,assist,assistLocked,name,region,modeLock,modeLockAuto,color);
 
 @override
 String toString() {
-  return 'BikeState(id: $id, mode: $mode, modeLocked: $modeLocked, light: $light, lightLocked: $lightLocked, assist: $assist, assistLocked: $assistLocked, name: $name, region: $region, modeLock: $modeLock, color: $color)';
+  return 'BikeState(id: $id, mode: $mode, modeLocked: $modeLocked, light: $light, lightLocked: $lightLocked, assist: $assist, assistLocked: $assistLocked, name: $name, region: $region, modeLock: $modeLock, modeLockAuto: $modeLockAuto, color: $color)';
 }
 
 
@@ -267,7 +269,7 @@ abstract mixin class _$BikeStateCopyWith<$Res> implements $BikeStateCopyWith<$Re
   factory _$BikeStateCopyWith(_BikeState value, $Res Function(_BikeState) _then) = __$BikeStateCopyWithImpl;
 @override @useResult
 $Res call({
- String id, int mode, bool modeLocked, bool light, bool lightLocked, int assist, bool assistLocked, String name, BikeRegion? region, bool modeLock, int color
+ String id, int mode, bool modeLocked, bool light, bool lightLocked, int assist, bool assistLocked, String name, BikeRegion? region, bool modeLock, bool modeLockAuto, int color
 });
 
 
@@ -284,7 +286,7 @@ class __$BikeStateCopyWithImpl<$Res>
 
 /// Create a copy of BikeState
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? mode = null,Object? modeLocked = null,Object? light = null,Object? lightLocked = null,Object? assist = null,Object? assistLocked = null,Object? name = null,Object? region = freezed,Object? modeLock = null,Object? color = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? mode = null,Object? modeLocked = null,Object? light = null,Object? lightLocked = null,Object? assist = null,Object? assistLocked = null,Object? name = null,Object? region = freezed,Object? modeLock = null,Object? modeLockAuto = null,Object? color = null,}) {
   return _then(_BikeState(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as String,mode: null == mode ? _self.mode : mode // ignore: cast_nullable_to_non_nullable
@@ -296,6 +298,7 @@ as int,assistLocked: null == assistLocked ? _self.assistLocked : assistLocked //
 as bool,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
 as String,region: freezed == region ? _self.region : region // ignore: cast_nullable_to_non_nullable
 as BikeRegion?,modeLock: null == modeLock ? _self.modeLock : modeLock // ignore: cast_nullable_to_non_nullable
+as bool,modeLockAuto: null == modeLockAuto ? _self.modeLockAuto : modeLockAuto // ignore: cast_nullable_to_non_nullable
 as bool,color: null == color ? _self.color : color // ignore: cast_nullable_to_non_nullable
 as int,
   ));
