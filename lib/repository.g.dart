@@ -247,7 +247,7 @@ abstract class _$ConnectionHandler
   SDBluetoothConnectionState build(String deviceId);
   @$mustCallSuper
   @override
-  void runBuild() {
+  WhenComplete runBuild() {
     final ref =
         this.ref
             as $Ref<SDBluetoothConnectionState, SDBluetoothConnectionState>;
@@ -262,7 +262,7 @@ abstract class _$ConnectionHandler
               Object?,
               Object?
             >;
-    element.handleCreate(ref, () => build(_$args));
+    return element.handleCreate(ref, () => build(_$args));
   }
 }
 

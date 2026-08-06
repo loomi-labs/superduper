@@ -36,7 +36,7 @@ Future<Map<Permission, PermissionStatus>> getPermissions() async {
       Permission.bluetoothConnect,
       Permission.bluetoothScan,
     ]);
-  } else if (Platform.isMacOS) {
+  } else if (Platform.isMacOS || Platform.isLinux) {
     return Future(() => const {});
   }
   return perms.request();

@@ -57,7 +57,7 @@ abstract class _$BikesDB extends $Notifier<List<BikeState>> {
   List<BikeState> build();
   @$mustCallSuper
   @override
-  void runBuild() {
+  WhenComplete runBuild() {
     final ref = this.ref as $Ref<List<BikeState>, List<BikeState>>;
     final element =
         ref.element
@@ -67,7 +67,7 @@ abstract class _$BikesDB extends $Notifier<List<BikeState>> {
               Object?,
               Object?
             >;
-    element.handleCreate(ref, build);
+    return element.handleCreate(ref, build);
   }
 }
 
@@ -109,7 +109,7 @@ abstract class _$SettingsDB extends $Notifier<SettingsModel> {
   SettingsModel build();
   @$mustCallSuper
   @override
-  void runBuild() {
+  WhenComplete runBuild() {
     final ref = this.ref as $Ref<SettingsModel, SettingsModel>;
     final element =
         ref.element
@@ -119,6 +119,6 @@ abstract class _$SettingsDB extends $Notifier<SettingsModel> {
               Object?,
               Object?
             >;
-    element.handleCreate(ref, build);
+    return element.handleCreate(ref, build);
   }
 }

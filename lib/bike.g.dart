@@ -83,7 +83,7 @@ abstract class _$Bike extends $Notifier<BikeState> {
   BikeState build(String id);
   @$mustCallSuper
   @override
-  void runBuild() {
+  WhenComplete runBuild() {
     final ref = this.ref as $Ref<BikeState, BikeState>;
     final element =
         ref.element
@@ -93,6 +93,6 @@ abstract class _$Bike extends $Notifier<BikeState> {
               Object?,
               Object?
             >;
-    element.handleCreate(ref, () => build(_$args));
+    return element.handleCreate(ref, () => build(_$args));
   }
 }
