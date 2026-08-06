@@ -79,12 +79,16 @@ Future<List<BikeState>> _readBikes() async {
 class BikesDB extends _$BikesDB {
   @override
   List<BikeState> build() {
-    _readBikes().then((bikes) => state = bikes);
+    _readBikes().then((bikes) {
+      if (ref.mounted) state = bikes;
+    });
     return [];
   }
 
   void saveBike(BikeState bike) {
-    final bikes = state;
+    // Assign a new list: riverpod compares by identity, so mutating the
+    // current list in place would not notify watchers.
+    final bikes = [...state];
     final index = bikes.indexWhere((element) => element.id == bike.id);
     if (index == -1) {
       bikes.add(bike);
@@ -98,7 +102,7 @@ class BikesDB extends _$BikesDB {
   }
 
   void deleteBike(BikeState bike) {
-    state.removeWhere((element) => element.id == bike.id);
+    state = [...state]..removeWhere((element) => element.id == bike.id);
     log.i(SDLogger.db, 'Deleted bike: ${bike.name}');
     _writeBikes(state);
   }
@@ -117,7 +121,9 @@ class BikesDB extends _$BikesDB {
 class SettingsDB extends _$SettingsDB {
   @override
   SettingsModel build() {
-    _readSettings().then((settings) => state = settings);
+    _readSettings().then((settings) {
+      if (ref.mounted) state = settings;
+    });
     return const SettingsModel();
   }
 

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:superduper/fake_bike.dart';
 import 'package:superduper/services.dart';
 import 'package:superduper/utils/logger.dart'; // Import the logger
 
@@ -48,6 +49,11 @@ class ConnectionHandler extends _$ConnectionHandler {
 
   @override
   SDBluetoothConnectionState build(String deviceId) {
+    if (isFakeBike(deviceId)) {
+      // No real device: never touch _device, never start timers.
+      log.d(SDLogger.bluetooth, 'Fake bike $deviceId is always connected');
+      return SDBluetoothConnectionState.connected;
+    }
     state = SDBluetoothConnectionState.connecting;
     ref.onDispose(_dispose);
     _device = BluetoothDevice.fromId(deviceId);
@@ -77,6 +83,10 @@ class ConnectionHandler extends _$ConnectionHandler {
   }
 
   Future<void> connect() async {
+    if (isFakeBike(deviceId)) {
+      state = SDBluetoothConnectionState.connected;
+      return;
+    }
     log.d(SDLogger.bluetooth, "Connecting to ${_device.remoteId}");
     if (_device.isConnected) {
       if (!ref.mounted) return;
@@ -108,10 +118,17 @@ class ConnectionHandler extends _$ConnectionHandler {
   }
 
   Future<void> write(List<int> data) async {
+    if (isFakeBike(deviceId)) {
+      ref.read(fakeBikeStoreProvider).write(deviceId, data);
+      return;
+    }
     await ref.read(bluetoothRepositoryProvider).write(_device, data: data);
   }
 
   Future<List<int>?> read() async {
+    if (isFakeBike(deviceId)) {
+      return ref.read(fakeBikeStoreProvider).read(deviceId);
+    }
     var bt = ref.read(bluetoothRepositoryProvider);
     await bt.write(
       _device,

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:superduper/bike.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/debug.dart';
+import 'package:superduper/fake_bike.dart';
 import 'package:superduper/repository.dart';
 import 'package:superduper/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -54,8 +55,9 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
     AsyncValue<List<BluetoothDevice>> connected,
     String bikeID,
   ) =>
-      connected.value?.any((element) => element.remoteId.str == bikeID) ??
-      false;
+      isFakeBike(bikeID) ||
+      (connected.value?.any((element) => element.remoteId.str == bikeID) ??
+          false);
 
   @override
   Widget build(BuildContext context) {
