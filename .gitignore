@@ -52,3 +52,6 @@ app.*.map.json
 bugreport*
 .aider*
 .env
+
+# Local scratch area (APKs, protocol notes) — never committed
+/scratch/
