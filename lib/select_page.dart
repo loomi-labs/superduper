@@ -8,7 +8,9 @@ import 'package:superduper/bike.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/debug.dart';
 import 'package:superduper/fake_bike.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:superduper/repository.dart';
+import 'package:superduper/utils/logger.dart';
 import 'package:superduper/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -379,6 +381,9 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
                       ),
                     ),
 
+              // Share ride logs (also available in release builds)
+              const SliverToBoxAdapter(child: ShareLogsButton()),
+
               // Debug Button in Debug Mode
               if (kDebugMode)
                 SliverToBoxAdapter(
@@ -415,6 +420,68 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Shares the ride log file(s) so they can be pulled off the phone, where the
+/// app documents directory is otherwise private. Visible in release builds too.
+class ShareLogsButton extends StatelessWidget {
+  const ShareLogsButton({super.key});
+
+  Future<void> _shareLogs(BuildContext context) async {
+    // Grab the messenger and the button's position before awaiting: the
+    // context may be gone afterwards. The origin anchors the iPad popover.
+    final messenger = ScaffoldMessenger.of(context);
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box == null || !box.hasSize
+        ? null
+        : box.localToGlobal(Offset.zero) & box.size;
+    try {
+      // Make sure buffered lines are on disk before handing the files over.
+      await log.flushFileSink();
+      final files = log.logFiles();
+      if (files.isEmpty) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('No log file yet.')),
+        );
+        return;
+      }
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [
+            for (final file in files) XFile(file.path, mimeType: 'text/plain'),
+          ],
+          title: 'SuperDuper logs',
+          subject: 'SuperDuper logs',
+          sharePositionOrigin: origin,
+        ),
+      );
+    } catch (e) {
+      log.e(SDLogger.ui, 'Failed to share logs', e);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not share logs: $e')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 30.0, left: 20.0, right: 20.0),
+      child: ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.grey[800],
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        onPressed: () => _shareLogs(context),
+        icon: const Icon(Icons.ios_share, size: 16),
+        label: const Text('SHARE LOGS'),
       ),
     );
   }

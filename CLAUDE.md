@@ -38,7 +38,7 @@ All source lives flat in `lib/`. State management is Riverpod (annotation/codege
 - **`models.dart`** — `BikeState` (freezed): encodes/decodes the BLE packet. Reading state means writing `[3, 0]` to the register-ID characteristic then reading the register characteristic; writes send `[0, 209, light, assist, mode, 0...]`. EU-region bikes offset mode values by +4 (`BikeRegion` handles this).
 - **`services.dart`** — BLE service/characteristic UUIDs for the bike's GATT profile.
 - **`db.dart`** — persistence: plain JSON files (`bikes.json`, `settings.json`) in the app documents directory, wrapped in `keepAlive` riverpod notifiers (`BikesDB`, `SettingsDB`).
-- **`utils/logger.dart`** — global `log` (SDLogger). Log with a tag constant: `log.d(SDLogger.bike, '...')`; tags are `bluetooth`, `bike`, `ui`, `db`, `general`. Debug-level logs are stripped in release.
+- **`utils/logger.dart`** — global `log` (SDLogger). Log with a tag constant: `log.d(SDLogger.bike, '...')`; tags are `bluetooth`, `bike`, `ui`, `db`, `general`. Debug-level logs are stripped from the *console* in release, but a file sink (attached in `main()` via `log.attachFileSink()`, rotating `logs/superduper.log` in the documents dir, ~4 MB cap) records debug level in release builds too; `select_page.dart`'s SHARE LOGS button exports it via share_plus.
 - **`debug.dart`** — debug page that fabricates bikes with random MAC addresses for UI work without hardware.
 
 `docs/` is a separate Hugo site (`make docs`), unrelated to the app code.

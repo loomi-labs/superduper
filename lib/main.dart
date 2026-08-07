@@ -13,6 +13,10 @@ import 'package:superduper/utils/logger.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+  // Start the ride log as early as possible: it records debug-level lines
+  // (including BLE traffic) to a rotating file even in release builds. Never
+  // throws — file logging just stays off if the directory is unavailable.
+  await log.attachFileSink();
   runApp(const ProviderScope(child: SuperDuper()));
 }
 

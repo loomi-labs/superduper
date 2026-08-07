@@ -151,6 +151,10 @@ So far, all bike models have worked. Open a ticket if your model is having issue
 
 Superduper can only add automation around what the official app already does. It cannot, for instance, program the controller. This is the job of the firmware, software that runs on the bike itself.
 
+### How do I get the logs off my phone?
+
+Superduper keeps a ride log on the device: a rotating text file at `logs/superduper.log` in the app's private documents directory. The budget is about 32 MB — enough for several full rides — and only once it is exceeded does the oldest file get deleted. Every line is timestamped, so individual rides are easy to tell apart. It records detailed Bluetooth traffic — connects, register reads, mode/light/assist writes, speed notifications — in normal store builds too, which is what makes it useful when something goes wrong on an actual ride. Nothing is ever uploaded anywhere. To send it along with a bug report, tap **SHARE LOGS** at the bottom of the bike select screen and pick an app to share the file(s) with.
+
 ### I'm having another issue or have a feature request
 
 I'm sorry! Please start by making sure you have the newest app from the app store. After that, please submit the issue to https://github.com/blopker/superduper/issues. It helps to have a way I can reproduce the issue, with screenshots or video. Alternatively, you may have luck either clearing all the app's data or reinstalling it.
