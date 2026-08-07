@@ -5,18 +5,52 @@ import 'package:form_builder_validators/form_builder_validators.dart';
 import 'package:superduper/bike.dart';
 import 'package:superduper/colors.dart';
 
-/// Modes are stored as a 0-based index and regions do not all have the same
-/// number of them (CH has 3, the others 4). Changing region can therefore leave
-/// a bike on an index the new region does not have; fall back to the region's
-/// *last* mode rather than its first. Both ends of the range are off-road and
-/// write the same wire byte ([chWireOffroad]), so the rider keeps the mode they
-/// were actually in — whereas index 0 on a CH bike is the dynamic mode, which
-/// would hand the speed limiter and the Background Lock to a settings save.
-/// A bike without a region behaves like the 4-mode ones, matching
-/// [BikeState.modeCount].
-int clampModeToRegion(int mode, BikeRegion? region) {
-  final modeCount = region?.modeCount ?? BikeRegion.us.modeCount;
-  return mode < modeCount ? mode : modeCount - 1;
+/// Applies the Edit sheet's fields to [live] — the bike as the app has it *at
+/// Save time*, not the snapshot the sheet was opened on. The sheet can sit open
+/// for minutes while the poll brings in light, assist or a guessed region from
+/// the bike; copying the form onto the snapshot would write all of that back.
+///
+/// The selection is the sheet's own responsibility only in as far as its
+/// edits can invalidate it: a region change moves the mode banks, and a
+/// deleted custom mode leaves the id dangling. Both go through the engine —
+/// [remapModeForRegion] and [BikeState.fallbackMode] via
+/// [BikeState.withSelectedMode], so the legacy projection stays in sync — and
+/// never through a raw `copyWith(modeId:)`.
+BikeState applySheetEdits(
+  BikeState live, {
+  required String name,
+  required int color,
+  required BikeRegion? region,
+  required List<CustomMode> customModes,
+  required bool autoReconnect,
+}) {
+  var next = live.copyWith(
+      name: name,
+      color: color,
+      // A copy: the caller's list is the sheet's draft, which it goes on
+      // mutating after Save if the user reopens the editor.
+      customModes: List<CustomMode>.of(customModes),
+      autoReconnect: autoReconnect);
+  if (region != live.region) {
+    // Applies the region itself and makes the selection valid for it: a custom
+    // mode is kept, a native one moves to the same place in the new bank. Only
+    // on a change — entering CH re-seeds the seeded mode, which a CH rider who
+    // deleted it in favour of their own modes has not asked for.
+    next = remapModeForRegion(next, region);
+  }
+  if (next.region == BikeRegion.ch && next.customModes.isEmpty) {
+    // CH has no limited native mode, so its fallback is a custom one, and an
+    // empty list would resolve to a mode that is in no selectable list at all.
+    // The same guard the notifier's deleteCustomMode applies.
+    next = next.copyWith(customModes: const [seededChMode]);
+  }
+  if (!next.selectableModes.any((m) => m.id == next.modeId)) {
+    // The mode the bike was riding was deleted in the sheet (or remapped out of
+    // its bank): land on the region's fallback rather than leave a dangling id
+    // that only resolves in memory.
+    next = next.withSelectedMode(next.fallbackMode.id);
+  }
+  return next;
 }
 
 void show(BuildContext context, BikeState bike) {
@@ -141,12 +175,210 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
   final _formKey = GlobalKey<FormBuilderState>();
   late int _selectedColorIndex;
 
+  /// Mirrors the checkbox so the note below it can react without reaching into
+  /// the form's state.
+  late bool _autoReconnect;
+
+  /// The custom modes as the sheet has them. Adding, editing and deleting a
+  /// mode only ever touch this list; it reaches the bike when Save does. The
+  /// sheet is also the *create* form (debug.dart opens it on a bike that was
+  /// never persisted), so nothing here may write through on its own.
+  late List<CustomMode> _draftModes;
+
   var genderOptions = ['Male', 'Female', 'Other'];
 
   @override
   void initState() {
     super.initState();
     _selectedColorIndex = widget.bike.color;
+    _autoReconnect = widget.bike.autoReconnect;
+    _draftModes = List<CustomMode>.of(widget.bike.customModes);
+  }
+
+  /// The bike as the sheet would save it, for the questions the notes and the
+  /// delete dialog ask: which mode is selected, and does it switch by speed.
+  /// The region comes from the dropdown rather than from the snapshot — the
+  /// rider may have changed it a moment ago, and it decides both answers.
+  BikeState get _draftBike {
+    final region = _formKey.currentState?.value['region'] as BikeRegion? ??
+        widget.bike.region;
+    return widget.bike.copyWith(region: region, customModes: _draftModes);
+  }
+
+  Future<void> _addCustomMode() async {
+    final mode = CustomMode(
+        id: newCustomModeId(),
+        name: 'Custom',
+        limitKmh: customLimitMin,
+        throttle: false);
+    setState(() {
+      _draftModes = [..._draftModes, mode];
+    });
+    final edited = await _showCustomModeEditor(context, mode);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      // A cancelled editor leaves no half-made mode behind.
+      _draftModes = edited == null
+          ? _draftModes.where((m) => m.id != mode.id).toList()
+          : [for (final m in _draftModes) m.id == edited.id ? edited : m];
+    });
+  }
+
+  Future<void> _editCustomMode(CustomMode mode) async {
+    final edited = await _showCustomModeEditor(context, mode);
+    if (edited == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _draftModes = [
+        for (final m in _draftModes) m.id == edited.id ? edited : m
+      ];
+    });
+  }
+
+  /// The bike as Save would leave it, with [customModes] standing in for the
+  /// draft list. Run through [applySheetEdits] — the very function the Save
+  /// button calls — rather than assembled here: Save resolves a selection the
+  /// region dropdown invalidated in the OLD region first and remaps the result,
+  /// and a second, parallel computation of "what happens next" disagreed with
+  /// it every time the dropdown had been touched.
+  ///
+  /// [widget.bike], not `ref.read(bikeProvider(...))`: reading the provider
+  /// creates it, and the create sheet is opened on a bike nothing has persisted
+  /// — merely looking at a delete dialog would leave that bike behind. Only
+  /// the poll's own fields (light, assist, a guessed region) can differ, and
+  /// none of them names a mode.
+  BikeState _savedBike(List<CustomMode> customModes) {
+    final values = _formKey.currentState?.value ?? const <String, Object?>{};
+    return applySheetEdits(
+      widget.bike,
+      name: values['name'] as String? ?? widget.bike.name,
+      color: _selectedColorIndex,
+      region: values['region'] as BikeRegion? ?? widget.bike.region,
+      customModes: customModes,
+      autoReconnect:
+          values['autoReconnect'] as bool? ?? widget.bike.autoReconnect,
+    );
+  }
+
+  /// Deletes a mode from the draft, after saying what that costs.
+  ///
+  /// Two things need explaining: the bike moves to another mode when the
+  /// selected one goes, and a CH bike always keeps one custom mode — its
+  /// fallback is a custom mode, so deleting the last one re-seeds the built-in
+  /// 25 km/h one instead of leaving the list empty. Both questions are put to
+  /// [_savedBike], so the dialog can only ever name what Save will do.
+  Future<void> _deleteCustomMode(CustomMode mode) async {
+    final remaining = _draftModes.where((m) => m.id != mode.id).toList();
+    final before = _savedBike(_draftModes);
+    final reseeds = before.region == BikeRegion.ch && remaining.isEmpty;
+    if (reseeds && mode.id == seededChModeId) {
+      // Deleting it would put the very same mode back: say so and keep it.
+      await _showSeededModeDialog(mode);
+      return;
+    }
+    // Which mode the bike is on is Save's answer too: a region change can move
+    // the selection off this mode before the delete is even considered.
+    final selected = before.selectedMode.id == mode.id;
+    if (selected || reseeds) {
+      final after = _savedBike(remaining);
+      // Selected: the mode the bike ends up on. Otherwise this is the last CH
+      // custom, and what takes its place is the mode the re-seed put in the
+      // list — the selection has not moved.
+      final landing =
+          selected ? after.selectedMode.name : after.customModes.first.name;
+      final confirmed =
+          await _showDeleteModeDialog(mode, landing, selected: selected);
+      if (!(confirmed ?? false) || !mounted) {
+        return;
+      }
+    }
+    setState(() {
+      _draftModes = remaining;
+    });
+  }
+
+  Future<void> _showSeededModeDialog(CustomMode mode) {
+    return showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text('Built-in Mode'),
+          content: SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                Text(
+                  'This is the built-in ${mode.name} mode — deleting it just '
+                  'recreates it.',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                Text(
+                  'Switzerland has no limited firmware mode, so the bike '
+                  'always keeps one custom mode to fall back on. Add another '
+                  'mode first if you want this one gone.',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('OK'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<bool?> _showDeleteModeDialog(CustomMode mode, String fallbackName,
+      {required bool selected}) {
+    return showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text('Delete Mode'),
+          content: SingleChildScrollView(
+            child: ListBody(
+              children: <Widget>[
+                Text(
+                  selected
+                      ? '${mode.name} is the selected mode. After saving, the '
+                          'bike will switch to $fallbackName.'
+                      : '${mode.name} is the last custom mode. Switzerland has '
+                          'no limited firmware mode, so after saving the '
+                          'built-in $fallbackName mode takes its place.',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                Text('Continue?',
+                    style: Theme.of(context).textTheme.titleSmall),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Delete', style: TextStyle(color: Colors.red)),
+              onPressed: () {
+                Navigator.of(context).pop(true);
+              },
+            ),
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop(false);
+              },
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<bool?> _showMyDialog() async {
@@ -188,9 +420,15 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
     );
   }
 
+  /// The notifier, taken at the moment a button is pressed rather than in
+  /// [build]. Watching it there would *create* the provider for a bike the
+  /// sheet has only been opened on: the notifier connects, polls, and saves
+  /// what it reads — so opening the create sheet and walking away used to
+  /// leave a bike behind that was never saved.
+  Bike get _bikeNotifier => ref.read(bikeProvider(widget.bike.id).notifier);
+
   @override
   Widget build(BuildContext context) {
-    var bikeNotifier = ref.watch(bikeProvider(widget.bike.id).notifier);
     final colors = getColorList();
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 16),
@@ -207,6 +445,7 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
               'name': widget.bike.name,
               'region': widget.bike.region,
               'color': widget.bike.color,
+              'autoReconnect': widget.bike.autoReconnect,
             },
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -265,6 +504,61 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
 
+                const SizedBox(height: 16),
+
+                // Auto-reconnect. The Material is not decoration: the checkbox
+                // renders a ListTile, and the sheet's own coloured container
+                // would otherwise swallow its ink splashes (and trip an
+                // assertion in debug builds).
+                Material(
+                  type: MaterialType.transparency,
+                  child: FormBuilderCheckbox(
+                    name: 'autoReconnect',
+                    key: const ValueKey('autoReconnectCheckbox'),
+                    title: Text(
+                      'Auto-reconnect',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                    onChanged: (value) {
+                      setState(() {
+                        _autoReconnect = value ?? true;
+                      });
+                    },
+                  ),
+                ),
+
+                Padding(
+                  padding: const EdgeInsets.only(left: 4, right: 4),
+                  child: Text(
+                    'Reconnect automatically whenever the bike is in range. '
+                    'Turn this off to power-cycle the bike back to its own '
+                    'defaults without this app re-applying its settings. The '
+                    'Connect button always works. While a dynamic custom mode '
+                    'is selected, reconnect stays active regardless — the '
+                    'speed limiter must be able to recover.',
+                    style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                  ),
+                ),
+
+                if (!_autoReconnect && _draftBike.needsSpeedSwitching)
+                  Padding(
+                    key: const ValueKey('autoReconnectWarning'),
+                    padding: const EdgeInsets.only(left: 4, right: 4, top: 8),
+                    child: Text(
+                      'A dynamic mode is selected, so auto-reconnect remains '
+                      'active for it. Select OFFROAD or an exact-match mode '
+                      'for this setting to take full effect.',
+                      style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                            color: Colors.orange,
+                            fontSize: 12,
+                          ),
+                    ),
+                  ),
+
                 const SizedBox(height: 32),
 
                 // Color section
@@ -310,6 +604,51 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                     ),
                   ),
                 ),
+
+                const SizedBox(height: 32),
+
+                // Custom modes section
+                Text(
+                  'Custom Modes',
+                  style: Theme.of(context).textTheme.titleSmall!.copyWith(
+                        color: Colors.grey[400],
+                      ),
+                ),
+
+                // The tiles render ListTiles, whose ink needs a Material the
+                // sheet's own coloured container does not provide.
+                Material(
+                  type: MaterialType.transparency,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      for (final mode in _draftModes)
+                        _CustomModeTile(
+                          key: ValueKey('customModeTile:${mode.id}'),
+                          mode: mode,
+                          onTap: () => _editCustomMode(mode),
+                          onDelete: () => _deleteCustomMode(mode),
+                        ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 8),
+
+                OutlinedButton.icon(
+                  key: const ValueKey('addCustomModeButton'),
+                  onPressed: _addCustomMode,
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('Add custom mode'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: BorderSide(color: Colors.grey[700]!),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
               ],
             ),
           ),
@@ -324,7 +663,7 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
               ElevatedButton.icon(
                 onPressed: () async {
                   if (await _showMyDialog() ?? false) {
-                    bikeNotifier.deleteStateData(widget.bike);
+                    _bikeNotifier.deleteStateData(widget.bike);
                     if (context.mounted) {
                       Navigator.pop(context);
                     }
@@ -346,14 +685,21 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
               ElevatedButton.icon(
                 onPressed: () {
                   if (_formKey.currentState?.saveAndValidate() ?? false) {
-                    final region = _formKey.currentState?.value['region']
-                        as BikeRegion?;
-                    bikeNotifier.writeStateData(
-                        widget.bike.copyWith(
-                            name: _formKey.currentState?.value['name'],
+                    final values = _formKey.currentState!.value;
+                    // The bike as it is now, not as the sheet found it: the
+                    // poll may have brought in a handlebar light or assist
+                    // change while the sheet was open. In the create flow the
+                    // provider builds a default state for the id, which is
+                    // what this sheet was handed anyway.
+                    final live = ref.read(bikeProvider(widget.bike.id));
+                    _bikeNotifier.writeStateData(
+                        applySheetEdits(live,
+                            name: values['name'] as String,
                             color: _selectedColorIndex,
-                            region: region,
-                            mode: clampModeToRegion(widget.bike.mode, region)),
+                            region: values['region'] as BikeRegion?,
+                            customModes: _draftModes,
+                            autoReconnect:
+                                values['autoReconnect'] as bool? ?? true),
                         saveToBike: false);
                     Navigator.pop(context);
                   }
@@ -372,6 +718,317 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// One custom mode in the sheet's list. The subtitle shows the limit the engine
+/// actually enforces, not the stored number: a hand-edited json (or a file from
+/// a build with a wider range) can hold a limit the mode cannot ride, and the
+/// list must show what the bike does.
+class _CustomModeTile extends StatelessWidget {
+  const _CustomModeTile(
+      {super.key,
+      required this.mode,
+      required this.onTap,
+      required this.onDelete});
+  final CustomMode mode;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final limit = mode.effectiveLimitKmh;
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(
+        mode.name,
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
+      subtitle: Text(
+        mode.throttle ? '$limit km/h · throttle' : '$limit km/h',
+        style: Theme.of(context).textTheme.bodySmall!.copyWith(
+              color: Colors.grey,
+              fontSize: 12,
+            ),
+      ),
+      trailing: IconButton(
+        tooltip: 'Delete ${mode.name}',
+        icon: const Icon(Icons.delete_outline, size: 20, color: Colors.red),
+        onPressed: onDelete,
+      ),
+      onTap: onTap,
+    );
+  }
+}
+
+/// Edits one custom mode in a sheet of its own (the colour picker's precedent).
+/// Returns the edited mode, or null when the rider backs out — the caller's
+/// draft list is what decides, so nothing here reaches the bike.
+Future<CustomMode?> _showCustomModeEditor(
+    BuildContext context, CustomMode mode) {
+  return showModalBottomSheet<CustomMode>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.black,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+    ),
+    builder: (BuildContext context) {
+      return _CustomModeEditor(mode: mode);
+    },
+  );
+}
+
+class _CustomModeEditor extends StatefulWidget {
+  const _CustomModeEditor({required this.mode});
+  final CustomMode mode;
+
+  @override
+  State<_CustomModeEditor> createState() => _CustomModeEditorState();
+}
+
+class _CustomModeEditorState extends State<_CustomModeEditor> {
+  final _formKey = GlobalKey<FormState>();
+  late TextEditingController _nameController;
+  late int _limitKmh;
+  late bool _throttle;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.mode.name);
+    _throttle = widget.mode.throttle;
+    // Opens on the limit the engine enforces, never on a stored number above
+    // it: the slider bounds keep every edit inside the range from here on.
+    _limitKmh = widget.mode.effectiveLimitKmh;
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  int get _maxKmh => _throttle ? customLimitMaxThrottle : customLimitMax;
+
+  void _setLimit(int kmh) {
+    setState(() {
+      _limitKmh = kmh.clamp(customLimitMin, _maxKmh).toInt();
+    });
+  }
+
+  void _setThrottle(bool value) {
+    setState(() {
+      _throttle = value;
+      // In the same frame as the switch: above 32 km/h every profile with a
+      // throttle is an unlimited one, so a throttle mode cannot ask for more
+      // (and the slider would assert on a value past its new max).
+      _limitKmh = _limitKmh.clamp(customLimitMin, _maxKmh).toInt();
+    });
+  }
+
+  /// What happens when the app is not there to switch profiles. Straight from
+  /// the engine, so the sheet cannot promise something the controller does not
+  /// do.
+  String get _dropoutCaption {
+    final base = baseProfileFor(_limitKmh, _throttle);
+    if (isStaticCustomMode(
+        widget.mode.copyWith(limitKmh: _limitKmh, throttle: _throttle))) {
+      return 'Exactly matches the ${base.name} firmware profile — the bike '
+          'enforces this limit itself, no app needed.';
+    }
+    return 'If Bluetooth drops while riding below $_limitKmh km/h, the bike '
+        'stays capped at ${base.capKmh} km/h until the app reconnects.';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    final captionStyle = Theme.of(context).textTheme.bodySmall!.copyWith(
+          color: Colors.grey,
+          fontSize: 12,
+        );
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.85,
+      ),
+      child: SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(bottom: bottomInset > 0 ? bottomInset : 0),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Modal draggable indicator
+                Center(
+                  child: Container(
+                    margin: const EdgeInsets.only(top: 8, bottom: 16),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[600],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+                  child: Text(
+                    'Custom Mode',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                ),
+
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Form(
+                    key: _formKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TextFormField(
+                          key: const ValueKey('customModeNameField'),
+                          controller: _nameController,
+                          maxLength: 12,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                          decoration: InputDecoration(
+                            labelText: 'Name',
+                            labelStyle: TextStyle(color: Colors.grey[400]),
+                            filled: true,
+                            fillColor: Colors.grey[800]!.withAlpha(100),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 16),
+                          ),
+                          validator: (value) =>
+                              (value ?? '').trim().isEmpty ? 'Required' : null,
+                        ),
+
+                        SwitchListTile(
+                          key: const ValueKey('customModeThrottleSwitch'),
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(
+                            'Throttle',
+                            style: Theme.of(context).textTheme.bodyMedium,
+                          ),
+                          value: _throttle,
+                          onChanged: _setThrottle,
+                        ),
+
+                        if (_throttle)
+                          Padding(
+                            key: const ValueKey('customModeThrottleCaption'),
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Text(
+                              'Limited to $customLimitMaxThrottle km/h with '
+                              'throttle — a Bluetooth dropout must never leave '
+                              'the bike unlimited.',
+                              style: captionStyle,
+                            ),
+                          ),
+
+                        Row(
+                          children: [
+                            IconButton(
+                              key: const ValueKey('customModeLimitMinus'),
+                              tooltip: 'Decrease limit',
+                              icon: const Icon(Icons.remove),
+                              onPressed: () => _setLimit(_limitKmh - 1),
+                            ),
+                            Expanded(
+                              child: Slider(
+                                key: const ValueKey('customModeLimitSlider'),
+                                value: _limitKmh.toDouble(),
+                                min: customLimitMin.toDouble(),
+                                max: _maxKmh.toDouble(),
+                                divisions: _maxKmh - customLimitMin,
+                                label: '$_limitKmh km/h',
+                                onChanged: (value) => _setLimit(value.round()),
+                              ),
+                            ),
+                            IconButton(
+                              key: const ValueKey('customModeLimitPlus'),
+                              tooltip: 'Increase limit',
+                              icon: const Icon(Icons.add),
+                              onPressed: () => _setLimit(_limitKmh + 1),
+                            ),
+                            SizedBox(
+                              width: 68,
+                              child: Text(
+                                '$_limitKmh km/h',
+                                textAlign: TextAlign.end,
+                                style: Theme.of(context).textTheme.bodyMedium,
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4, bottom: 16),
+                          child: Text(
+                            _dropoutCaption,
+                            key: const ValueKey('customModeDropoutCaption'),
+                            style: captionStyle,
+                          ),
+                        ),
+
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            TextButton(
+                              onPressed: () {
+                                Navigator.pop(context);
+                              },
+                              child: const Text('Cancel'),
+                            ),
+                            ElevatedButton.icon(
+                              key: const ValueKey('customModeEditorDone'),
+                              onPressed: () {
+                                if (!(_formKey.currentState?.validate() ??
+                                    false)) {
+                                  return;
+                                }
+                                Navigator.pop(
+                                    context,
+                                    widget.mode.copyWith(
+                                        name: _nameController.text.trim(),
+                                        limitKmh: _limitKmh,
+                                        throttle: _throttle));
+                              },
+                              icon: const Icon(Icons.check, size: 18),
+                              label: const Text('Done'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor:
+                                    const Color(0xff441DFC).withAlpha(51),
+                                foregroundColor: const Color(0xff441DFC),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 20, vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12)),
+                              ),
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(height: 16),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

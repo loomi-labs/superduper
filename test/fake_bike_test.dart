@@ -17,8 +17,8 @@ void main() {
   test('default register is the default state', () {
     final store = FakeBikeStore();
     expect(store.read(fakeId), [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    // Default region is CH, whose mode table has no entry for wire byte 0, so
-    // mode and region stay untouched and the round trip is the identity.
+    // Light off, assist 0 and a region already set: the read-back leaves a
+    // fresh bike exactly as it is.
     expect(BikeState.defaultState(fakeId).updateFromData(store.read(fakeId)),
         BikeState.defaultState(fakeId));
   });
@@ -53,17 +53,24 @@ void main() {
   test('BikeState round trips through the store (US)', () {
     final store = FakeBikeStore();
     final bike = BikeState.defaultState(fakeId)
-        .copyWith(region: BikeRegion.us, light: true, assist: 4, mode: 3);
-    store.write(fakeId, bike.toWriteData());
-    expect(bike.updateFromData(store.read(fakeId)), bike);
+        .copyWith(region: BikeRegion.us, light: true, assist: 4)
+        .withSelectedMode(nativeModeId(2));
+    final wire = initialWireFor(bike.selectedMode);
+    store.write(fakeId, bike.toWriteData(wire: wire));
+    expect(store.read(fakeId)[5], 2);
+    expect(bike.updateFromData(store.read(fakeId)), bike,
+        reason: 'the rider-owned fields come back unchanged, and the read-back '
+            'no longer touches the selection');
   });
 
   test('BikeState round trips through the store (EU)', () {
     final store = FakeBikeStore();
     final bike = BikeState.defaultState(fakeId)
-        .copyWith(region: BikeRegion.eu, light: false, assist: 2, mode: 3);
-    store.write(fakeId, bike.toWriteData());
-    // Raw mode is offset by +4 on the wire, stripped on read.
+        .copyWith(region: BikeRegion.eu, light: false, assist: 2)
+        .withSelectedMode(nativeModeId(7));
+    final wire = initialWireFor(bike.selectedMode);
+    store.write(fakeId, bike.toWriteData(wire: wire));
+    // The wire byte is absolute now: an EU mode is addressed by 4-7 directly.
     expect(store.read(fakeId)[5], 7);
     expect(bike.updateFromData(store.read(fakeId)), bike);
   });

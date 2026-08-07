@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:superduper/db.dart';
 import 'package:superduper/fake_bike.dart';
+import 'package:superduper/models.dart';
 import 'package:superduper/services.dart';
 import 'package:superduper/utils/logger.dart'; // Import the logger
 
@@ -14,6 +17,27 @@ enum SDBluetoothConnectionState {
   connected,
   connecting,
   disconnecting,
+}
+
+/// Whether the app may connect to a bike on its own — on the disconnect event,
+/// from the retry timer, and when a handler is first built.
+///
+/// Turning auto-reconnect off is how a rider gets the bike back to its own
+/// defaults: power-cycle it and this app stays away instead of writing its
+/// settings back. A mode that switches profiles by speed cannot honour that —
+/// it is only a limiter while the app can reach the bike, so it keeps
+/// reconnecting either way. The manual Connect button never consults this.
+bool shouldAutoReconnect({
+  required bool autoReconnect,
+  required bool needsSpeedSwitching,
+}) =>
+    autoReconnect || needsSpeedSwitching;
+
+BikeState? _findBike(List<BikeState> bikes, String deviceId) {
+  for (final bike in bikes) {
+    if (bike.id == deviceId) return bike;
+  }
+  return null;
 }
 
 @riverpod
@@ -70,6 +94,25 @@ class ConnectionHandler extends _$ConnectionHandler {
   bool _becomingReady = false;
   bool _readyAgain = false;
 
+  /// Mirrors of this bike's record, kept current by [_trackReconnectSetting].
+  /// Seeded permissively: an unknown bike reconnects like it always did.
+  bool _autoReconnect = true;
+  bool _needsSpeedSwitching = false;
+
+  /// Whether the automatic connect paths may run right now.
+  bool get _reconnectAllowed => shouldAutoReconnect(
+      autoReconnect: _autoReconnect,
+      needsSpeedSwitching: _needsSpeedSwitching);
+
+  @visibleForTesting
+  bool get debugAutoReconnect => _autoReconnect;
+
+  @visibleForTesting
+  bool get debugNeedsSpeedSwitching => _needsSpeedSwitching;
+
+  @visibleForTesting
+  bool get debugReconnectAllowed => _reconnectAllowed;
+
   /// Speed reported by the bike, in km/h. Broadcast: the control loop and the
   /// UI can both listen.
   Stream<double> get speedStream {
@@ -82,6 +125,8 @@ class ConnectionHandler extends _$ConnectionHandler {
   @override
   SDBluetoothConnectionState build(String deviceId) {
     ref.onDispose(_dispose);
+    // Before the fake-bike return, so the wiring is exercised on fakes too.
+    _trackReconnectSetting(deviceId);
     if (isFakeBike(deviceId)) {
       // No real device: never touch _device, never start timers.
       log.d(SDLogger.bluetooth, 'Fake bike $deviceId is always connected');
@@ -92,13 +137,51 @@ class ConnectionHandler extends _$ConnectionHandler {
     // Backstop only: disconnects reconnect immediately, see
     // _onDeviceConnectionState. Retries anything that is not fully ready, not
     // just disconnects, so a failed readiness pass cannot strand the bike.
+    //
+    // The timer keeps running while auto-reconnect is off and the body does
+    // nothing: turning the setting back on then resumes within 10 s, with no
+    // re-arming to get wrong.
     _reconnectTimer = Timer.periodic(const Duration(seconds: 10), (t) {
+      if (!_reconnectAllowed) return;
       if (state != SDBluetoothConnectionState.connected) {
         connect();
       }
     });
+    if (!_reconnectAllowed) {
+      // Reported as disconnected rather than connecting: the Connect button
+      // only enables on a disconnected bike, and this bike is now waiting for
+      // exactly that button. _deviceSub still picks up a link that is already
+      // up, so an already-connected bike is not pushed away either.
+      log.i(SDLogger.bluetooth,
+          'Auto-reconnect off for $deviceId, waiting for a manual connect');
+      return SDBluetoothConnectionState.disconnected;
+    }
     connect();
     return SDBluetoothConnectionState.connecting;
+  }
+
+  /// Seeds and then tracks the two record fields the reconnect gates read.
+  ///
+  /// Deliberately `ref.listen`, never `ref.watch`: a watch would rebuild this
+  /// notifier on every save, and a rebuild runs `ref.onDispose` — closing the
+  /// field-initialised [_speedController] for good, so every later speed sample
+  /// would be dropped and a switching mode would go blind. [bikesDBProvider] is
+  /// keepAlive with no dependencies of its own, so listening cannot cycle back.
+  ///
+  /// Accepted race: a handler built before bikes.json finished loading sees an
+  /// empty list and seeds `true`; the listener corrects it as soon as the file
+  /// lands. In practice the select page has loaded the DB long before a bike
+  /// can be opened.
+  void _trackReconnectSetting(String deviceId) {
+    _applyBikeRecord(ref.read(bikesDBProvider.notifier).getBike(deviceId));
+    ref.listen(bikesDBProvider, (previous, next) {
+      _applyBikeRecord(_findBike(next, deviceId));
+    });
+  }
+
+  void _applyBikeRecord(BikeState? bike) {
+    _autoReconnect = bike?.autoReconnect ?? true;
+    _needsSpeedSwitching = bike?.needsSpeedSwitching ?? false;
   }
 
   void _onDeviceConnectionState(BluetoothConnectionState dstate) {
@@ -109,9 +192,11 @@ class ConnectionHandler extends _$ConnectionHandler {
       // to be set up first, otherwise writes are silently dropped.
       _becomeReady();
     } else if (dstate == BluetoothConnectionState.disconnected) {
+      // Tearing down and reporting the drop is unconditional; only the
+      // reconnect itself is the rider's choice.
       _cancelNotifications();
       state = SDBluetoothConnectionState.disconnected;
-      connect();
+      if (_reconnectAllowed) connect();
     }
   }
 
@@ -259,7 +344,13 @@ class ConnectionHandler extends _$ConnectionHandler {
   /// Asks the bike to start streaming ride data (speed among it). Has to be
   /// re-sent after every reconnect.
   Future<void> requestRideData() async {
-    if (isFakeBike(deviceId)) return;
+    if (isFakeBike(deviceId)) {
+      // A fake bike streams straight off the debug slider, so there is nothing
+      // to ask for — but recording the request keeps the fake honest about
+      // what the app did.
+      ref.read(fakeBikeStoreProvider).noteRideDataRequest(deviceId);
+      return;
+    }
     var bt = ref.read(bluetoothRepositoryProvider);
     await bt.write(
       _device,

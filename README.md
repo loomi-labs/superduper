@@ -27,7 +27,8 @@ Features:
 - No account or internet connection required
 - Quickly switch between multiple bikes
 - Lock settings, like Mode, to automatically switch when the bike is turned on and the app is running
-- (Android only) Background Lock, which will keep your bike on whatever settings you set it at, even the phone is locked. CH bikes turn it on by themselves while the dynamic mode is selected
+- Custom modes: pick your own speed limit, with or without throttle, on any bike
+- (Android only) Background Lock, which will keep your bike on whatever settings you set it at, even the phone is locked. Bikes turn it on by themselves while a dynamic custom mode is selected
 - Open source
 
 ## Getting Started
@@ -56,63 +57,116 @@ Changes the legal category your bike will operate at. PAS is Pedal Assist System
 which means the motor will only run when you are pedaling.
 Throttle means the motor will run when you press the throttle, regardless of if you are pedaling or not.
 
+Every mode your bike can use is a button of its own, labeled with the mode's name. One tap
+selects it, there is no cycling through the modes you don't want. Which modes are listed
+depends on the bike's region, plus any custom modes you added to that bike.
+
 #### US:
 
-| Mode | Class | PAS | Throttle | Speed Limit |
-| ---- | ----- | --- | -------- | ----------- |
-| 1    | 1     | Yes | No       | 20 mph      |
-| 2    | 2     | Yes | Yes      | 20 mph      |
-| 3    | 3     | Yes | No       | 28 mph      |
-| 4    | Off-Road | Yes | Yes  | No Limit    |
+| Mode | Name    | Class    | PAS | Throttle | Speed Limit |
+| ---- | ------- | -------- | --- | -------- | ----------- |
+| 1    | ECO     | 1        | Yes | No       | 20 mph      |
+| 2    | TOUR    | 2        | Yes | Yes      | 20 mph      |
+| 3    | SPORT   | 3        | Yes | No       | 28 mph      |
+| 4    | OFFROAD | Off-Road | Yes | Yes      | No Limit    |
 
 
 #### EU:
 
-| Mode | Class | PAS | Throttle | Speed Limit |
-| ---- | ----- | --- | -------- | ----------- |
-| 1    | EPAC  | Yes | No       | 25 km/h     |
-| 2    | 250W  | Yes | No       | 35 km/h     |
-| 3    | 850W  | Yes | No       | 45 km/h     |
-| 4    | Off-Road | Yes | Yes  | No Limit    |
+| Mode | Name    | Class    | PAS | Throttle | Speed Limit |
+| ---- | ------- | -------- | --- | -------- | ----------- |
+| 1    | EPAC    | EPAC     | Yes | No       | 25 km/h     |
+| 2    | MODE 2  | 250W     | Yes | No       | 35 km/h     |
+| 3    | MODE 3  | 850W     | Yes | No       | 45 km/h     |
+| 4    | OFFROAD | Off-Road | Yes | Yes      | No Limit    |
 
 #### CH:
 
-| Mode | Class | PAS | Throttle | Speed Limit          |
-| ---- | ----- | --- | -------- | -------------------- |
-| 1    | Dynamic | Yes | Yes    | ~25 km/h (see below) |
-| 2    | 2     | Yes | Yes      | 20 mph (32 km/h)     |
-| 3    | Off-Road | Yes | Yes   | No Limit             |
+Swiss bikes have no limited mode of their own in the firmware, so the only firmware mode listed
+is OFFROAD. Everything below that limit is a [custom mode](#custom-modes), and every CH bike
+starts with one already set up:
 
-#### CH Dynamic Mode
+| Name    | Kind              | PAS | Throttle | Speed Limit          |
+| ------- | ----------------- | --- | -------- | -------------------- |
+| 25 km/h | Custom (pre-made) | Yes | Yes      | 25 km/h (see below)  |
+| OFFROAD | Firmware          | Yes | Yes      | No Limit             |
 
-Mode 1 for CH bikes is not a mode in the bike's firmware, it's the app switching between two of
-the modes the bike already has. While it's selected, the app watches your speed over Bluetooth.
-At or below 23 km/h the bike runs the US Class 2 profile, so the throttle works. Above 23 km/h
-the app switches the bike to the EU EPAC profile, which is pedal assist only with a 25 km/h
-limit. When you slow back down, it switches back.
-
-If the Bluetooth connection drops, the bike simply stays in whichever profile was written last.
-The worst case is that it stays in US Class 2 with its 20 mph (32 km/h) limit, it never ends up
-unlimited.
-
-On Android, selecting the dynamic mode automatically turns on Background Lock (and shows its
-notification), so the switching keeps working while your phone is locked or in your pocket. New
-bikes start in mode 1, so this also happens the first time you open a newly added bike, without
-you selecting anything. It's turned off again when you leave the dynamic mode, unless you had
-turned Background Lock on yourself. On iOS there is no background service, so if the app is closed or the phone is locked
-the switching stops and the bike stays in the profile that was written last.
+The pre-made "25 km/h" mode is an ordinary custom mode: you can rename it, change its limit and
+its throttle setting, or add more modes next to it. A CH bike always keeps at least one custom
+mode, so the last one can't be deleted without another one taking its place.
 
 CH is the region newly added bikes start with. You can change the region at any time in the bike's
 Edit sheet.
+
+#### Custom Modes
+
+A custom mode is yours, saved per bike, and available in every region. You add and edit them in
+the bike's Edit sheet, under "Custom Modes". Each one has:
+
+- a **name** (up to 12 characters, it's what the mode's button shows),
+- a **speed limit**, 25 to 45 km/h, and
+- a **throttle** switch. With throttle on, the limit can only go up to 32 km/h: the only faster
+  profile in the firmware that has a throttle is the unlimited one, and a dropped Bluetooth
+  connection must never leave your bike unlimited.
+
+Some limits are exactly what one of the bike's firmware profiles already does, for example
+32 km/h with throttle, or 25, 35 and 45 km/h without. Those modes are simply that profile: the
+bike enforces the limit itself and keeps doing it whether or not the app is around.
+
+Every other limit is the app switching between two firmware profiles at your limit, the same
+way the old Swiss dynamic mode did. While the mode is selected, the app watches your speed
+over Bluetooth. Below the limit the bike runs the closest faster profile with the throttle
+setting you picked, so you get your throttle if you asked for one. Above the limit the app
+switches to the fastest profile that caps at or under your limit. When you slow back down, it
+switches back.
+
+The honest cost of that: if Bluetooth drops while you are riding *below* the limit, the bike
+stays in that first profile, and that profile's own cap can be as high as 45 km/h, until the
+app reconnects. It is never unlimited, but it is not your limit either. The mode editor spells
+out the exact number for each mode while you set it up.
+
+On Android, selecting a switching custom mode automatically turns on Background Lock (and shows
+its notification), so the switching keeps working while your phone is locked or in your pocket.
+New CH bikes start in such a mode, so this also happens the first time you open a newly added
+bike, without you selecting anything. It's turned off again when you leave the mode, unless you
+had turned Background Lock on yourself. On iOS there is no background service, so if the app is
+closed or the phone is locked the switching stops and the bike stays in the profile that was
+written last. A mode that exactly matches a firmware profile needs none of this.
+
+#### Coming from an older version
+
+The switch up to the 25 km/h profile now happens at 25 km/h instead of at 23 km/h, because the
+switching point is simply the mode's limit. It still switches back down below about 23 km/h, so
+it doesn't flip-flop around the limit. In practice you keep the throttle between 23 and
+25 km/h, where the old version had already cut over.
+
+The old static CH mode 2 (US Class 2, 20 mph / 32 km/h with throttle) is gone. Bikes that were
+left on it move to the pre-made "25 km/h" mode, which is a lower cap than before, though the
+throttle still works below the limit. To get the old behavior back, add a custom mode with a
+32 km/h limit and throttle on: that is an exact firmware match, so the bike rides US Class 2 on
+its own and the app doesn't have to be connected.
 
 ### Assist
 
 Changes the amount of assist your bike will provide while pedaling.
 0 is no assist, 4 is full assist. This does not affect throttle power.
+Each level is a button of its own, so one tap picks the level you want.
 
 ### Background Lock (Android Only)
 
 **Uses extra battery.** Locks the current "locked" settings in the background. This means that if you close the app, or your phone goes to sleep, the settings will continue to be applied.
+
+### Auto-reconnect
+
+In the bike's Edit sheet, on by default. The app connects to the bike whenever it is in range
+and reapplies your settings. Turn it off and the app never connects on its own: that's how you
+power-cycle the bike back to its own firmware defaults without the app immediately taking it
+over again. The Connect button on the bike's page always works, whatever this setting says.
+
+One exception: while a [custom mode](#custom-modes) that switches profiles is selected, the app
+keeps reconnecting anyway, because the speed limiter can only come back after a dropout if it
+reconnects. Pick OFFROAD, a firmware mode, or a custom mode that exactly matches a firmware
+profile for the setting to take full effect.
 
 
 ## FAQ
@@ -133,7 +187,7 @@ The setting lock feature tells Superduper to ignore whatever the bike is set to 
 
 Background Lock is a feature that will keep the bike on the settings you set in the app, even if the app is closed. This is useful for when you want to leave the bike on a certain setting, like lights and mode, but don't want to keep the app open. For now, this feature is only available on Android. It also takes extra battery to keep the app running in the background.
 
-It is usually yours to turn on and off, with one exception: on Android, a CH bike in the dynamic mode turns Background Lock on automatically, because the speed switching has to keep running while your phone is locked. It is turned off again when you leave the dynamic mode, unless you had turned it on yourself. See [CH Dynamic Mode](#ch-dynamic-mode).
+It is usually yours to turn on and off, with one exception: on Android, a bike with a custom mode that switches profiles selected turns Background Lock on automatically, because the speed switching has to keep running while your phone is locked. It is turned off again when you leave that mode, unless you had turned it on yourself. See [Custom Modes](#custom-modes).
 
 ### What's up with the bike names?
 

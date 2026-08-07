@@ -1,55 +1,34 @@
+import 'dart:math';
+
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:superduper/names.dart';
 
 part 'models.freezed.dart';
 part 'models.g.dart';
 
+// Declaration order is what the region dropdown renders; @JsonValue pins
+// persistence, so reordering is safe.
 enum BikeRegion {
-  // R,RX
-  @JsonValue(200)
-  us('US'),
+  // Switzerland: mode 1 is a virtual mode, throttle up to ~25 km/h (see README)
+  @JsonValue(202)
+  ch('CH'),
   // S2
   @JsonValue(201)
   eu('EU'),
-  // Switzerland: mode 1 is a virtual mode, throttle up to ~25 km/h (see README)
-  @JsonValue(202)
-  ch('CH');
+  // R,RX
+  @JsonValue(200)
+  us('US');
 
   const BikeRegion(this.value);
   final String value;
-
-  int get modeCount => this == ch ? 3 : 4;
 }
 
-// The CH dynamic mode is never a real bike mode: below the threshold we ride
-// US Class 2 (throttle, 20 mph); above it we switch to EPAC (25 km/h limiter).
-const chSpeedThresholdKmh = 23.0;
+// Documented aliases for the wire bytes the seeded CH mode rides, kept because
+// they name what the bytes mean rather than where they sit in the table.
 const chWireLow = 1; // US Class 2: PAS + throttle, 20 mph
 const chWireHigh = 4; // EPAC: PAS only, 25 km/h
 const chWireUsOffroad = 3; // US off-road: PAS + throttle, no limit
 const chWireOffroad = 7; // EU off-road: PAS + throttle, no limit
-
-int chDynamicWire(double speedKmh, int currentWire) {
-  if (speedKmh <= 0) {
-    return currentWire;
-  }
-  return speedKmh > chSpeedThresholdKmh ? chWireHigh : chWireLow;
-}
-
-/// Whether the CH read-back has a mode for this raw wire byte, i.e. whether
-/// [BikeState.updateFromData] can tell what the bike is doing.
-///
-/// Only the bytes the CH region itself uses are mapped. The rest of the EU bank
-/// (5 = 35 km/h, 6 = 45 km/h) is still reachable — the bike has no mode button,
-/// but another app (the official one writes any of 0-7) can select them, or the
-/// controller can power up in one — yet means nothing in CH terms, so the
-/// read-back keeps the mode it had and the app would keep claiming a limit that
-/// is not there. The controller re-asserts its own mode on those bytes instead.
-bool chMapsToMode(int wire) =>
-    wire == chWireLow ||
-    wire == chWireHigh ||
-    wire == chWireUsOffroad ||
-    wire == chWireOffroad;
 
 /// True for a settings register read-back, `[3, 0, assist, walk, light, mode,
 /// ...]`.
@@ -62,17 +41,378 @@ bool chMapsToMode(int wire) =>
 bool isSettingsPacket(List<int> data) =>
     data.length >= 6 && data[0] == 3 && data[1] == 0;
 
+/// A firmware profile of the bike, addressed by the raw wire byte the settings
+/// packet carries. Wires 0-7 are contiguous, so the wire is the table index.
+class FirmwareProfile {
+  const FirmwareProfile(this.wire, this.name, this.capKmh,
+      {required this.throttle});
+  final int wire;
+  final String name;
+
+  /// null = no limiter (off-road).
+  final int? capKmh;
+  final bool throttle;
+
+  bool get unlimited => capKmh == null;
+}
+
+const firmwareProfiles = <FirmwareProfile>[
+  FirmwareProfile(0, 'ECO', 32, throttle: false), // US Class 1
+  FirmwareProfile(1, 'TOUR', 32, throttle: true), // US Class 2
+  FirmwareProfile(2, 'SPORT', 45, throttle: false), // US Class 3
+  FirmwareProfile(3, 'OFFROAD', null, throttle: true), // US off-road
+  FirmwareProfile(4, 'EPAC', 25, throttle: false),
+  FirmwareProfile(5, 'MODE 2', 35, throttle: false),
+  FirmwareProfile(6, 'MODE 3', 45, throttle: false),
+  FirmwareProfile(7, 'OFFROAD', null, throttle: true), // EU off-road
+];
+
+FirmwareProfile profileByWire(int wire) => firmwareProfiles[wire];
+
+/// The profile a custom mode rides *below* its limit: the closest profile at or
+/// above [limitKmh] with a matching [throttle], i.e. the smallest finite cap
+/// that still holds the limit. Ties break to the lowest wire.
+///
+/// [limitKmh] is clamped exactly as [CustomMode.effectiveLimitKmh] clamps it,
+/// which is what makes the answer total: within the slider range every throttle
+/// has a limiter that holds it, so the result is never an unlimited profile —
+/// asking for a limit must never hand the rider off-road.
+FirmwareProfile baseProfileFor(int limitKmh, bool throttle) {
+  final limit = limitKmh
+      .clamp(customLimitMin, throttle ? customLimitMaxThrottle : customLimitMax)
+      .toInt();
+  FirmwareProfile? best;
+  for (final p in firmwareProfiles) {
+    if (p.unlimited || p.throttle != throttle || p.capKmh! < limit) {
+      continue;
+    }
+    // Strictly smaller only, so a tie keeps the profile with the lower wire.
+    if (best == null || p.capKmh! < best.capKmh!) {
+      best = p;
+    }
+  }
+  return best!;
+}
+
+/// The profile a custom mode rides *above* its limit: the fastest profile whose
+/// cap is at or below [limitKmh], of any throttle — the limit is what the rider
+/// asked for, and no profile in the table pairs a throttle with a low cap.
+///
+/// [throttle] is a tie-break only: among equal caps the matching-throttle
+/// profile wins, then the lowest wire. That is what makes an exact firmware
+/// match fall out as `base == cap` (e.g. {32, throttle} ties wires 0 and 1 at
+/// cap 32, and the tie-break picks 1 — the base).
+///
+/// The clamp has no throttle ceiling, unlike [baseProfileFor]: a cap profile is
+/// not required to have a throttle, so the throttle says nothing about how high
+/// it may cap. The slider floor is the slowest profile's cap, so the answer
+/// always exists and is never unlimited.
+FirmwareProfile capProfileFor(int limitKmh, {required bool throttle}) {
+  final limit = limitKmh.clamp(customLimitMin, customLimitMax).toInt();
+  FirmwareProfile? best;
+  for (final p in firmwareProfiles) {
+    if (p.unlimited || p.capKmh! > limit) {
+      continue;
+    }
+    final faster = best == null || p.capKmh! > best.capKmh!;
+    final betterTie = best != null &&
+        p.capKmh == best.capKmh &&
+        p.throttle == throttle &&
+        best.throttle != throttle;
+    if (faster || betterTie) {
+      best = p;
+    }
+  }
+  return best!;
+}
+
+/// The two wires a custom mode ever asserts: below its limit and above it.
+({int base, int cap}) _wirePairFor(CustomMode m) {
+  final limit = m.effectiveLimitKmh;
+  return (
+    base: baseProfileFor(limit, m.throttle).wire,
+    cap: capProfileFor(limit, throttle: m.throttle).wire
+  );
+}
+
+/// A wire read as a position in [m]'s own pair. A wire the mode never asserts —
+/// left over from an edit of the mode, or another app's — means nothing to it
+/// and is read as the base: the mode must never be believed to be riding a wire
+/// it cannot have written, least of all an unlimited one.
+int _pairWireFor(CustomMode m, int wire) {
+  final pair = _wirePairFor(m);
+  return wire == pair.base || wire == pair.cap ? wire : pair.base;
+}
+
+/// Whether a custom mode is an exact firmware match: one profile does the whole
+/// job, so there is nothing to switch and no speed stream to keep up.
+bool isStaticCustomMode(CustomMode m) {
+  final pair = _wirePairFor(m);
+  return pair.base == pair.cap;
+}
+
+/// Down-switch band. Asymmetric on purpose: the up-switch engages the limiter
+/// and is the safety function, so it fires the moment the limit is exceeded;
+/// the down-switch is where oscillation lives, because the cap profile's own
+/// limiter pins the speed at about the limit. 2 km/h reproduces the 23 -> 25
+/// gap the old CH dynamic mode rode on.
+const dynamicHysteresisKmh = 2.0;
+
+/// The wire a switching custom mode should assert at [speedKmh]. [currentWire]
+/// carries both the stopped-speed hold and the hysteresis memory.
+int dynamicWireFor(CustomMode m, double speedKmh, int currentWire) {
+  final limit = m.effectiveLimitKmh;
+  final (:base, :cap) = _wirePairFor(m);
+  if (base == cap) {
+    return base; // static — callers gate on needsSpeedSwitching anyway
+  }
+  // A wire this mode never asserts carries no hysteresis memory and no hold.
+  final current = _pairWireFor(m, currentWire);
+  if (speedKmh <= 0) {
+    return current; // stopped: a parked bike keeps the wire it has
+  }
+  if (current == cap) {
+    return speedKmh < limit - dynamicHysteresisKmh ? base : cap;
+  }
+  // Riding *at* the limit still rides the base profile.
+  return speedKmh > limit ? cap : base;
+}
+
+// Slider range of a custom mode. A throttle mode is capped lower: above 32 km/h
+// the only profiles with a throttle are the unlimited ones.
+const customLimitMin = 25;
+const customLimitMax = 45;
+const customLimitMaxThrottle = 32;
+
+@freezed
+abstract class CustomMode with _$CustomMode {
+  const CustomMode._();
+
+  const factory CustomMode({
+    required String id,
+    required String name,
+    required int limitKmh,
+    @Default(false) bool throttle,
+  }) = _CustomMode;
+
+  factory CustomMode.fromJson(Map<String, Object?> json) =>
+      _$CustomModeFromJson(json);
+
+  /// The limit the engine actually enforces: clamped to the slider range and to
+  /// 32 with throttle, so a hand-edited or future-version json can never select
+  /// an unlimited base profile.
+  int get effectiveLimitKmh => limitKmh
+      .clamp(customLimitMin, throttle ? customLimitMaxThrottle : customLimitMax)
+      .toInt();
+}
+
+/// Id for a user created mode: time + random suffix, no uuid dependency.
+String newCustomModeId() =>
+    'c${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'
+    '${Random().nextInt(1 << 20).toRadixString(36)}';
+
+// Native modes are addressed by their wire byte, which is absolute: the id of a
+// mode does not change when the bike's region does.
+const _nativePrefix = 'native:';
+
+String nativeModeId(int wire) => '$_nativePrefix$wire';
+
+int? nativeWireOf(String modeId) => modeId.startsWith(_nativePrefix)
+    ? int.tryParse(modeId.substring(_nativePrefix.length))
+    : null;
+
+/// A resolved [BikeState.modeId]. Never persisted — the id is.
+sealed class SelectedMode {
+  String get id;
+  String get name;
+}
+
+// Both are values, not identities: [BikeState.selectableModes] allocates a
+// fresh instance on every call, so comparing selections has to compare modes.
+class NativeSelection implements SelectedMode {
+  const NativeSelection(this.profile);
+  final FirmwareProfile profile;
+
+  @override
+  String get id => nativeModeId(profile.wire);
+
+  @override
+  String get name => profile.name;
+
+  @override
+  bool operator ==(Object other) =>
+      other is NativeSelection && other.profile.wire == profile.wire;
+
+  @override
+  int get hashCode => Object.hash(NativeSelection, profile.wire);
+}
+
+class CustomSelection implements SelectedMode {
+  const CustomSelection(this.mode);
+  final CustomMode mode;
+
+  @override
+  String get id => mode.id;
+
+  @override
+  String get name => mode.name;
+
+  @override
+  bool operator ==(Object other) =>
+      other is CustomSelection && other.mode == mode;
+
+  @override
+  int get hashCode => Object.hash(CustomSelection, mode);
+}
+
+/// The wire a selection asserts with no speed information: entering the mode,
+/// reconnecting, or a mode that never switches. A switching custom mode enters
+/// on its base profile and lets the next speed sample move it up.
+int initialWireFor(SelectedMode sel) => switch (sel) {
+      NativeSelection(:final profile) => profile.wire,
+      CustomSelection(:final mode) =>
+        baseProfileFor(mode.effectiveLimitKmh, mode.throttle).wire,
+    };
+
+/// Whether [wire] is one [sel] ever asserts: a native mode's single wire, or
+/// one of a custom mode's base/cap pair.
+///
+/// A wire that fails this is no memory of anything — left behind by an edit
+/// that moved the mode's profile pair, or written by another app. Both
+/// [wireVerdict] and the controller's own wire choice fall back to
+/// [initialWireFor] on it, so the two can never disagree.
+bool assertsWire(SelectedMode sel, int wire) => switch (sel) {
+      NativeSelection(:final profile) => wire == profile.wire,
+      CustomSelection(:final mode) => _pairWireFor(mode, wire) == wire,
+    };
+
+/// What to do about a wire byte the bike reports. Replaces the byte-to-mode
+/// table: the app compares the reported wire with the one it asserts.
+sealed class WireVerdict {
+  const WireVerdict();
+}
+
+/// The bike is riding what the app selected.
+class WireInSync extends WireVerdict {
+  const WireInSync();
+
+  @override
+  bool operator ==(Object other) => other is WireInSync;
+
+  @override
+  int get hashCode => (WireInSync).hashCode;
+
+  @override
+  String toString() => 'WireInSync()';
+}
+
+/// Someone else moved the bike to a mode this app can name: adopt it.
+class WireFollow extends WireVerdict {
+  const WireFollow(this.modeId);
+  final String modeId;
+
+  @override
+  bool operator ==(Object other) => other is WireFollow && other.modeId == modeId;
+
+  @override
+  int get hashCode => Object.hash(WireFollow, modeId);
+
+  @override
+  String toString() => 'WireFollow($modeId)';
+}
+
+/// The bike is somewhere the selection does not describe: write the selection
+/// back.
+class WireHeal extends WireVerdict {
+  const WireHeal(this.expectedWire);
+  final int expectedWire;
+
+  @override
+  bool operator ==(Object other) =>
+      other is WireHeal && other.expectedWire == expectedWire;
+
+  @override
+  int get hashCode => Object.hash(WireHeal, expectedWire);
+
+  @override
+  String toString() => 'WireHeal($expectedWire)';
+}
+
+/// Compares the wire the bike reports with the one the app asserts.
+///
+/// [assertedWire] is the controller's own last written wire: for a switching
+/// custom mode it is the only thing that knows which half of the pair the mode
+/// is on. A `modeLocked` bike turns a [WireFollow] into a heal — that is the
+/// caller's job, not this function's.
+WireVerdict wireVerdict({
+  required BikeRegion? region,
+  required SelectedMode selected,
+  required int reportedWire,
+  required int assertedWire,
+}) {
+  final expected = switch (selected) {
+    NativeSelection(:final profile) => profile.wire,
+    // An asserted wire the mode does not own — stale after an edit of the mode,
+    // or never written — would make a foreign byte read as in sync, or heal the
+    // bike onto a wire this mode never asserts.
+    CustomSelection(:final mode) => isStaticCustomMode(mode)
+        ? initialWireFor(selected)
+        : _pairWireFor(mode, assertedWire),
+  };
+  if (reportedWire == expected) {
+    return const WireInSync();
+  }
+  // A byte outside the table is a mis-sequenced read or a firmware the app does
+  // not know: never follow it.
+  if (reportedWire < 0 || reportedWire >= firmwareProfiles.length) {
+    return WireHeal(expected);
+  }
+  final bank = switch (region) {
+    BikeRegion.eu => const [4, 5, 6, 7],
+    BikeRegion.ch => const [chWireOffroad],
+    _ => const [0, 1, 2, 3],
+  };
+  // A native selection follows any other native of its own region: the rider
+  // picked it in another app, or the controller powered up in it.
+  if (selected is NativeSelection && bank.contains(reportedWire)) {
+    return WireFollow(nativeModeId(reportedWire));
+  }
+  // Off-road escape hatch, every region and every selection type: 3 and 7 are
+  // both unlimited with a throttle, so the bike really is off-road and the app
+  // has to say so rather than pull it back into a limit.
+  if (reportedWire == chWireUsOffroad || reportedWire == chWireOffroad) {
+    return WireFollow(nativeModeId(
+        region == BikeRegion.us || region == null
+            ? chWireUsOffroad
+            : chWireOffroad));
+  }
+  // Custom modes are the app's own composition: wires stop being 1:1 with
+  // modes, so anything else is a lost write or another app, and gets healed.
+  return WireHeal(expected);
+}
+
+/// The mode a CH bike is seeded with: what the old CH dynamic mode was, as a
+/// custom mode. Its id is fixed so migration can recognise it.
+const seededChModeId = 'seed-ch-25';
+const seededChMode = CustomMode(
+    id: seededChModeId, name: '25 km/h', limitKmh: 25, throttle: true);
+
 @freezed
 abstract class BikeState with _$BikeState {
   const BikeState._();
-  @Assert('mode <= 3')
-  @Assert('mode >= 0')
   @Assert('assist >= 0')
   @Assert('assist <= 4')
   @Assert('color >= 0')
   const factory BikeState(
       {required String id,
-      required int mode,
+      // LEGACY, write only: the projection of [modeId] into the pre custom
+      // modes integer. Kept in json so a downgraded build's `required int mode`
+      // still parses bikes.json instead of wiping it — _readBikes drops a bike
+      // it cannot read, and the next save overwrites the file.
+      @JsonKey(name: 'mode') @Default(0) int legacyMode,
+      // '' only pre-migration and in tests; resolution falls back.
+      @Default('') String modeId,
+      @Default(<CustomMode>[]) List<CustomMode> customModes,
       @Default(false) bool modeLocked,
       required bool light,
       @Default(false) bool lightLocked,
@@ -85,32 +425,111 @@ abstract class BikeState with _$BikeState {
       // the rider. Persisted, so an app restart still knows whose lock it is
       // and only ever turns off its own.
       @Default(false) bool modeLockAuto,
+      // Whether the app keeps trying to reconnect to this bike on its own.
+      @Default(true) bool autoReconnect,
       @Default(0) int color}) = _BikeState;
 
   factory BikeState.fromJson(Map<String, Object?> json) =>
-      _$BikeStateFromJson(json);
+      _$BikeStateFromJson(migrateBikeJson(json));
 
   factory BikeState.defaultState(String id) {
     return BikeState(
         id: id,
-        mode: 0,
+        legacyMode: 0,
         light: false,
         assist: 0,
         name: getName(seed: id),
-        region: BikeRegion.ch);
+        region: BikeRegion.ch,
+        customModes: const [seededChMode],
+        modeId: seededChModeId);
   }
 
+  /// The region's native modes plus this bike's custom ones. CH has no native
+  /// mode but off-road: its limits are the app's own composition.
+  ///
+  /// CH lists its custom modes FIRST. Its only native mode is unlimited, and
+  /// putting that at the head would make a fresh CH bike one step from
+  /// off-road in the cycling mode card — and would render the limited mode as
+  /// the accented one and off-road as the neutral default, the reverse of what
+  /// the card has always shown. Every other region leads with its natives,
+  /// whose first entry is the mildest mode.
+  List<SelectedMode> get selectableModes {
+    final wires = switch (region) {
+      BikeRegion.eu => const [4, 5, 6, 7],
+      BikeRegion.ch => const [chWireOffroad],
+      // us, and a legacy bike whose region was never guessed.
+      _ => const [0, 1, 2, 3],
+    };
+    final natives = [
+      for (final w in wires) NativeSelection(profileByWire(w))
+    ];
+    final customs = [for (final m in customModes) CustomSelection(m)];
+    return region == BikeRegion.ch
+        ? [...customs, ...natives]
+        : [...natives, ...customs];
+  }
+
+  /// Resolves [modeId]. A dangling or empty id resolves to [fallbackMode], so
+  /// deleting a mode or downgrading a file can never leave the bike modeless.
+  SelectedMode get selectedMode =>
+      selectableModes.firstWhere((m) => m.id == modeId,
+          orElse: () => fallbackMode);
+
+  /// Where selection lands when the selected mode is gone: the region's slowest
+  /// limited native — except CH, which has no limited native, so the first
+  /// remaining custom, else the seeded one.
+  ///
+  /// A lost selection never grants a faster cap. CH off-road would do exactly
+  /// that: deleting a mode, or loading a file whose modes are gone, would take
+  /// the limiter off. Off-road is reached by picking it, never by falling back.
+  SelectedMode get fallbackMode => switch (region) {
+        BikeRegion.eu => NativeSelection(profileByWire(4)), // EPAC 25
+        BikeRegion.ch => CustomSelection(
+            customModes.isNotEmpty ? customModes.first : seededChMode),
+        _ => NativeSelection(profileByWire(0)), // US Class 1, 32
+      };
+
+  /// The single choke point for selection changes: keeps [modeId] and its
+  /// legacy projection in sync. Nothing else may `copyWith(modeId:)`.
+  BikeState withSelectedMode(String newModeId) {
+    final next = copyWith(modeId: newModeId);
+    // Projected from what the id actually resolves to, not from the id itself:
+    // an id this region cannot select rides [fallbackMode], and the legacy int
+    // has to name the same mode or a downgrade lands somewhere else.
+    return next.copyWith(legacyMode: next._legacyModeFor(next.selectedMode));
+  }
+
+  int _legacyModeFor(SelectedMode selected) {
+    final wire = switch (selected) {
+      NativeSelection(:final profile) => profile.wire,
+      CustomSelection() => null,
+    };
+    return switch (region) {
+      // A custom mode projects to the old dynamic mode: behaviourally closest.
+      BikeRegion.ch => wire == chWireUsOffroad || wire == chWireOffroad ? 2 : 0,
+      BikeRegion.eu => wire == null ? 0 : (wire - 4).clamp(0, 3).toInt(),
+      _ => wire == null ? 0 : wire.clamp(0, 3).toInt(),
+    };
+  }
+
+  /// Adopts the rider-owned fields of a settings read-back.
+  ///
+  /// The mode is deliberately NOT inferred here any more: a wire byte stopped
+  /// being 1:1 with a mode when custom modes arrived, so what the reported byte
+  /// means is [wireVerdict]'s job, and only the controller — which knows which
+  /// half of a switching mode's pair it asserted — can ask it.
   BikeState updateFromData(List<int> data) {
     const lightIdx = 4;
     const modeIdx = 5;
     const assistIdx = 2;
-    final region = _guessRegion(data[modeIdx]);
-    final newmode = _modeFromRead(data[modeIdx], region);
-    return copyWith(
-        light: data[lightIdx] == 1,
-        mode: newmode,
-        assist: data[assistIdx],
-        region: region);
+    final next = copyWith(light: data[lightIdx] == 1, assist: data[assistIdx]);
+    if (region != null) {
+      return next;
+    }
+    // A legacy bike whose region was never guessed: the guess also decides
+    // which bank the selection lives in, so it has to be remapped into it —
+    // [selectableModes] answered with the US bank until a moment ago.
+    return remapModeForRegion(next, _guessRegion(data[modeIdx]));
   }
 
   BikeRegion _guessRegion(int mode) {
@@ -123,74 +542,163 @@ abstract class BikeState with _$BikeState {
     return BikeRegion.us;
   }
 
-  int _modeToWrite({required bool belowThreshold}) {
-    switch (region) {
-      case BikeRegion.eu:
-        return mode + 4;
-      case BikeRegion.ch:
-        switch (mode) {
-          case 0:
-            return belowThreshold ? chWireLow : chWireHigh;
-          case 1:
-            return chWireLow;
-          default:
-            return chWireOffroad;
-        }
-      default:
-        return mode;
-    }
-  }
+  /// Whether this bike needs the speed stream: only a custom mode whose base
+  /// and cap profiles differ has anything to switch. An exact-match custom mode
+  /// is as static as a native one — no stream, no keepAlive, no auto lock.
+  bool get needsSpeedSwitching => switch (selectedMode) {
+        CustomSelection(:final mode) => !isStaticCustomMode(mode),
+        NativeSelection() => false,
+      };
 
-  int _modeFromRead(int wire, BikeRegion region) {
-    if (region == BikeRegion.ch) {
-      switch (wire) {
-        case chWireHigh:
-          return 0;
-        case chWireLow:
-          // Ambiguous: dynamic mode below threshold writes the same byte as
-          // mode 2. Stay in dynamic mode if it is active.
-          return mode == 0 ? 0 : 1;
-        case chWireUsOffroad:
-        case chWireOffroad:
-          return 2;
-        default:
-          return mode;
-      }
-    }
-    if (wire > 3) {
-      return wire - 4;
-    }
-    return wire;
-  }
-
-  String get viewMode {
-    return "${mode + 1}";
-  }
-
-  int get modeCount {
-    return region?.modeCount ?? 4;
-  }
-
-  int get nextMode {
-    return (mode + 1) % modeCount;
-  }
-
-  bool get isDynamicMode {
-    return region == BikeRegion.ch && mode == 0;
-  }
-
-  List<int> toWriteData({bool belowThreshold = true}) {
-    return [
-      0,
-      209,
-      light ? 1 : 0,
-      assist,
-      _modeToWrite(belowThreshold: belowThreshold),
-      0,
-      0,
-      0,
-      0,
-      0
-    ];
+  /// The settings write packet, `[0, 209, light, assist, wire, 0...]`.
+  ///
+  /// The [wire] byte is the caller's: the app owns the mode, and which of a
+  /// switching mode's two profiles is asserted right now is knowledge only the
+  /// controller has.
+  List<int> toWriteData({required int wire}) {
+    return [0, 209, light ? 1 : 0, assist, wire, 0, 0, 0, 0, 0];
   }
 }
+
+/// Applies [newRegion] to [bike] and makes its selection valid for it.
+///
+/// A custom mode is the app's own composition and means the same thing in every
+/// region, so it is kept. A native one moves to the same index of the new
+/// region's bank (us <-> eu), and off-road stays off-road. Into CH, whose only
+/// native mode is off-road, everything else falls to off-road as well: the old
+/// clamp's rationale, that a region change must never hand the rider a speed
+/// limiter they did not ask for. Entering CH also seeds the seeded custom mode
+/// if it is gone, so a converted bike looks like a fresh one.
+BikeState remapModeForRegion(BikeState bike, BikeRegion? newRegion) {
+  // Resolved in the OLD region: a dangling id rides that region's fallback and
+  // is remapped from there, never left dangling into the new one.
+  final selected = bike.selectedMode;
+  var next = bike.copyWith(region: newRegion);
+  if (newRegion == BikeRegion.ch &&
+      !next.customModes.any((m) => m.id == seededChModeId)) {
+    next = next.copyWith(customModes: [seededChMode, ...next.customModes]);
+  }
+  final newModeId = switch (selected) {
+    CustomSelection(:final mode) => mode.id,
+    NativeSelection(:final profile) =>
+      _remappedNativeId(profile.wire, newRegion),
+  };
+  return next.withSelectedMode(newModeId);
+}
+
+String _remappedNativeId(int wire, BikeRegion? newRegion) {
+  final offroad = newRegion == BikeRegion.us || newRegion == null
+      ? chWireUsOffroad
+      : chWireOffroad;
+  if (wire == chWireUsOffroad || wire == chWireOffroad) {
+    return nativeModeId(offroad);
+  }
+  if (newRegion == BikeRegion.ch) {
+    // A limited native has to stay limited: CH has no native limit, so the
+    // seeded mode — just seeded above if it was gone — stands in for it.
+    return seededChModeId;
+  }
+  final index = wire >= 4 ? wire - 4 : wire;
+  return nativeModeId((newRegion == BikeRegion.eu ? 4 : 0) + index);
+}
+
+/// Old shape bikes.json (an integer `mode`, no `modeId`) to the new shape.
+/// Idempotent, and a pass-through for a map that already has a selection.
+///
+/// The legacy `mode` int is deliberately left as it is: it stays a valid
+/// downgrade projection, and rewriting it would change what the bike does.
+@visibleForTesting
+Map<String, Object?> migrateBikeJson(Map<String, Object?> json) {
+  final out = Map<String, Object?>.from(json);
+  final region = out['region']; // 200/201/202, or null on a legacy bike
+  final raw = out['modeId'];
+  // Null on the old shape: an integer `mode` and no selection of its own.
+  final modeId = raw is String && raw.isNotEmpty ? raw : null;
+  final newShape = modeId != null;
+  if (region == 202) {
+    // A fresh, untyped copy: inserting the seed into the caller's list would
+    // throw on a list with a narrower element type.
+    final rawCustoms = out['customModes'];
+    final customs = <Object?>[if (rawCustoms is List) ...rawCustoms];
+    final hasSeed = customs.any((c) => c is Map && c['id'] == seededChModeId);
+    // On the OLD shape the seed has to be there unconditionally: the migration
+    // maps the legacy CH modes 0 and 1 onto its id, so the mode it names must
+    // exist. On the NEW shape only an EMPTY list is seeded — the same guard
+    // deleteCustomMode and applySheetEdits apply, and for the same reason: CH
+    // needs one custom mode to fall back on, but a rider who deleted the
+    // built-in one in favour of their own has already provided it. Re-seeding
+    // there would undo that delete on every single load, at index 0, which is
+    // also where [BikeState.fallbackMode] looks.
+    if (!hasSeed && (!newShape || customs.isEmpty)) {
+      customs.insert(0, seededChMode.toJson());
+    }
+    out['customModes'] = customs;
+  }
+  if (modeId != null) {
+    return _reconcileStaleModeId(out, modeId, region);
+  }
+  // Every read below is type-guarded rather than cast: a wrong-typed value
+  // would throw out of BikeState.fromJson, and _readBikes drops a bike it
+  // cannot read — the next save then deletes it from the file for good.
+  final rawMode = out['mode'];
+  final mode = (rawMode is num ? rawMode.toInt() : 0).clamp(0, 3).toInt();
+  // Written back, not just used: an old build asserts mode <= 3 inside its own
+  // fromJson and has no per-entry catch, so an out-of-range int costs it every
+  // bike in the file. An absent key is filled in for the same reason.
+  out['mode'] = mode;
+  // Normalised the same way for every region, so a wrong-typed value cannot
+  // throw out of the generated parse.
+  final rawCustoms = out['customModes'];
+  out['customModes'] = <Object?>[if (rawCustoms is List) ...rawCustoms];
+  out['modeId'] = _modeIdForLegacy(mode, region);
+  return out;
+}
+
+/// Repairs a selection an interim build left behind.
+///
+/// Between the data model landing and the engine taking the selection over, the
+/// legacy `mode` int was still the live one: cycling a mode, following a
+/// read-back and saving the Edit sheet all moved it while `modeId` stood still.
+/// Trusting the stale id would put the bike back into a mode the rider left —
+/// an unlimited one, in the worst case. A NATIVE id that does not project onto
+/// the stored `mode` is therefore re-derived from it.
+///
+/// A custom id is trusted instead: a custom selection diverges from the legacy
+/// int by design (every one of them projects onto the same mildest mode), so
+/// disagreement there says nothing.
+Map<String, Object?> _reconcileStaleModeId(
+    Map<String, Object?> out, String modeId, Object? region) {
+  final wire = nativeWireOf(modeId);
+  final rawMode = out['mode'];
+  // Both sides have to exist before they can disagree: a map with no usable
+  // `mode` is not an interim build's, and re-deriving would invent a selection.
+  if (wire == null || rawMode is! num) {
+    return out;
+  }
+  final mode = rawMode.toInt().clamp(0, 3).toInt();
+  if (_legacyOfNativeId(wire, region) == mode) {
+    return out;
+  }
+  out['mode'] = mode;
+  out['modeId'] = _modeIdForLegacy(mode, region);
+  return out;
+}
+
+/// What a native selection projects onto, exactly as [BikeState.withSelectedMode]
+/// does it — resolution included: an id the region cannot select dangles onto
+/// that region's fallback, which is always its mildest mode, i.e. 0.
+int _legacyOfNativeId(int wire, Object? region) => switch (region) {
+      202 => wire == chWireOffroad ? 2 : 0,
+      201 => wire >= 4 && wire <= 7 ? wire - 4 : 0,
+      _ => wire >= 0 && wire <= 3 ? wire : 0,
+    };
+
+/// The selection a legacy `mode` int names, per region.
+String _modeIdForLegacy(int mode, Object? region) => switch (region) {
+      // CH: 0 (dynamic) and 1 (the removed static mode) both become the seeded
+      // custom mode, seeded by the caller; 2 was off-road.
+      202 => mode <= 1 ? seededChModeId : nativeModeId(chWireOffroad),
+      201 => nativeModeId(mode + 4),
+      // US, and a legacy bike whose region was never guessed.
+      _ => nativeModeId(mode),
+    };

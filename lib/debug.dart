@@ -60,9 +60,8 @@ class DebugPage extends ConsumerWidget {
                 'pressing a button on the bike itself; the mode button '
                 'simulates another app changing the mode (the bike has no mode '
                 'button). The app picks the change up on its next poll. '
-                'The slider simulates the rider speed that the CH dynamic mode '
-                'follows; it switches over at '
-                '${chSpeedThresholdKmh.round()} km/h.',
+                'The slider simulates the rider speed that dynamic custom '
+                'modes follow; each mode switches at its own limit.',
               ),
             ),
             for (final bike in fakeBikes)
@@ -115,8 +114,8 @@ class DebugPage extends ConsumerWidget {
 }
 
 /// Feeds a rider speed into one fake bike, standing in for the speed
-/// notifications a real bike sends. Ranges well past the CH dynamic-mode
-/// threshold so it can be crossed in both directions.
+/// notifications a real bike sends. Ranges past the highest limit a custom mode
+/// can have, so every limit can be crossed in both directions.
 class _FakeBikeSpeedControl extends ConsumerStatefulWidget {
   const _FakeBikeSpeedControl({required this.deviceId});
   final String deviceId;
@@ -154,6 +153,7 @@ class _FakeBikeSpeedControlState extends ConsumerState<_FakeBikeSpeedControl> {
           const Icon(Icons.speed, size: 20),
           Expanded(
             child: Slider(
+              key: ValueKey('fakeSpeedSlider:${widget.deviceId}'),
               value: _speedKmh,
               max: _maxKmh,
               divisions: _maxKmh.round(),

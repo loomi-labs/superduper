@@ -19,6 +19,11 @@ export 'package:superduper/models.dart';
 
 part 'bike.g.dart';
 
+/// The rider-owned fields of a settings packet. A caller of [Bike.writeStateData]
+/// is authoritative for the ones it just changed itself; the rest are taken from
+/// the bike, which the rider can change on the handlebar at any time.
+enum PacketField { light, assist }
+
 @riverpod
 class Bike extends _$Bike {
   /// A speed stream quieter than this is assumed to have died: the bike stops
@@ -35,18 +40,25 @@ class Bike extends _$Bike {
   Timer? _updateTimer;
   bool _writing = false;
 
-  /// The wire mode byte the app currently asserts on the bike while the CH
-  /// dynamic mode is active. The phone is the speed limiter there, so this is
-  /// the source of truth for which of [chWireLow]/[chWireHigh] the bike is
-  /// supposed to be in — the read-back cannot tell them apart.
-  int _dynamicWire = chWireLow;
+  /// The wire mode byte the app currently asserts on the bike.
+  ///
+  /// For a switching custom mode the phone is the speed limiter, so this is the
+  /// only source of truth for which half of the mode's profile pair the bike is
+  /// supposed to be in — the read-back cannot tell a mode from a wire any more.
+  /// Set from [initialWireFor] in [build], and kept in step by every write.
+  late int _assertedWire;
 
   /// When the last speed sample arrived, for the staleness watchdog.
   DateTime? _lastSpeedAt;
 
-  /// Whether the one-off work of entering dynamic mode has been done for the
-  /// mode that is active now, so rebuilds and repeated writes do not re-run it
-  /// (and do not ask for the notification permission again).
+  /// Last known contents of the bike's settings register: updated from every
+  /// valid settings read and from every successful write (the bike echoes a
+  /// write into the register). Fallback when a compose read fails.
+  ({bool light, int assist})? _lastKnown;
+
+  /// Whether the one-off work of entering a speed-switching mode has been done
+  /// for the mode that is active now, so rebuilds and repeated writes do not
+  /// re-run it (and do not ask for the notification permission again).
   bool _dynamicActive = false;
 
   /// Holds this provider alive while the control loop has to keep running
@@ -96,12 +108,17 @@ class Bike extends _$Bike {
         .read(connectionHandlerProvider(id).notifier)
         .speedStream
         .listen(_onSpeedSample);
+    // Derived from the restored selection rather than started at a constant:
+    // a bike that comes back from bikes.json on a mode whose base profile is
+    // not [chWireLow] would otherwise have every write until the first speed
+    // sample assert a wire that mode never rides.
+    _assertedWire = initialWireFor(bike.selectedMode);
     _syncKeepAlive(bike);
-    if (bike.isDynamicMode) {
-      // Dynamic mode is usually already active on the first build: it is the
-      // default mode of a CH bike and it comes back from bikes.json that way.
-      // Its setup must not depend on a transition through writeStateData.
-      _enterDynamicMode();
+    if (bike.needsSpeedSwitching) {
+      // A switching mode is usually already active on the first build: it is
+      // the default mode of a CH bike and it comes back from bikes.json that
+      // way. Its setup must not depend on a transition through writeStateData.
+      _enterSwitchingMode();
     }
     return bike;
   }
@@ -116,14 +133,14 @@ class Bike extends _$Bike {
     }
     // Re-take the speed stream from the handler as it is now: a subscription
     // made before the dropout may belong to a controller that is gone, which
-    // would leave the dynamic mode blind for the rest of the session.
+    // would leave a switching mode blind for the rest of the session.
     _speedSub?.cancel();
     _speedSub = ref
         .read(connectionHandlerProvider(id).notifier)
         .speedStream
         .listen(_onSpeedSample);
     // The bike may have power-cycled into its own default mode, so re-assert
-    // ours. Every region needs this, not just the dynamic mode: without it a
+    // ours. Every mode needs this, not just a switching one: without it a
     // reconnected bike keeps whatever it came up with until the next poll, and
     // that poll does not force, so a difference the read cannot see (a wire
     // byte that maps back to the same mode) is never corrected at all. Done
@@ -160,11 +177,11 @@ class Bike extends _$Bike {
     await updateStateDataNow(force: true);
   }
 
-  /// Rides the CH dynamic mode: US Class 2 below the threshold, EPAC above it.
-  /// Writes only when the threshold is crossed, never per sample.
+  /// Rides a switching custom mode: its base profile below its limit, its cap
+  /// profile above. Writes only when the limit is crossed, never per sample.
   void _onSpeedSample(double speedKmh) {
     _lastSpeedAt = DateTime.now();
-    if (!state.isDynamicMode) {
+    if (!state.needsSpeedSwitching) {
       return;
     }
     // A sample can still be delivered right after a disconnect, so gate on the
@@ -172,21 +189,29 @@ class Bike extends _$Bike {
     if (!_isConnected) {
       return;
     }
-    var newWire = chDynamicWire(speedKmh, _dynamicWire);
-    if (newWire == _dynamicWire) {
+    final selected = state.selectedMode;
+    if (selected is! CustomSelection) {
+      // Unreachable: only a custom mode ever needs speed switching.
+      return;
+    }
+    var newWire = dynamicWireFor(selected.mode, speedKmh, _assertedWire);
+    if (newWire == _assertedWire) {
       return;
     }
     log.d(SDLogger.bike,
-        'Dynamic mode at $speedKmh km/h: wire $_dynamicWire -> $newWire');
-    _dynamicWire = newWire;
-    // Same settings, new wire byte: writeStateData takes it from _dynamicWire.
-    writeStateData(state);
+        '${selected.name} at $speedKmh km/h: wire $_assertedWire -> $newWire');
+    _assertedWire = newWire;
+    // Same settings, new wire byte: writeStateData takes it from _assertedWire.
+    // Nothing here is the rider's doing, so light and assist come off the bike.
+    // Dropped if the rider changes mode before it reaches the queue's head:
+    // this snapshot would otherwise put the mode they left back.
+    writeStateData(state, authoritative: const {}, abortIfStale: true);
   }
 
-  /// The bike stops streaming ride data on its own; without speed samples the
-  /// dynamic mode is blind, so re-arm the stream when it dries up.
+  /// The bike stops streaming ride data on its own; without speed samples a
+  /// switching mode is blind, so re-arm the stream when it dries up.
   void _checkSpeedStream() {
-    if (!state.isDynamicMode || !_isConnected) {
+    if (!state.needsSpeedSwitching || !_isConnected) {
       return;
     }
     var last = _lastSpeedAt;
@@ -197,10 +222,10 @@ class Bike extends _$Bike {
     unawaited(_requestRideData());
   }
 
-  /// Dynamic mode and Background Lock both need the control loop to keep
-  /// running when the UI is gone.
+  /// A switching mode and the Background Lock both need the control loop to
+  /// keep running when the UI is gone.
   void _syncKeepAlive(BikeState bike) {
-    var needed = bike.modeLock || bike.isDynamicMode;
+    var needed = bike.modeLock || bike.needsSpeedSwitching;
     if (needed == (_keepAlive != null)) {
       return;
     }
@@ -267,22 +292,44 @@ class Bike extends _$Bike {
       log.w(SDLogger.bike, 'Ignoring non settings read: $data');
       return;
     }
+    // Bike truth, before any lock override turns it into app desire.
+    _lastKnown = (light: data[4] == 1, assist: data[2]);
     var newState = state.updateFromData(data);
-    var healWire = _needsWireHeal(data);
-    if (healWire) {
-      log.d(SDLogger.bike,
-          'Bike is on wire ${data[5]}, re-asserting mode ${state.mode}');
+    // Judged on [newState], not on [state]: for a legacy bike without a region
+    // this read is what guesses one, and the guess moves the selection into
+    // that region's bank. Asking with the old, bankless selection would call
+    // the bike's own EU wire foreign and heal it back into the US bank. For
+    // every bike that already has a region the two are the same question.
+    final verdict = wireVerdict(
+        region: newState.region,
+        selected: newState.selectedMode,
+        reportedWire: data[5],
+        assertedWire: _assertedWire);
+    var heal = false;
+    switch (verdict) {
+      case WireInSync():
+        break;
+      case WireFollow(:final modeId):
+        // A locked mode is the one thing that does not follow: the rider asked
+        // the app to hold this mode against anything that moves it.
+        if (state.modeLocked) {
+          heal = true;
+        } else {
+          newState = newState.withSelectedMode(modeId);
+        }
+      case WireHeal():
+        heal = true;
     }
-    if (newState == state && !force && !healWire) {
+    if (heal) {
+      log.d(SDLogger.bike,
+          'Bike is on wire ${data[5]}, re-asserting ${state.selectedMode.name}');
+    }
+    if (newState == state && !force && !heal) {
       return;
     }
     log.d(SDLogger.bike, 'State update from data: $data');
     if (state.lightLocked && state.light != newState.light) {
       newState = newState.copyWith(light: state.light);
-    }
-
-    if (state.modeLocked && state.mode != newState.mode) {
-      newState = newState.copyWith(mode: state.mode);
     }
 
     if (state.assistLocked && state.assist != newState.assist) {
@@ -291,57 +338,82 @@ class Bike extends _$Bike {
     writeStateData(newState);
   }
 
-  /// True when the bike has to be pushed back onto the packet the app asserts,
-  /// even though the read-back reports no mode change.
-  ///
-  /// In the CH region the app owns the mode, because CH modes are the app's own
-  /// composition of the bike's profiles. Two cases the mode comparison in
-  /// [updateStateDataNow] cannot see:
-  ///
-  /// * a wire byte the CH read-back does not map ([chMapsToMode]). The state
-  ///   keeps the mode it had, so nothing looks wrong, while the bike is on
-  ///   whatever profile that byte selects (e.g. EU 35/45 km/h from wire 5/6).
-  ///   The bike itself has no mode button — an unmapped byte means another app
-  ///   (the official one writes any of 0-7) set it, or the controller powered
-  ///   up in a different mode. True for every CH mode, dynamic or not.
-  /// * dynamic mode sitting on the other of [chWireLow]/[chWireHigh] than the
-  ///   app asserted, i.e. a lost transition write: models.dart maps both bytes
-  ///   to dynamic mode.
-  ///
-  /// A mapped byte is otherwise the rider's: [chWireUsOffroad] and
-  /// [chWireOffroad] are followed to off-road, [chWireLow]/[chWireHigh] follow
-  /// the sticky dynamic-mode rules.
-  bool _needsWireHeal(List<int> data) {
-    if (state.region != BikeRegion.ch || data.length <= 5) {
+  /// Whether [field] has to come off the bike rather than out of the app: the
+  /// caller did not set it, and no lock pins the app's value over bike truth.
+  bool _needsBikeTruth(
+      PacketField field, BikeState bike, Set<PacketField> authoritative) {
+    if (authoritative.contains(field)) {
       return false;
     }
-    var raw = data[5];
-    if (!chMapsToMode(raw)) {
-      return true;
-    }
-    if (state.isDynamicMode && (raw == chWireLow || raw == chWireHigh)) {
-      return raw != _dynamicWire;
-    }
-    return false;
+    return !(field == PacketField.light ? bike.lightLocked : bike.assistLocked);
   }
 
-  void writeStateData(BikeState newState, {saveToBike = true}) async {
+  /// Rider-owned packet fields, per the priority in [writeStateData].
+  ({bool light, int assist}) _composePacket(BikeState bike,
+      Set<PacketField> authoritative, ({bool light, int assist})? fresh) {
+    final known = fresh ?? _lastKnown;
+    return (
+      light: _needsBikeTruth(PacketField.light, bike, authoritative)
+          ? (known?.light ?? bike.light)
+          : bike.light,
+      assist: _needsBikeTruth(PacketField.assist, bike, authoritative)
+          ? (known?.assist ?? bike.assist)
+          : bike.assist,
+    );
+  }
+
+  /// Writes [newState] to the bike and saves it.
+  ///
+  /// The caller is [authoritative] only for the fields it changed itself. Every
+  /// other rider-owned field is composed, in this order: the app value if the
+  /// field is locked, a fresh read taken in the same register slot as the write,
+  /// [_lastKnown], and finally the app value. Without this a machine write (a
+  /// speed transition) or a one-field user toggle puts a stale copy of the other
+  /// field back on the bike, undoing what the rider did on the handlebar.
+  void writeStateData(BikeState newState,
+      {saveToBike = true,
+      bool abortIfStale = false,
+      Set<PacketField> authoritative = const {
+        PacketField.light,
+        PacketField.assist
+      }}) async {
     if (_deleted) {
       // The record is gone; saving would put it back into bikes.json.
       return;
     }
+    // A machine write carries a snapshot of the state it was composed from. If
+    // the rider changes mode while it sits in the register queue, it would land
+    // last and put the snapshot — the mode they just left — back into state and
+    // into bikes.json, and the app owns the mode, so nothing would ever heal
+    // it. Dropping the write instead costs at most one transition, which the
+    // next sample or the poll's heal re-asserts.
+    final stale = abortIfStale ? state : null;
     _resetDebounce();
     if (state.id != newState.id) {
       throw Exception('Bike id mismatch');
     }
-    var wasDynamic = state.isDynamicMode;
-    var entering = newState.isDynamicMode && !wasDynamic;
-    var leaving = wasDynamic && !newState.isDynamicMode;
-    // Dynamic mode always starts on the low (throttle) wire byte; the next
-    // speed sample moves it up if the rider is already fast.
-    var wire = entering ? chWireLow : _dynamicWire;
-    if (leaving && state.modeLockAuto) {
-      // Only the lock dynamic mode turned on is turned off again.
+    final oldSel = state.selectedMode;
+    final newSel = newState.selectedMode;
+    // Identity only: renaming the mode the bike is riding is not a mode change,
+    // and must neither reset the wire (lifting the cap mid-ride) nor re-run the
+    // one-off setup, which asks for the notification permission again.
+    final modeChanged = oldSel.id != newSel.id;
+    final wasSwitching = state.needsSpeedSwitching;
+    final nowSwitching = newState.needsSpeedSwitching;
+    // A wire the new selection never asserts is no memory of anything — an edit
+    // moved the mode's profile pair out from under it. Normalised exactly as
+    // [wireVerdict] normalises it, so a heal write can never contradict the
+    // verdict that asked for it.
+    final asserted = assertsWire(newSel, _assertedWire)
+        ? _assertedWire
+        : initialWireFor(newSel);
+    // A mode is entered on its initial wire — for a switching one that is its
+    // base profile, and the next speed sample moves it up if the rider is
+    // already fast. Only an unchanged switching mode keeps the wire it is on.
+    final wire =
+        (modeChanged || !nowSwitching) ? initialWireFor(newSel) : asserted;
+    if (wasSwitching && !nowSwitching && state.modeLockAuto) {
+      // Only the lock a switching mode turned on is turned off again.
       newState = newState.copyWith(modeLock: false, modeLockAuto: false);
     }
     var status = ref.read(connectionHandlerProvider(state.id));
@@ -351,11 +423,40 @@ class Bike extends _$Bike {
       }
       _writing = true;
       final repo = ref.read(connectionHandlerProvider(state.id).notifier);
-      final data = newState.toWriteData(belowThreshold: wire == chWireLow);
+      // Skipped when every field resolves without the bike, so the heal path,
+      // which composed from a read microseconds ago, does not read twice.
+      final needsFreshRead =
+          _needsBikeTruth(PacketField.light, newState, authoritative) ||
+              _needsBikeTruth(PacketField.assist, newState, authoritative);
+      List<int>? data;
+      var aborted = false;
       try {
-        // Through the queue: a settings write is a select-then-write sequence
-        // on the same characteristic reads and ride data requests use.
-        await _withRegister(() => repo.write(data));
+        // One queue slot for read and write both: a settings write is a
+        // select-then-write sequence on the same characteristic reads and ride
+        // data requests use, so a poll or ride data request queued between the
+        // two would break the select-then-use invariant.
+        await _withRegister(() async {
+          if (stale != null && !identical(stale, state)) {
+            log.d(SDLogger.bike, 'Dropping a write composed before a change');
+            aborted = true;
+            return;
+          }
+          ({bool light, int assist})? fresh;
+          if (needsFreshRead) {
+            final read = await repo.read();
+            if (read != null && isSettingsPacket(read)) {
+              fresh = (light: read[4] == 1, assist: read[2]);
+              _lastKnown = fresh;
+            } else {
+              log.w(SDLogger.bike, 'Composing from cache, bad read: $read');
+            }
+          }
+          final composed = _composePacket(newState, authoritative, fresh);
+          newState =
+              newState.copyWith(light: composed.light, assist: composed.assist);
+          data = newState.toWriteData(wire: wire);
+          await repo.write(data!);
+        });
       } catch (e) {
         // A latched _writing would silence the poll for good, and with it the
         // dynamic-mode self-heal that is meant to recover from exactly this.
@@ -363,6 +464,14 @@ class Bike extends _$Bike {
         log.e(SDLogger.bike, 'Error writing to bike', e);
         return;
       }
+      if (aborted) {
+        // Nothing went on the wire, so nothing about the bike is known now —
+        // and the state this write carried is out of date by definition.
+        _writing = false;
+        return;
+      }
+      // The bike echoes a write into its register, so this is bike truth too.
+      _lastKnown = (light: newState.light, assist: newState.assist);
       // The bike may have been deleted while the write was in flight; saving
       // now would bring it back.
       if (!ref.mounted || _deleted) {
@@ -370,7 +479,7 @@ class Bike extends _$Bike {
       }
       log.d(SDLogger.bike, 'Wrote data to bike: $data');
     }
-    _dynamicWire = wire;
+    _assertedWire = wire;
     var lockChanged = state.modeLock != newState.modeLock;
     ref.read(bikesDBProvider.notifier).saveBike(newState);
     state = newState;
@@ -378,24 +487,26 @@ class Bike extends _$Bike {
     if (lockChanged) {
       _syncBackgroundLock(newState.modeLock);
     }
-    if (leaving) {
+    // Re-armed on any mode change, not only on leaving: switching from one
+    // custom mode to another has to re-run the setup for the new one.
+    if (modeChanged || (wasSwitching && !nowSwitching)) {
       _dynamicActive = false;
     }
-    if (entering) {
-      _enterDynamicMode();
+    if (nowSwitching) {
+      _enterSwitchingMode();
     }
     updateStateData();
   }
 
-  /// One-off work for dynamic mode being active: ask for the speed stream it
-  /// lives on, and put the phone in a state where it keeps running. Idempotent —
-  /// both a transition and a fresh build land here.
-  void _enterDynamicMode() {
+  /// One-off work for a speed-switching mode being active: ask for the speed
+  /// stream it lives on, and put the phone in a state where it keeps running.
+  /// Idempotent — both a transition and a fresh build land here.
+  void _enterSwitchingMode() {
     if (_dynamicActive) {
       return;
     }
     _dynamicActive = true;
-    log.d(SDLogger.bike, 'Dynamic mode is active');
+    log.d(SDLogger.bike, 'Speed switching is active');
     // Deferred: this also runs from build, where state cannot be read yet.
     unawaited(Future<void>.microtask(() async {
       if (!ref.mounted) {
@@ -409,22 +520,22 @@ class Bike extends _$Bike {
     }));
   }
 
-  /// Dynamic mode has to keep limiting the speed while the phone sits in a
+  /// A switching mode has to keep limiting the speed while the phone sits in a
   /// pocket, which on Android needs the foreground service. A lock the rider
   /// turned on themselves is left alone (and never auto-disabled).
   Future<void> _enableAutoBackgroundLock() async {
     if (!Platform.isAndroid) {
       return;
     }
-    if (!ref.mounted || !state.isDynamicMode || state.modeLock) {
+    if (!ref.mounted || !state.needsSpeedSwitching || state.modeLock) {
       return;
     }
     await Permission.notification.request();
     await FlutterForegroundTask.requestIgnoreBatteryOptimization();
-    if (!ref.mounted || !state.isDynamicMode || state.modeLock) {
+    if (!ref.mounted || !state.needsSpeedSwitching || state.modeLock) {
       return;
     }
-    log.i(SDLogger.bike, 'Dynamic mode: turning Background Lock on');
+    log.i(SDLogger.bike, 'Speed switching: turning Background Lock on');
     writeStateData(state.copyWith(modeLock: true, modeLockAuto: true),
         saveToBike: false);
   }
@@ -442,18 +553,79 @@ class Bike extends _$Bike {
 
   void toggleLight() async {
     log.d(SDLogger.bike, 'Toggling light: ${!state.light}');
-    writeStateData(state.copyWith(light: !state.light));
+    writeStateData(state.copyWith(light: !state.light),
+        authoritative: const {PacketField.light});
   }
 
-  void toggleMode() async {
-    log.d(SDLogger.bike, 'Toggling mode to: ${state.nextMode}');
-    writeStateData(state.copyWith(mode: state.nextMode));
+  /// Selects [modeId], which may be a native or a custom mode. A dangling id
+  /// resolves to the bike's fallback rather than being rejected.
+  void selectMode(String modeId) {
+    log.d(SDLogger.bike, 'Selecting mode: $modeId');
+    // A mode change is nobody's light or assist change, so both come off the
+    // bike rather than out of a state that may be a poll interval old.
+    writeStateData(state.withSelectedMode(modeId), authoritative: const {});
   }
 
-  void toggleAssist() async {
-    final newAssist = (state.assist + 1) % 5;
-    log.d(SDLogger.bike, 'Toggling assist to: $newAssist');
-    writeStateData(state.copyWith(assist: newAssist));
+  /// Saves a change to the bike's own set of modes, and puts it on the wire
+  /// when it changes what the bike is riding.
+  ///
+  /// The save is unconditional and comes first: a mode the rider authored, or
+  /// deleted, is theirs whether or not the bike happens to be in range. Only
+  /// the wire needs a connection, and it catches up on its own — through the
+  /// poll's heal or the reconnect re-assert.
+  void _saveModes(BikeState next, {required bool assertWire}) {
+    writeStateData(next, saveToBike: false, authoritative: const {});
+    if (assertWire && _isConnected) {
+      writeStateData(state, authoritative: const {});
+    }
+  }
+
+  /// Adds a custom mode, or replaces the one with the same id.
+  ///
+  /// Editing the mode the bike is on re-initialises the asserted wire when the
+  /// edit moves the mode's profile pair; a rename leaves the bike where it is.
+  void upsertCustomMode(CustomMode mode) {
+    final modes = [...state.customModes];
+    final index = modes.indexWhere((m) => m.id == mode.id);
+    if (index == -1) {
+      modes.add(mode);
+    } else {
+      modes[index] = mode;
+    }
+    _saveModes(state.copyWith(customModes: modes),
+        assertWire: state.selectedMode.id == mode.id);
+  }
+
+  /// Removes a custom mode. If the bike was on it, selection lands on
+  /// [BikeState.fallbackMode] and that mode's initial wire goes to the bike,
+  /// with the usual teardown if the bike stops switching.
+  void deleteCustomMode(String modeId) {
+    log.i(SDLogger.bike, 'Deleting custom mode: $modeId');
+    final selected = state.selectedMode.id == modeId;
+    final remaining = state.customModes.where((m) => m.id != modeId).toList();
+    var next = state.copyWith(customModes: remaining);
+    if (next.region == BikeRegion.ch && remaining.isEmpty) {
+      // CH has no limited native mode, so its fallback is a custom one. Left
+      // empty, the fallback would resolve to a mode that is not in
+      // [selectableModes] at all — in memory only, and gone on the next load.
+      next = next.copyWith(customModes: const [seededChMode]);
+    }
+    if (selected) {
+      next = next.withSelectedMode(next.fallbackMode.id);
+    }
+    _saveModes(next, assertWire: selected);
+  }
+
+  /// Sets the pedal assist level. The rider owns the level they just picked;
+  /// the light still comes off the bike.
+  void setAssist(int level) {
+    assert(level >= 0 && level <= 4, 'assist level out of range: $level');
+    if (level == state.assist) {
+      return;
+    }
+    log.d(SDLogger.bike, 'Setting assist to: $level');
+    writeStateData(state.copyWith(assist: level),
+        authoritative: const {PacketField.assist});
   }
 
   void toggleLightLocked() async {
@@ -484,8 +656,8 @@ class Bike extends _$Bike {
 
   /// Deletes the bike and tears this notifier down with it.
   ///
-  /// Removing the record is not enough: dynamic mode and the Background Lock
-  /// hold the notifier alive without any UI, so its poll, its speed samples and
+  /// Removing the record is not enough: a switching mode and the Background
+  /// Lock hold the notifier alive without any UI, so its poll, its samples and
   /// the foreground service would all keep running — and the first write would
   /// call [BikesDB.saveBike], putting the deleted bike straight back into
   /// bikes.json.
@@ -634,6 +806,7 @@ class BikePageState extends ConsumerState<BikePage> {
                 expandedHeight: 60, // Reduced height without the title
                 stretch: true,
                 leading: IconButton(
+                  tooltip: 'Back',
                   icon: Container(
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
@@ -652,6 +825,7 @@ class BikePageState extends ConsumerState<BikePage> {
                 ),
                 actions: [
                   IconButton(
+                    tooltip: 'Bike settings',
                     icon: Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
@@ -799,8 +973,11 @@ class EnhancedConnectionWidget extends ConsumerWidget {
       bgColor = Colors.green
           .withAlpha(38); // 0.15 opacity equals alpha 38 (0.15 * 255)
       disabled = true;
-    } else if (connectionStatus == SDBluetoothConnectionState.disconnected &&
-        !isScanning) {
+    } else if (connectionStatus == SDBluetoothConnectionState.disconnected) {
+      // Offered while a scan is running too. The select page scans for 100 s on
+      // startup, and with auto-reconnect off that is exactly the window a rider
+      // who just power-cycled the bike reaches for this button in — the Edit
+      // sheet's own caption promises them it always works.
       text = 'Connect';
       icon = Icons.bluetooth;
       textColor = const Color(0xff4A80F0);
@@ -812,7 +989,13 @@ class EnhancedConnectionWidget extends ConsumerWidget {
       borderRadius: BorderRadius.circular(20),
       onTap: disabled
           ? null
-          : () {
+          : () async {
+              // A scan in flight comes down first: connecting out from under an
+              // active scan is the case the platforms are least happy about,
+              // and the rider asking for this bike is done looking for others.
+              if (isScanning) {
+                await ref.read(bluetoothRepositoryProvider).stopScan();
+              }
               connectionHandler.connect();
             },
       child: Container(
@@ -918,22 +1101,33 @@ class EnhancedModeControlWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
-    final bool isActiveMode = bike.viewMode != '1';
+    // Matched by id, never by list membership: a CH bike whose custom modes are
+    // gone rides a fallback that is not in [selectableModes] at all, and the
+    // card then has to render with nothing selected rather than misaccent or
+    // throw.
+    final selectedModeId = bike.selectedMode.id;
 
     return Column(
       children: [
         Row(
           children: [
             Expanded(
-              child: DiscoverCard(
+              child: SelectorCard(
                 colorIndex: bike.color,
                 title: "Mode",
-                metric: "${bike.viewMode}/${bike.modeCount}",
                 titleIcon: Icons.electric_bike,
-                selected: isActiveMode,
-                onTap: () {
-                  bikeControl.toggleMode();
-                },
+                items: [
+                  for (final mode in bike.selectableModes)
+                    SelectorItem(
+                      keyValue: 'modeChip:${mode.id}',
+                      label: mode.name,
+                      tooltip: 'Select mode ${mode.name}',
+                      selected: mode.id == selectedModeId,
+                      onTap: () {
+                        bikeControl.selectMode(mode.id);
+                      },
+                    ),
+                ],
               ),
             ),
             EnhancedLockWidget(
@@ -943,9 +1137,9 @@ class EnhancedModeControlWidget extends ConsumerWidget {
             )
           ],
         ),
-        // iOS has no background service, so the dynamic mode's speed switching
+        // iOS has no background service, so a custom mode's speed switching
         // only runs while the app is in the foreground.
-        if (Platform.isIOS && bike.isDynamicMode)
+        if (Platform.isIOS && bike.needsSpeedSwitching)
           Padding(
             padding: const EdgeInsets.only(top: 12.0, left: 8.0, right: 8.0),
             child: Row(
@@ -1022,20 +1216,26 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
-    final bool isActiveAssist = bike.assist > 0;
 
     return Row(
       children: [
         Expanded(
-          child: DiscoverCard(
+          child: SelectorCard(
             colorIndex: bike.color,
             title: "Assist",
-            metric: "${bike.assist}/4",
             titleIcon: Icons.autorenew,
-            selected: isActiveAssist,
-            onTap: () {
-              bikeControl.toggleAssist();
-            },
+            items: [
+              for (var level = 0; level <= 4; level++)
+                SelectorItem(
+                  keyValue: 'assistChip:$level',
+                  label: '$level',
+                  tooltip: 'Select assist $level',
+                  selected: bike.assist == level,
+                  onTap: () {
+                    bikeControl.setAssist(level);
+                  },
+                ),
+            ],
           ),
         ),
         EnhancedLockWidget(

@@ -35,6 +35,18 @@ class FakeBikeStore {
   final Map<String, List<int>> _registers = {};
   final Map<String, double> _speeds = {};
   final Map<String, StreamController<double>> _speedControllers = {};
+  final Map<String, int> _rideDataRequests = {};
+
+  /// How often the app has asked this bike to start streaming ride data. A
+  /// fake bike streams whenever the debug slider moves, so the request itself
+  /// does nothing — but it is the one visible sign that the control loop
+  /// entered a speed-switching mode.
+  int rideDataRequests(String deviceId) => _rideDataRequests[deviceId] ?? 0;
+
+  void noteRideDataRequest(String deviceId) {
+    _rideDataRequests[deviceId] = rideDataRequests(deviceId) + 1;
+    log.d(SDLogger.bluetooth, 'Fake bike $deviceId ride data requested');
+  }
 
   List<int> _register(String deviceId) =>
       _registers.putIfAbsent(deviceId, () => List<int>.from(_defaultRegister));
