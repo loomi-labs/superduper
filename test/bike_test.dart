@@ -8,6 +8,7 @@ import 'package:superduper/bike.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/fake_bike.dart';
 import 'package:superduper/repository.dart';
+import 'package:superduper/utils/logger.dart';
 
 /// A bike whose BLE writes fail, to check the notifier does not report a write
 /// that never landed — and does not latch itself.
@@ -1255,6 +1256,103 @@ void main() {
       expect(state.modeLock, isTrue,
           reason: 'the lock is torn down on leaving, not on changing mode');
       expect(state.modeLockAuto, isTrue);
+    });
+  });
+
+  group('speedTraceLine', () {
+    test('a fresh sample is one greppable line', () {
+      expect(
+          speedTraceLine(
+              speedKmh: 23.06,
+              sampleAge: const Duration(seconds: 1),
+              maxAge: const Duration(seconds: 5),
+              wire: 4),
+          'Speed 23.06 km/h, wire 4');
+    });
+
+    test('a bike that never reported a speed traces nothing', () {
+      expect(
+          speedTraceLine(
+              speedKmh: null,
+              sampleAge: null,
+              maxAge: const Duration(seconds: 5),
+              wire: 4),
+          isNull);
+      expect(
+          speedTraceLine(
+              speedKmh: 12.0,
+              sampleAge: null,
+              maxAge: const Duration(seconds: 5),
+              wire: 4),
+          isNull,
+          reason: 'a speed with no arrival time cannot be judged for staleness');
+    });
+
+    test('a stale sample is dropped rather than repeated', () {
+      expect(
+          speedTraceLine(
+              speedKmh: 23.06,
+              sampleAge: const Duration(seconds: 6),
+              maxAge: const Duration(seconds: 5),
+              wire: 4),
+          isNull,
+          reason: 'the bike stops streaming at a standstill, and repeating the '
+              'last value would log a parked bike as still moving');
+    });
+  });
+
+  group('the ride log', () {
+    /// Attaches the rotating file sink for this test and returns a reader of
+    /// what has reached the disk.
+    Future<Future<String> Function()> attachRideLog() async {
+      final directory = '${tempDir.path}/logs';
+      await log.attachFileSink(directory: directory);
+      // Before the tearDown that removes tempDir: the file handle has to go
+      // first.
+      addTearDown(log.detachFileSink);
+      return () async {
+        await log.flushFileSink();
+        return File('$directory/${SDLogger.logFileName}').readAsStringSync();
+      };
+    }
+
+    test('a poll tick traces the speed with the bike id and the wire',
+        () async {
+      final container = makeContainer();
+      final readLog = await attachRideLog();
+      final bike = await openBike(container, region: BikeRegion.ch);
+
+      container.read(fakeBikeStoreProvider).setSpeed(id, 23.06);
+      await settle();
+      bike.logSpeedTrace();
+
+      expect(await readLog(), contains('[Bike] [$id] Speed 23.06 km/h, wire '),
+          reason: 'a ride analysis joins this against the [Bluetooth] lines by '
+              'device id, and needs the wire to read the trace');
+    });
+
+    test('a bike that reported no speed yet traces nothing', () async {
+      final container = makeContainer();
+      final readLog = await attachRideLog();
+      final bike = await openBike(container, region: BikeRegion.ch);
+
+      bike.logSpeedTrace();
+
+      expect(await readLog(), isNot(contains(' km/h, wire ')),
+          reason: 'an invented speed is worse than a gap in the trace');
+    });
+
+    test('every notifier line carries the bike it belongs to', () async {
+      final container = makeContainer();
+      final readLog = await attachRideLog();
+      final bike = await openBike(container, region: BikeRegion.ch);
+
+      bike.selectMode(nativeModeId(chWireOffroad));
+      await settle();
+
+      expect(await readLog(), contains('[Bike] [$id] Selecting mode:'),
+          reason: 'a two-bike session can only be disentangled if every line '
+              'says which bike it is about');
     });
   });
 }

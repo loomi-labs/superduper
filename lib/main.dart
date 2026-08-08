@@ -136,7 +136,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                   (element) => element.isDenied,
                 );
                 if (denied) {
-                  log.i(SDLogger.bike, 'Permission denied: ${snapshot.data}');
+                  log.i(SDLogger.general, 'Permission denied: ${snapshot.data}');
                   return const PermissionPage();
                 }
                 return const BikeSelectWidget();

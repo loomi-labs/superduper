@@ -24,6 +24,24 @@ part 'bike.g.dart';
 /// the bike, which the rider can change on the handlebar at any time.
 enum PacketField { light, assist }
 
+/// The fixed-interval speed line for the ride log, or null when there is
+/// nothing honest to write.
+///
+/// Fed from the 5 s poll rather than from every sample: speed arrives roughly
+/// once a second, which is a line per second against the rotating file's cap.
+/// A sample older than [maxAge] is dropped instead of repeated — the bike stops
+/// streaming ride data at a standstill, so repeating the last value would
+/// record a parked bike as still moving.
+String? speedTraceLine({
+  required double? speedKmh,
+  required Duration? sampleAge,
+  required Duration maxAge,
+  required int wire,
+}) =>
+    (speedKmh == null || sampleAge == null || sampleAge > maxAge)
+        ? null
+        : 'Speed $speedKmh km/h, wire $wire';
+
 @riverpod
 class Bike extends _$Bike {
   /// A speed stream quieter than this is assumed to have died: the bike stops
@@ -50,6 +68,9 @@ class Bike extends _$Bike {
 
   /// When the last speed sample arrived, for the staleness watchdog.
   DateTime? _lastSpeedAt;
+
+  /// The last speed the bike reported, in km/h, for the ride log's trace.
+  double? _lastSpeedKmh;
 
   /// Last known contents of the bike's settings register: updated from every
   /// valid settings read and from every successful write (the bike echoes a
@@ -78,6 +99,16 @@ class Bike extends _$Bike {
   /// on one shared characteristic: interleaved, a state read comes back with
   /// ride data, which the poll would then write to the bike as settings.
   Future<void> _registerQueue = Future<void>.value();
+
+  /// Every line this notifier writes carries the device id: it is the join key
+  /// against the `[Bluetooth]` lines, which log the same id, and it is the only
+  /// way to tell two bikes apart in one session. Through helpers rather than at
+  /// each call site so a new line cannot forget it.
+  void _logD(String message) => log.d(SDLogger.bike, '[$id] $message');
+  void _logI(String message) => log.i(SDLogger.bike, '[$id] $message');
+  void _logW(String message) => log.w(SDLogger.bike, '[$id] $message');
+  void _logE(String message, [Object? error, StackTrace? stackTrace]) =>
+      log.e(SDLogger.bike, '[$id] $message', error, stackTrace);
 
   @override
   BikeState build(String id) {
@@ -173,7 +204,7 @@ class Bike extends _$Bike {
     if (!ref.mounted || !_isConnected) {
       return;
     }
-    log.d(SDLogger.bike, 'Reconnected, re-asserting state');
+    _logD('Reconnected, re-asserting state');
     await updateStateDataNow(force: true);
   }
 
@@ -181,6 +212,8 @@ class Bike extends _$Bike {
   /// profile above. Writes only when the limit is crossed, never per sample.
   void _onSpeedSample(double speedKmh) {
     _lastSpeedAt = DateTime.now();
+    // Before every gate: the ride log traces a bike that never switches too.
+    _lastSpeedKmh = speedKmh;
     if (!state.needsSpeedSwitching) {
       return;
     }
@@ -198,7 +231,7 @@ class Bike extends _$Bike {
     if (newWire == _assertedWire) {
       return;
     }
-    log.d(SDLogger.bike,
+    _logD(
         '${selected.name} at $speedKmh km/h: wire $_assertedWire -> $newWire');
     _assertedWire = newWire;
     // Same settings, new wire byte: writeStateData takes it from _assertedWire.
@@ -218,8 +251,31 @@ class Bike extends _$Bike {
     if (last != null && DateTime.now().difference(last) < _speedTimeout) {
       return;
     }
-    log.d(SDLogger.bike, 'No speed samples, requesting ride data again');
+    _logD('No speed samples, requesting ride data again');
     unawaited(_requestRideData());
+  }
+
+  /// Writes one speed line per poll tick, so a ride leaves a continuous trace
+  /// instead of only the moments a switching mode crossed its limit.
+  ///
+  /// Shares [_speedTimeout] with [_checkSpeedStream]: the trace goes quiet on
+  /// exactly the tick the watchdog decides the stream died, so it can never
+  /// claim a speed the watchdog is already treating as gone.
+  @visibleForTesting
+  void logSpeedTrace() {
+    if (!_isConnected) {
+      return;
+    }
+    var last = _lastSpeedAt;
+    var line = speedTraceLine(
+        speedKmh: _lastSpeedKmh,
+        sampleAge: last == null ? null : DateTime.now().difference(last),
+        maxAge: _speedTimeout,
+        wire: _assertedWire);
+    if (line == null) {
+      return;
+    }
+    _logD(line);
   }
 
   /// A switching mode and the Background Lock both need the control loop to
@@ -230,10 +286,10 @@ class Bike extends _$Bike {
       return;
     }
     if (needed) {
-      log.d(SDLogger.bike, 'Keeping bike $id alive without UI');
+      _logD('Keeping alive without UI');
       _keepAlive = ref.keepAlive();
     } else {
-      log.d(SDLogger.bike, 'Releasing bike $id');
+      _logD('Releasing');
       _keepAlive?.close();
       _keepAlive = null;
     }
@@ -248,6 +304,9 @@ class Bike extends _$Bike {
         return;
       }
       _checkSpeedStream();
+      // Before the _writing return: a busy bike is exactly the one whose speed
+      // the ride log must not lose.
+      logSpeedTrace();
       if (_writing) {
         return;
       }
@@ -289,7 +348,7 @@ class Bike extends _$Bike {
       // Not the settings register: a ride data frame from a read that raced a
       // register selection, or a truncated answer. Using it would parse speed
       // bytes as settings and write them back to the bike.
-      log.w(SDLogger.bike, 'Ignoring non settings read: $data');
+      _logW('Ignoring non settings read: $data');
       return;
     }
     // Bike truth, before any lock override turns it into app desire.
@@ -321,13 +380,13 @@ class Bike extends _$Bike {
         heal = true;
     }
     if (heal) {
-      log.d(SDLogger.bike,
+      _logD(
           'Bike is on wire ${data[5]}, re-asserting ${state.selectedMode.name}');
     }
     if (newState == state && !force && !heal) {
       return;
     }
-    log.d(SDLogger.bike, 'State update from data: $data');
+    _logD('State update from data: $data');
     if (state.lightLocked && state.light != newState.light) {
       newState = newState.copyWith(light: state.light);
     }
@@ -437,7 +496,7 @@ class Bike extends _$Bike {
         // two would break the select-then-use invariant.
         await _withRegister(() async {
           if (stale != null && !identical(stale, state)) {
-            log.d(SDLogger.bike, 'Dropping a write composed before a change');
+            _logD('Dropping a write composed before a change');
             aborted = true;
             return;
           }
@@ -448,7 +507,7 @@ class Bike extends _$Bike {
               fresh = (light: read[4] == 1, assist: read[2]);
               _lastKnown = fresh;
             } else {
-              log.w(SDLogger.bike, 'Composing from cache, bad read: $read');
+              _logW('Composing from cache, bad read: $read');
             }
           }
           final composed = _composePacket(newState, authoritative, fresh);
@@ -461,7 +520,7 @@ class Bike extends _$Bike {
         // A latched _writing would silence the poll for good, and with it the
         // dynamic-mode self-heal that is meant to recover from exactly this.
         _writing = false;
-        log.e(SDLogger.bike, 'Error writing to bike', e);
+        _logE('Error writing to bike', e);
         return;
       }
       if (aborted) {
@@ -477,7 +536,7 @@ class Bike extends _$Bike {
       if (!ref.mounted || _deleted) {
         return;
       }
-      log.d(SDLogger.bike, 'Wrote data to bike: $data');
+      _logD('Wrote data to bike: $data');
     }
     _assertedWire = wire;
     var lockChanged = state.modeLock != newState.modeLock;
@@ -506,7 +565,7 @@ class Bike extends _$Bike {
       return;
     }
     _dynamicActive = true;
-    log.d(SDLogger.bike, 'Speed switching is active');
+    _logD('Speed switching is active');
     // Deferred: this also runs from build, where state cannot be read yet.
     unawaited(Future<void>.microtask(() async {
       if (!ref.mounted) {
@@ -535,7 +594,7 @@ class Bike extends _$Bike {
     if (!ref.mounted || !state.needsSpeedSwitching || state.modeLock) {
       return;
     }
-    log.i(SDLogger.bike, 'Speed switching: turning Background Lock on');
+    _logI('Speed switching: turning Background Lock on');
     writeStateData(state.copyWith(modeLock: true, modeLockAuto: true),
         saveToBike: false);
   }
@@ -552,7 +611,7 @@ class Bike extends _$Bike {
   }
 
   void toggleLight() async {
-    log.d(SDLogger.bike, 'Toggling light: ${!state.light}');
+    _logD('Toggling light: ${!state.light}');
     writeStateData(state.copyWith(light: !state.light),
         authoritative: const {PacketField.light});
   }
@@ -560,7 +619,7 @@ class Bike extends _$Bike {
   /// Selects [modeId], which may be a native or a custom mode. A dangling id
   /// resolves to the bike's fallback rather than being rejected.
   void selectMode(String modeId) {
-    log.d(SDLogger.bike, 'Selecting mode: $modeId');
+    _logD('Selecting mode: $modeId');
     // A mode change is nobody's light or assist change, so both come off the
     // bike rather than out of a state that may be a poll interval old.
     writeStateData(state.withSelectedMode(modeId), authoritative: const {});
@@ -600,7 +659,7 @@ class Bike extends _$Bike {
   /// [BikeState.fallbackMode] and that mode's initial wire goes to the bike,
   /// with the usual teardown if the bike stops switching.
   void deleteCustomMode(String modeId) {
-    log.i(SDLogger.bike, 'Deleting custom mode: $modeId');
+    _logI('Deleting custom mode: $modeId');
     final selected = state.selectedMode.id == modeId;
     final remaining = state.customModes.where((m) => m.id != modeId).toList();
     var next = state.copyWith(customModes: remaining);
@@ -623,31 +682,31 @@ class Bike extends _$Bike {
     if (level == state.assist) {
       return;
     }
-    log.d(SDLogger.bike, 'Setting assist to: $level');
+    _logD('Setting assist to: $level');
     writeStateData(state.copyWith(assist: level),
         authoritative: const {PacketField.assist});
   }
 
   void toggleLightLocked() async {
-    log.d(SDLogger.bike, 'Toggling light lock: ${!state.lightLocked}');
+    _logD('Toggling light lock: ${!state.lightLocked}');
     writeStateData(state.copyWith(lightLocked: !state.lightLocked),
         saveToBike: false);
   }
 
   void toggleModeLocked() async {
-    log.d(SDLogger.bike, 'Toggling mode lock: ${!state.modeLocked}');
+    _logD('Toggling mode lock: ${!state.modeLocked}');
     writeStateData(state.copyWith(modeLocked: !state.modeLocked),
         saveToBike: false);
   }
 
   void toggleAssistLocked() async {
-    log.d(SDLogger.bike, 'Toggling assist lock: ${!state.assistLocked}');
+    _logD('Toggling assist lock: ${!state.assistLocked}');
     writeStateData(state.copyWith(assistLocked: !state.assistLocked),
         saveToBike: false);
   }
 
   void toggleBackgroundLock() async {
-    log.d(SDLogger.bike, 'Toggling background lock: ${!state.modeLock}');
+    _logD('Toggling background lock: ${!state.modeLock}');
     // The rider took over the lock, so dynamic mode stops managing it.
     writeStateData(
         state.copyWith(modeLock: !state.modeLock, modeLockAuto: false),
@@ -662,7 +721,7 @@ class Bike extends _$Bike {
   /// call [BikesDB.saveBike], putting the deleted bike straight back into
   /// bikes.json.
   void deleteStateData(BikeState bike) {
-    log.i(SDLogger.bike, 'Deleting bike: ${bike.name}');
+    _logI('Deleting bike: ${bike.name}');
     _deleted = true;
     _updateTimer?.cancel();
     _updateDebounce?.cancel();

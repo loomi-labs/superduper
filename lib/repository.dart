@@ -33,6 +33,23 @@ bool shouldAutoReconnect({
 }) =>
     autoReconnect || needsSpeedSwitching;
 
+/// Whether an automatic connect can do anything at all right now: the rider's
+/// setting and the state of the radio are two separate questions, and both have
+/// to say yes.
+///
+/// [BluetoothAdapterState.unknown] is permissive: a handler can be built before
+/// the first adapter event arrives, and a platform that never reports one must
+/// not lock the app out of its own bike. [BluetoothAdapterState.turningOn] is
+/// not: a connect there fails exactly like one with the adapter off, and the
+/// `on` that follows within moments retries immediately anyway.
+bool shouldAttemptConnect({
+  required bool reconnectAllowed,
+  required BluetoothAdapterState adapterState,
+}) =>
+    reconnectAllowed &&
+    (adapterState == BluetoothAdapterState.on ||
+        adapterState == BluetoothAdapterState.unknown);
+
 BikeState? _findBike(List<BikeState> bikes, String deviceId) {
   for (final bike in bikes) {
     if (bike.id == deviceId) return bike;
@@ -82,6 +99,11 @@ class ConnectionHandler extends _$ConnectionHandler {
   late BluetoothDevice _device;
   StreamSubscription<BluetoothConnectionState>? _deviceSub;
   StreamSubscription<List<int>>? _notifySub;
+  StreamSubscription<BluetoothAdapterState>? _adapterSub;
+
+  /// State of the phone's radio, as last reported. Seeded permissively, see
+  /// [shouldAttemptConnect].
+  BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
   final StreamController<double> _speedController =
       StreamController<double>.broadcast();
 
@@ -110,8 +132,15 @@ class ConnectionHandler extends _$ConnectionHandler {
   @visibleForTesting
   bool get debugNeedsSpeedSwitching => _needsSpeedSwitching;
 
+  /// The single question every automatic connect path asks.
+  bool get _shouldAttemptConnect => shouldAttemptConnect(
+      reconnectAllowed: _reconnectAllowed, adapterState: _adapterState);
+
   @visibleForTesting
   bool get debugReconnectAllowed => _reconnectAllowed;
+
+  @visibleForTesting
+  bool get debugShouldAttemptConnect => _shouldAttemptConnect;
 
   /// Speed reported by the bike, in km/h. Broadcast: the control loop and the
   /// UI can both listen.
@@ -134,15 +163,26 @@ class ConnectionHandler extends _$ConnectionHandler {
     }
     _device = BluetoothDevice.fromId(deviceId);
     _deviceSub = _device.connectionState.listen(_onDeviceConnectionState);
+    // A raw subscription, deliberately not ref.watch(adapterStateProvider): a
+    // watch would rebuild this notifier on every radio transition, and a rebuild
+    // runs ref.onDispose — closing the field-initialised _speedController for
+    // good (the same trap _trackReconnectSetting documents). A riverpod
+    // StreamProvider is no use either, because it pauses as soon as nothing
+    // actively listens to it, and this handler has to keep working with no UI
+    // mounted at all.
+    _adapterState = FlutterBluePlus.adapterStateNow;
+    _adapterSub = FlutterBluePlus.adapterState.listen(_onAdapterState);
     // Backstop only: disconnects reconnect immediately, see
     // _onDeviceConnectionState. Retries anything that is not fully ready, not
     // just disconnects, so a failed readiness pass cannot strand the bike.
     //
     // The timer keeps running while auto-reconnect is off and the body does
     // nothing: turning the setting back on then resumes within 10 s, with no
-    // re-arming to get wrong.
+    // re-arming to get wrong. The body idles the same way while the adapter is
+    // off — there is nothing to retry against a radio that is not there — and
+    // _onAdapterState makes the resume immediate rather than up to 10 s late.
     _reconnectTimer = Timer.periodic(const Duration(seconds: 10), (t) {
-      if (!_reconnectAllowed) return;
+      if (!_shouldAttemptConnect) return;
       if (state != SDBluetoothConnectionState.connected) {
         connect();
       }
@@ -154,6 +194,13 @@ class ConnectionHandler extends _$ConnectionHandler {
       // up, so an already-connected bike is not pushed away either.
       log.i(SDLogger.bluetooth,
           'Auto-reconnect off for $deviceId, waiting for a manual connect');
+      return SDBluetoothConnectionState.disconnected;
+    }
+    if (!_shouldAttemptConnect) {
+      // Same reasoning, other reason: the setting says yes but the radio cannot
+      // carry a connection yet. _onAdapterState connects as soon as it can.
+      log.i(SDLogger.bluetooth,
+          'Bluetooth is $_adapterState, waiting for it to come on ($deviceId)');
       return SDBluetoothConnectionState.disconnected;
     }
     connect();
@@ -185,7 +232,8 @@ class ConnectionHandler extends _$ConnectionHandler {
   }
 
   void _onDeviceConnectionState(BluetoothConnectionState dstate) {
-    log.d(SDLogger.bluetooth, 'Connection state: $dstate');
+    log.d(SDLogger.bluetooth,
+        'Connection state: $dstate (${_device.remoteId})');
     if (!ref.mounted) return;
     if (dstate == BluetoothConnectionState.connected) {
       // Not "connected" for our purposes yet: services and notifications have
@@ -196,13 +244,34 @@ class ConnectionHandler extends _$ConnectionHandler {
       // reconnect itself is the rider's choice.
       _cancelNotifications();
       state = SDBluetoothConnectionState.disconnected;
-      if (_reconnectAllowed) connect();
+      if (_shouldAttemptConnect) connect();
+    }
+  }
+
+  /// Turning the radio off produces a disconnect for every bike, and every
+  /// reconnect that follows is doomed until it comes back — the second source
+  /// of the retry spam a ride log is otherwise full of.
+  void _onAdapterState(BluetoothAdapterState adapterState) {
+    if (!ref.mounted) return;
+    // The stream replays its current value to every new listener, so the first
+    // event usually says nothing new.
+    if (adapterState == _adapterState) return;
+    _adapterState = adapterState;
+    log.i(SDLogger.bluetooth,
+        'Bluetooth adapter $adapterState (${_device.remoteId})');
+    if (_shouldAttemptConnect &&
+        state != SDBluetoothConnectionState.connected) {
+      // Brings the bike back the moment the radio is usable again instead of up
+      // to 10 s later; an attempt the timer starts at the same time is absorbed
+      // by the _connecting guard.
+      connect();
     }
   }
 
   void _dispose() {
     log.d(SDLogger.bluetooth, "DISPOSE ConnectionHandler");
     _deviceSub?.cancel();
+    _adapterSub?.cancel();
     _reconnectTimer?.cancel();
     _cancelNotifications();
     _speedController.close();
@@ -235,7 +304,7 @@ class ConnectionHandler extends _$ConnectionHandler {
       log.i(SDLogger.bluetooth, 'Connected to ${_device.remoteId.str}');
       await _becomeReady();
     } catch (e) {
-      log.e(SDLogger.bluetooth, 'Error connecting', e);
+      log.e(SDLogger.bluetooth, 'Error connecting to ${_device.remoteId}', e);
       if (!ref.mounted) return;
       state = SDBluetoothConnectionState.disconnected;
     } finally {

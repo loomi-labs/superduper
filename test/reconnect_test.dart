@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:superduper/bike.dart';
@@ -17,8 +18,13 @@ import 'package:superduper/repository.dart';
 /// channels. A fake bike short-circuits to `connected` before any of them. So
 /// what is tested here is the decision function and the fields it reads; the
 /// gates are kept honest by all three call sites going through the single
-/// `_reconnectAllowed` getter, which is `shouldAutoReconnect` and nothing else.
-/// The transport behaviour itself is a hardware check.
+/// `_shouldAttemptConnect` getter, which is `shouldAttemptConnect` and nothing
+/// else. The transport behaviour itself is a hardware check.
+///
+/// The adapter half has the same limit and one more: an adapter event has no
+/// fake input path at all, because the subscription is on `FlutterBluePlus`
+/// itself and is deliberately never made for a fake bike. So what is tested is
+/// the decision function plus the composition it reads.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -92,6 +98,53 @@ void main() {
     });
   });
 
+  group('shouldAttemptConnect', () {
+    test('an adapter that is off blocks every automatic connect', () {
+      expect(
+          shouldAttemptConnect(
+              reconnectAllowed: true,
+              adapterState: BluetoothAdapterState.off), isFalse,
+          reason: 'retrying against a radio that is off is the log spam this '
+              'gate exists to stop');
+    });
+
+    test('an unreported adapter is treated as usable', () {
+      expect(
+          shouldAttemptConnect(
+              reconnectAllowed: true,
+              adapterState: BluetoothAdapterState.unknown), isTrue,
+          reason: 'a handler can be built before the first adapter event, and '
+              'a silent platform must not lock the app out of its bike');
+    });
+
+    test('nothing but a fully on adapter is attempted', () {
+      for (final adapterState in [
+        BluetoothAdapterState.turningOn,
+        BluetoothAdapterState.turningOff,
+        BluetoothAdapterState.unauthorized,
+        BluetoothAdapterState.unavailable,
+      ]) {
+        expect(
+            shouldAttemptConnect(
+                reconnectAllowed: true, adapterState: adapterState), isFalse,
+            reason: '$adapterState fails a connect exactly like off does');
+      }
+      expect(
+          shouldAttemptConnect(
+              reconnectAllowed: true, adapterState: BluetoothAdapterState.on),
+          isTrue);
+    });
+
+    test('the rider setting still wins over a working adapter', () {
+      expect(
+          shouldAttemptConnect(
+              reconnectAllowed: false,
+              adapterState: BluetoothAdapterState.on), isFalse,
+          reason: 'a usable radio is no reason to go near a bike the rider '
+              'asked the app to stay away from');
+    });
+  });
+
   group('handler wiring', () {
     test('a bike saved before the handler is built seeds it', () {
       final container = makeContainer();
@@ -160,6 +213,22 @@ void main() {
       // Off-road is static, so the setting takes full effect from here on.
       db.saveBike(staticBike(autoReconnect: false));
       expect(handler.debugReconnectAllowed, isFalse);
+    });
+
+    test('the adapter gate is composed on top of the rider setting', () {
+      final container = makeContainer();
+      final handler = openHandler(container);
+      expect(handler.debugShouldAttemptConnect, isTrue,
+          reason: 'a fresh handler has seen no adapter event yet, and that is '
+              'not a reason to stay away from the bike');
+
+      container
+          .read(bikesDBProvider.notifier)
+          .saveBike(staticBike(autoReconnect: false));
+      expect(handler.debugReconnectAllowed, isFalse);
+      expect(handler.debugShouldAttemptConnect, isFalse,
+          reason: 'the gate the three automatic paths read has to carry the '
+              'setting too, not only the radio state');
     });
 
     test('deleting the bike does not leave the handler gated', () async {
