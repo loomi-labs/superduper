@@ -429,6 +429,16 @@ enum PinState {
   locked,
 }
 
+/// Where a padlock tap moves the pin: open, startup, locked, open again.
+///
+/// One cycle for the whole app, so the control and the notifier can never
+/// disagree about what a tap does.
+PinState nextPin(PinState pin) => switch (pin) {
+      PinState.open => PinState.startup,
+      PinState.startup => PinState.locked,
+      PinState.locked => PinState.open,
+    };
+
 /// Reads a padlock out of json, in the old shape and the new one.
 ///
 /// A build before three-state padlocks wrote a bool under the same key, so

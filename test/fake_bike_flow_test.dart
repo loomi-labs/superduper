@@ -77,7 +77,9 @@ void main() {
 
     // Lock the light in the app, rider turns it off on the bike: the next
     // poll must write the locked value back instead of following.
-    bike.toggleLightLocked();
+    // Two taps: the pin cycles open, startup and locked.
+    bike.cycleLightPin();
+    bike.cycleLightPin();
     await Future<void>.delayed(Duration.zero);
     container.read(fakeBikeStoreProvider).toggleLight(id);
     await bike.updateStateDataNow();

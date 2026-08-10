@@ -182,6 +182,13 @@ void main() {
   String selectedId(ProviderContainer container) =>
       container.read(bikeProvider(id)).selectedMode.id;
 
+  /// Locks the mode padlock the way a rider does: the pin cycles open, startup
+  /// and locked, so a lock is two taps.
+  void lockMode(Bike bike) {
+    bike.cycleModePin();
+    bike.cycleModePin();
+  }
+
   group('speed switching', () {
     test('a switching mode follows the speed over its limit', () async {
       final container = makeContainer();
@@ -497,7 +504,7 @@ void main() {
           region: BikeRegion.us,
           modeId: nativeModeId(2),
           customModes: const []);
-      bike.toggleModeLocked();
+      lockMode(bike);
       await settle();
       expect(container.read(bikeProvider(id)).pinMode, PinState.locked);
 
@@ -1474,6 +1481,77 @@ void main() {
         reason: 'a write that threw must not update the app state');
   });
 
+  group('the padlock cycle', () {
+    test('arming a startup pin captures the value selected now', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.us,
+          modeId: nativeModeId(2),
+          customModes: const []);
+      bike.setAssist(3);
+      await settle();
+      final light = container.read(bikeProvider(id)).light;
+
+      bike.cycleModePin();
+      bike.cycleLightPin();
+      bike.cycleAssistPin();
+      await settle();
+
+      final state = container.read(bikeProvider(id));
+      expect(state.pinMode, PinState.startup);
+      expect(state.pinLight, PinState.startup);
+      expect(state.pinAssist, PinState.startup);
+      // The capture is what makes a picker unnecessary: the rider selects the
+      // value first, then arms the pin on it.
+      expect(state.startupModeId, nativeModeId(2));
+      expect(state.startupAssist, 3);
+      expect(state.startupLight, light);
+    });
+
+    test('two more taps lock the pin and then open it', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.us,
+          modeId: nativeModeId(2),
+          customModes: const []);
+
+      bike.cycleModePin();
+      await settle();
+      expect(container.read(bikeProvider(id)).pinMode, PinState.startup);
+
+      bike.cycleModePin();
+      await settle();
+      expect(container.read(bikeProvider(id)).pinMode, PinState.locked);
+
+      bike.cycleModePin();
+      await settle();
+      expect(container.read(bikeProvider(id)).pinMode, PinState.open);
+    });
+
+    test('re-arming moves the pin to the mode selected now', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.us,
+          modeId: nativeModeId(2),
+          customModes: const []);
+      bike.cycleModePin();
+      await settle();
+      expect(container.read(bikeProvider(id)).startupModeId, nativeModeId(2));
+
+      // Two steps, on purpose: select the value, then arm the pin again.
+      bike.selectMode(nativeModeId(1));
+      await settle();
+      for (var tap = 0; tap < 3; tap++) {
+        bike.cycleModePin();
+        await settle();
+      }
+
+      final state = container.read(bikeProvider(id));
+      expect(state.pinMode, PinState.startup);
+      expect(state.startupModeId, nativeModeId(1));
+    });
+  });
+
   group('background enforcement', () {
     /// A bike in one of the four combinations of the two conditions that need
     /// the app to keep working with no UI on screen.
@@ -1533,7 +1611,7 @@ void main() {
           .copyWith(region: BikeRegion.us, customModes: const [sport45])
           .withSelectedMode(sport45.id));
       await settle();
-      bike.toggleModeLocked();
+      lockMode(bike);
       await settle();
 
       // The page is popped. The rider asked the app to hold this mode, so the
@@ -1553,13 +1631,14 @@ void main() {
           .copyWith(region: BikeRegion.us, customModes: const [sport45])
           .withSelectedMode(sport45.id));
       await settle();
-      bike.toggleModeLocked();
+      lockMode(bike);
       await settle();
       sub.close();
       await settle();
       expect(container.exists(bikeProvider(id)), isTrue);
 
-      bike.toggleModeLocked();
+      // One more tap on a locked padlock opens it again.
+      bike.cycleModePin();
       await settle();
       expect(container.exists(bikeProvider(id)), isFalse,
           reason: 'with nothing pinned there is nothing left to enforce');
@@ -1640,7 +1719,7 @@ void main() {
           .copyWith(region: BikeRegion.us, customModes: const [tour30, sport45])
           .withSelectedMode(tour30.id));
       await settle();
-      bike.toggleModeLocked();
+      lockMode(bike);
       await settle();
 
       bike.selectMode(sport45.id);

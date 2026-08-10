@@ -966,27 +966,44 @@ class Bike extends _$Bike {
         authoritative: const {PacketField.assist});
   }
 
-  /// Where a padlock tap moves the pin. The startup state is not in the cycle
-  /// yet: it needs a control that can show which value it pins.
-  static PinState _flipPin(PinState pin) =>
-      pin == PinState.locked ? PinState.open : PinState.locked;
-
-  void toggleLightLocked() async {
-    final next = _flipPin(state.pinLight);
-    _logD('Toggling light lock: ${next.name}');
-    writeStateData(state.copyWith(pinLight: next), saveToBike: false);
+  /// Moves the light padlock one step, through [nextPin].
+  ///
+  /// Arming [PinState.startup] captures the value that is selected now — that
+  /// is what makes a picker unnecessary. The captured value stays behind when
+  /// the pin moves on: nothing reads it unless the pin is on startup, and the
+  /// next arming overwrites it.
+  void cycleLightPin() {
+    final next = nextPin(state.pinLight);
+    _logD('Light pin: ${next.name}');
+    var updated = state.copyWith(pinLight: next);
+    if (next == PinState.startup) {
+      updated = updated.copyWith(startupLight: state.light);
+    }
+    writeStateData(updated, saveToBike: false);
   }
 
-  void toggleModeLocked() async {
-    final next = _flipPin(state.pinMode);
-    _logD('Toggling mode lock: ${next.name}');
-    writeStateData(state.copyWith(pinMode: next), saveToBike: false);
+  /// Moves the mode padlock one step. See [cycleLightPin].
+  void cycleModePin() {
+    final next = nextPin(state.pinMode);
+    _logD('Mode pin: ${next.name}');
+    var updated = state.copyWith(pinMode: next);
+    if (next == PinState.startup) {
+      // The resolved selection, not [modeId]: a dangling id would arm a pin on
+      // a mode the bike cannot be put into.
+      updated = updated.copyWith(startupModeId: state.selectedMode.id);
+    }
+    writeStateData(updated, saveToBike: false);
   }
 
-  void toggleAssistLocked() async {
-    final next = _flipPin(state.pinAssist);
-    _logD('Toggling assist lock: ${next.name}');
-    writeStateData(state.copyWith(pinAssist: next), saveToBike: false);
+  /// Moves the assist padlock one step. See [cycleLightPin].
+  void cycleAssistPin() {
+    final next = nextPin(state.pinAssist);
+    _logD('Assist pin: ${next.name}');
+    var updated = state.copyWith(pinAssist: next);
+    if (next == PinState.startup) {
+      updated = updated.copyWith(startupAssist: state.assist);
+    }
+    writeStateData(updated, saveToBike: false);
   }
 
   /// Deletes the bike and tears this notifier down with it.
@@ -1372,44 +1389,6 @@ bool _pinDegradedNow(WidgetRef ref, PinState pin) => pinDegraded(pin,
     hasService: _hasBackgroundService,
     notificationsBlocked: ref.watch(notificationsBlockedProvider));
 
-class EnhancedLockWidget extends StatelessWidget {
-  const EnhancedLockWidget({
-    super.key,
-    required this.locked,
-    required this.onTap,
-    required this.tooltip,
-    this.degraded = false,
-  });
-
-  final bool locked;
-  final VoidCallback onTap;
-  final String tooltip;
-
-  /// The lock is on, but the app cannot hold it while the phone is in a
-  /// pocket. Shown rather than hidden: a padlock that quietly stops working is
-  /// the bug this page was fixed for.
-  final bool degraded;
-
-  @override
-  Widget build(BuildContext context) {
-    return IconButton(
-      tooltip: degraded
-          ? '$tooltip (only holds while the app is open)'
-          : tooltip,
-      iconSize: 20,
-      padding: const EdgeInsets.all(12),
-      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-      onPressed: onTap,
-      icon: Icon(
-        locked ? Icons.lock : Icons.lock_open,
-        color: degraded
-            ? SDSurface.warning
-            : (locked ? SDSurface.text : SDSurface.muted),
-      ),
-    );
-  }
-}
-
 class EnhancedLightControlWidget extends ConsumerWidget {
   const EnhancedLightControlWidget({super.key, required this.bike});
   final BikeState bike;
@@ -1430,11 +1409,15 @@ class EnhancedLightControlWidget extends ConsumerWidget {
       active: bike.light,
       enabled: connected,
       onTap: connected ? bikeControl.toggleLight : null,
+      // The light has no list, so its startup pin is a tag in the header.
+      badge: bike.pinLight == PinState.startup && bike.startupLight != null
+          ? (bike.startupLight! ? 'STARTS ON' : 'STARTS OFF')
+          : null,
       trailing: EnhancedLockWidget(
-        locked: bike.pinLight == PinState.locked,
+        pin: bike.pinLight,
         degraded: _pinDegradedNow(ref, bike.pinLight),
-        onTap: bikeControl.toggleLightLocked,
-        tooltip: 'Lock the light',
+        onTap: bikeControl.cycleLightPin,
+        tooltip: pinTooltip(bike.pinLight, 'light'),
       ),
     );
   }
@@ -1468,10 +1451,10 @@ class EnhancedModeControlWidget extends ConsumerWidget {
           showSwitch: false,
           enabled: connected,
           trailing: EnhancedLockWidget(
-            locked: bike.pinMode == PinState.locked,
+            pin: bike.pinMode,
             degraded: _pinDegradedNow(ref, bike.pinMode),
-            onTap: bikeControl.toggleModeLocked,
-            tooltip: 'Lock the mode',
+            onTap: bikeControl.cycleModePin,
+            tooltip: pinTooltip(bike.pinMode, 'mode'),
           ),
           body: SelectorBody(
             colorIndex: bike.color,
@@ -1483,6 +1466,10 @@ class EnhancedModeControlWidget extends ConsumerWidget {
                   label: mode.name,
                   tooltip: 'Select mode ${mode.name}',
                   selected: mode.id == selectedModeId,
+                  // The captured value, not the live one: the pin marks the
+                  // mode a ride starts on, which is not always the one on now.
+                  pinned: bike.pinMode == PinState.startup &&
+                      mode.id == bike.startupModeId,
                   onTap:
                       connected ? () => bikeControl.selectMode(mode.id) : null,
                 ),
@@ -1572,6 +1559,9 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
     // drops it silently. See [EnhancedLightControlWidget].
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
+    // The level a ride starts on, or null while nothing pins one.
+    final startupAssist =
+        bike.pinAssist == PinState.startup ? bike.startupAssist : null;
 
     return ControlCard(
       colorIndex: bike.color,
@@ -1580,14 +1570,16 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
       showSwitch: false,
       enabled: connected,
       trailing: EnhancedLockWidget(
-        locked: bike.pinAssist == PinState.locked,
+        pin: bike.pinAssist,
         degraded: _pinDegradedNow(ref, bike.pinAssist),
-        onTap: bikeControl.toggleAssistLocked,
-        tooltip: 'Lock the assist',
+        onTap: bikeControl.cycleAssistPin,
+        tooltip: pinTooltip(bike.pinAssist, 'assist'),
       ),
       body: SelectorBody(
         colorIndex: bike.color,
         layout: SelectorLayout.segments,
+        // The underline alone is too small to say what it means.
+        caption: startupAssist == null ? null : 'Starts at $startupAssist',
         items: [
           for (var level = 0; level <= 4; level++)
             SelectorItem(
@@ -1595,6 +1587,7 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
               label: '$level',
               tooltip: 'Select assist $level',
               selected: bike.assist == level,
+              pinned: level == startupAssist,
               onTap: connected ? () => bikeControl.setAssist(level) : null,
             ),
         ],
