@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:superduper/bike.dart';
 import 'package:superduper/fake_bike.dart';
+import 'package:superduper/repository.dart';
 import 'package:superduper/widgets.dart';
 
 /// A switching custom mode: base wire 1 (32 km/h + throttle), cap wire 4.
@@ -215,5 +216,137 @@ void main() {
     expect(light, 1,
         reason: 'the field the rider did not touch comes off the bike');
     expect(tappedIsSelected, isTrue);
+  });
+
+  testWidgets('a disconnected bike ignores assist taps', (tester) async {
+    final container = await pumpControl(tester,
+        bike: BikeState.defaultState(id).copyWith(assist: 1),
+        build: (b) => EnhancedAssistControlWidget(bike: b));
+    // ignore: invalid_use_of_protected_member
+    container.read(connectionHandlerProvider(id).notifier).state =
+        SDBluetoothConnectionState.disconnected;
+    await settle(tester);
+
+    await tester.tap(find.byKey(const ValueKey('assistChip:3')));
+    await settle(tester);
+
+    final assist = container.read(bikeProvider(id)).assist;
+    final onWire = bikeAssist(container);
+    container.dispose();
+    expect(assist, 1,
+        reason: 'an offline change cannot reach the bike; the control must '
+            'not pretend it did');
+    expect(onWire, isNot(3));
+  });
+
+  testWidgets('a disconnected bike ignores mode taps', (tester) async {
+    final container = await pumpControl(tester,
+        bike: BikeState.defaultState(id)
+            .copyWith(region: BikeRegion.us, customModes: const [tour30, sport45])
+            .withSelectedMode(sport45.id),
+        build: (b) => EnhancedModeControlWidget(bike: b));
+    // ignore: invalid_use_of_protected_member
+    container.read(connectionHandlerProvider(id).notifier).state =
+        SDBluetoothConnectionState.disconnected;
+    await settle(tester);
+
+    await tester.tap(find.byKey(ValueKey('modeChip:${tour30.id}')));
+    await settle(tester);
+
+    final selected = container.read(bikeProvider(id)).selectedMode.id;
+    container.dispose();
+    expect(selected, sport45.id);
+  });
+
+  testWidgets('a disconnected bike ignores light taps', (tester) async {
+    final container = await pumpControl(tester,
+        bike: BikeState.defaultState(id).copyWith(light: false),
+        build: (b) => EnhancedLightControlWidget(bike: b));
+    // ignore: invalid_use_of_protected_member
+    container.read(connectionHandlerProvider(id).notifier).state =
+        SDBluetoothConnectionState.disconnected;
+    await settle(tester);
+
+    await tester.tap(find.text('Light'));
+    await settle(tester);
+
+    final light = container.read(bikeProvider(id)).light;
+    container.dispose();
+    expect(light, isFalse);
+  });
+
+  /// How faded a card renders: the [Opacity] the control widget wraps it in.
+  double cardOpacity(WidgetTester tester, Type cardType) => tester
+      .widget<Opacity>(find.ancestor(
+        of: find.byType(cardType),
+        matching: find.byType(Opacity),
+      ))
+      .opacity;
+
+  testWidgets('a disconnected assist card is greyed out and inert',
+      (tester) async {
+    final container = await pumpControl(tester,
+        bike: BikeState.defaultState(id).copyWith(assist: 1),
+        build: (b) => EnhancedAssistControlWidget(bike: b));
+    expect(cardOpacity(tester, SelectorCard), 1.0,
+        reason: 'a connected bike must render at full strength');
+
+    // ignore: invalid_use_of_protected_member
+    container.read(connectionHandlerProvider(id).notifier).state =
+        SDBluetoothConnectionState.disconnected;
+    await settle(tester);
+
+    final opacity = cardOpacity(tester, SelectorCard);
+    final taps = chips(tester).map((c) => c.item.onTap).toList();
+    container.dispose();
+    expect(opacity, 0.5);
+    expect(taps, everyElement(isNull),
+        reason: 'a null onTap is what makes the chip inert');
+  });
+
+  testWidgets('a disconnected mode card is greyed out and inert',
+      (tester) async {
+    final container = await pumpControl(tester,
+        bike: BikeState.defaultState(id)
+            .copyWith(region: BikeRegion.us, customModes: const [tour30])
+            .withSelectedMode(tour30.id),
+        build: (b) => EnhancedModeControlWidget(bike: b));
+    expect(cardOpacity(tester, SelectorCard), 1.0,
+        reason: 'a connected bike must render at full strength');
+
+    // ignore: invalid_use_of_protected_member
+    container.read(connectionHandlerProvider(id).notifier).state =
+        SDBluetoothConnectionState.disconnected;
+    await settle(tester);
+
+    final opacity = cardOpacity(tester, SelectorCard);
+    final taps = chips(tester).map((c) => c.item.onTap).toList();
+    container.dispose();
+    expect(opacity, 0.5);
+    expect(taps, everyElement(isNull));
+  });
+
+  testWidgets('a disconnected light card is greyed out and inert',
+      (tester) async {
+    final container = await pumpControl(tester,
+        bike: BikeState.defaultState(id).copyWith(light: false),
+        build: (b) => EnhancedLightControlWidget(bike: b));
+    expect(cardOpacity(tester, DiscoverCard), 1.0,
+        reason: 'a connected bike must render at full strength');
+
+    // ignore: invalid_use_of_protected_member
+    container.read(connectionHandlerProvider(id).notifier).state =
+        SDBluetoothConnectionState.disconnected;
+    await settle(tester);
+
+    final opacity = cardOpacity(tester, DiscoverCard);
+    final onTap = tester.widget<DiscoverCard>(find.byType(DiscoverCard)).onTap;
+    // The lock button is app state and works offline, so it stays live.
+    final lockOnTap =
+        tester.widget<EnhancedLockWidget>(find.byType(EnhancedLockWidget)).onTap;
+    container.dispose();
+    expect(opacity, 0.5);
+    expect(onTap, isNull);
+    expect(lockOnTap, isNotNull);
   });
 }

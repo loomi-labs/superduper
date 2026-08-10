@@ -1174,19 +1174,30 @@ class EnhancedLightControlWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
+    // Light and assist are bike truth: an offline change cannot stick, and
+    // writeStateData drops it silently — the 2026-08-08 log tail shows four
+    // identical light taps going nowhere. Honest UI: grey the card out, like
+    // the Connect chip.
+    final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
+        SDBluetoothConnectionState.connected;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Expanded(
-          child: DiscoverCard(
-            colorIndex: bike.color,
-            title: "Light",
-            metric: bike.light ? "On" : "Off",
-            titleIcon: bike.light ? Icons.lightbulb : Icons.lightbulb_outline,
-            selected: bike.light,
-            onTap: () {
-              bikeControl.toggleLight();
-            },
+          child: Opacity(
+            opacity: connected ? 1.0 : 0.5,
+            child: DiscoverCard(
+              colorIndex: bike.color,
+              title: "Light",
+              metric: bike.light ? "On" : "Off",
+              titleIcon: bike.light ? Icons.lightbulb : Icons.lightbulb_outline,
+              selected: bike.light,
+              onTap: connected
+                  ? () {
+                      bikeControl.toggleLight();
+                    }
+                  : null,
+            ),
           ),
         ),
         EnhancedLockWidget(
@@ -1211,28 +1222,39 @@ class EnhancedModeControlWidget extends ConsumerWidget {
     // card then has to render with nothing selected rather than misaccent or
     // throw.
     final selectedModeId = bike.selectedMode.id;
+    // The app owns the mode, but the wire byte that puts it on the bike does
+    // not go out while the bike is away — writeStateData drops it silently. So
+    // the card greys out, like the Connect chip. See
+    // [EnhancedLightControlWidget].
+    final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
+        SDBluetoothConnectionState.connected;
 
     return Column(
       children: [
         Row(
           children: [
             Expanded(
-              child: SelectorCard(
-                colorIndex: bike.color,
-                title: "Mode",
-                titleIcon: Icons.electric_bike,
-                items: [
-                  for (final mode in bike.selectableModes)
-                    SelectorItem(
-                      keyValue: 'modeChip:${mode.id}',
-                      label: mode.name,
-                      tooltip: 'Select mode ${mode.name}',
-                      selected: mode.id == selectedModeId,
-                      onTap: () {
-                        bikeControl.selectMode(mode.id);
-                      },
-                    ),
-                ],
+              child: Opacity(
+                opacity: connected ? 1.0 : 0.5,
+                child: SelectorCard(
+                  colorIndex: bike.color,
+                  title: "Mode",
+                  titleIcon: Icons.electric_bike,
+                  items: [
+                    for (final mode in bike.selectableModes)
+                      SelectorItem(
+                        keyValue: 'modeChip:${mode.id}',
+                        label: mode.name,
+                        tooltip: 'Select mode ${mode.name}',
+                        selected: mode.id == selectedModeId,
+                        onTap: connected
+                            ? () {
+                                bikeControl.selectMode(mode.id);
+                              }
+                            : null,
+                      ),
+                  ],
+                ),
               ),
             ),
             EnhancedLockWidget(
@@ -1321,26 +1343,35 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
+    // Assist is bike truth: an offline change cannot stick, and writeStateData
+    // drops it silently. See [EnhancedLightControlWidget].
+    final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
+        SDBluetoothConnectionState.connected;
 
     return Row(
       children: [
         Expanded(
-          child: SelectorCard(
-            colorIndex: bike.color,
-            title: "Assist",
-            titleIcon: Icons.autorenew,
-            items: [
-              for (var level = 0; level <= 4; level++)
-                SelectorItem(
-                  keyValue: 'assistChip:$level',
-                  label: '$level',
-                  tooltip: 'Select assist $level',
-                  selected: bike.assist == level,
-                  onTap: () {
-                    bikeControl.setAssist(level);
-                  },
-                ),
-            ],
+          child: Opacity(
+            opacity: connected ? 1.0 : 0.5,
+            child: SelectorCard(
+              colorIndex: bike.color,
+              title: "Assist",
+              titleIcon: Icons.autorenew,
+              items: [
+                for (var level = 0; level <= 4; level++)
+                  SelectorItem(
+                    keyValue: 'assistChip:$level',
+                    label: '$level',
+                    tooltip: 'Select assist $level',
+                    selected: bike.assist == level,
+                    onTap: connected
+                        ? () {
+                            bikeControl.setAssist(level);
+                          }
+                        : null,
+                  ),
+              ],
+            ),
           ),
         ),
         EnhancedLockWidget(

@@ -17,7 +17,10 @@ class SelectorItem {
   final String label;
   final String tooltip;
   final bool selected;
-  final VoidCallback onTap;
+
+  /// Null makes the chip inert — what a control shows while the bike is not
+  /// connected, because a tap could not reach the bike anyway.
+  final VoidCallback? onTap;
 }
 
 /// A [DiscoverCard]-styled panel holding a wrapped row of choices.
