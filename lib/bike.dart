@@ -56,6 +56,16 @@ class Bike extends _$Bike {
 
   Timer? _updateDebounce;
   Timer? _updateTimer;
+
+  /// Fires the ride-log trace and the speed-stream watchdog. Deliberately not
+  /// [_updateTimer]: every write resets that one through [_resetDebounce], so
+  /// during a switching storm it never fires — and the storm is exactly what
+  /// the trace must record. Only [build] and dispose touch this timer.
+  Timer? _traceTimer;
+
+  @visibleForTesting
+  Timer? get debugTraceTimer => _traceTimer;
+
   bool _writing = false;
 
   /// The wire mode byte the app currently asserts on the bike.
@@ -120,6 +130,8 @@ class Bike extends _$Bike {
     ref.onDispose(() {
       _updateTimer?.cancel();
       _updateDebounce?.cancel();
+      _traceTimer?.cancel();
+      _traceTimer = null;
       _speedSub?.cancel();
       _speedSub = null;
       // The link itself is already released by riverpod here (both on rebuild
@@ -127,6 +139,13 @@ class Bike extends _$Bike {
       _keepAlive = null;
     });
     _resetReadTimer();
+    _traceTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!ref.mounted) {
+        return;
+      }
+      _checkSpeedStream();
+      logSpeedTrace();
+    });
     var bike = ref.read(bikesDBProvider.notifier).getBike(id) ??
         BikeState.defaultState(id);
     // Deliberately listen instead of watch: a watch would invalidate this
@@ -265,8 +284,9 @@ class Bike extends _$Bike {
     unawaited(_requestRideData());
   }
 
-  /// Writes one speed line per poll tick, so a ride leaves a continuous trace
-  /// instead of only the moments a switching mode crossed its limit.
+  /// Writes one speed line per tick of [_traceTimer], so a ride leaves a
+  /// continuous trace instead of only the moments a switching mode crossed its
+  /// limit.
   ///
   /// Shares [_speedTimeout] with [_checkSpeedStream]: the trace goes quiet on
   /// exactly the tick the watchdog decides the stream died, so it can never
@@ -313,10 +333,6 @@ class Bike extends _$Bike {
       if (!ref.mounted) {
         return;
       }
-      _checkSpeedStream();
-      // Before the _writing return: a busy bike is exactly the one whose speed
-      // the ride log must not lose.
-      logSpeedTrace();
       if (_writing) {
         return;
       }

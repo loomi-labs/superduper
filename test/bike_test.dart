@@ -1419,5 +1419,22 @@ void main() {
           reason: 'a two-bike session can only be disentangled if every line '
               'says which bike it is about');
     });
+
+    test('a write does not silence the trace timer', () async {
+      final container = makeContainer();
+      final bike = await openBike(container, region: BikeRegion.ch);
+      final before = bike.debugTraceTimer;
+      expect(before, isNotNull);
+      expect(before!.isActive, isTrue);
+
+      // Writes reset the poll timer through the debounce. The trace must not
+      // sit on that timer: during a switching storm it would never fire, and
+      // the ride log would lose its trace exactly when limiting is busiest.
+      bike.toggleLight();
+      await settle();
+
+      expect(identical(bike.debugTraceTimer, before), isTrue,
+          reason: 'the trace timer must run steady through writes');
+    });
   });
 }
