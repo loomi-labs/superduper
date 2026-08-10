@@ -336,7 +336,15 @@ class Bike extends _$Bike {
       if (_writing) {
         return;
       }
-      updateStateData();
+      if (!_isConnected) {
+        return;
+      }
+      // Straight to the read: updateStateData's 2 s debounce belongs to user
+      // writes and to the post-write echo read, not to the idle poll. Through
+      // the debounce the effective poll period was 7 s, not the 5 s the
+      // interval promises. _withRegister still serializes this behind any
+      // write in flight.
+      unawaited(updateStateDataNow());
     });
   }
 
