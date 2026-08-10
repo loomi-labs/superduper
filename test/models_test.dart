@@ -959,6 +959,60 @@ void main() {
     });
   });
 
+  group('wireForWrite', () {
+    // Base wire 1 (32 km/h + throttle), cap wire 4 (EPAC 25).
+    const w30 = CustomMode(id: 'w1', name: 'W30', limitKmh: 30, throttle: true);
+
+    test('an unchanged switching mode carries the wire asserted now', () {
+      expect(
+          wireForWrite(
+              sel: const CustomSelection(w30),
+              modeChanged: false,
+              nowSwitching: true,
+              assertedWire: 4),
+          4);
+      expect(
+          wireForWrite(
+              sel: const CustomSelection(w30),
+              modeChanged: false,
+              nowSwitching: true,
+              assertedWire: 1),
+          1);
+    });
+
+    test('a mode change enters on the initial wire', () {
+      expect(
+          wireForWrite(
+              sel: const CustomSelection(w30),
+              modeChanged: true,
+              nowSwitching: true,
+              assertedWire: 4),
+          1,
+          reason: 'a mode is entered on its base profile');
+    });
+
+    test('a mode that never switches carries its own wire', () {
+      expect(
+          wireForWrite(
+              sel: NativeSelection(profileByWire(2)),
+              modeChanged: false,
+              nowSwitching: false,
+              assertedWire: 4),
+          2);
+    });
+
+    test('a foreign asserted wire falls back to the initial wire', () {
+      expect(
+          wireForWrite(
+              sel: const CustomSelection(w30),
+              modeChanged: false,
+              nowSwitching: true,
+              assertedWire: 9),
+          1,
+          reason: 'a wire the mode never asserts is no memory of anything');
+    });
+  });
+
   group('wireVerdict', () {
     // One row per region and selection: what every reported wire 0..9 means.
     // '.' in sync, 'h' heal to the expected wire, a digit follows native:<digit>.

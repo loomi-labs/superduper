@@ -241,6 +241,11 @@ class Bike extends _$Bike {
     writeStateData(state, authoritative: const {}, abortIfStale: true);
   }
 
+  /// Delivers one speed sample synchronously, so a test can interleave a switch
+  /// decision with a write that already sits in the register queue.
+  @visibleForTesting
+  void debugHandleSpeedSample(double speedKmh) => _onSpeedSample(speedKmh);
+
   /// The bike stops streaming ride data on its own; without speed samples a
   /// switching mode is blind, so re-arm the stream when it dries up.
   void _checkSpeedStream() {
@@ -459,18 +464,18 @@ class Bike extends _$Bike {
     final modeChanged = oldSel.id != newSel.id;
     final wasSwitching = state.needsSpeedSwitching;
     final nowSwitching = newState.needsSpeedSwitching;
-    // A wire the new selection never asserts is no memory of anything — an edit
-    // moved the mode's profile pair out from under it. Normalised exactly as
-    // [wireVerdict] normalises it, so a heal write can never contradict the
-    // verdict that asked for it.
-    final asserted = assertsWire(newSel, _assertedWire)
-        ? _assertedWire
-        : initialWireFor(newSel);
-    // A mode is entered on its initial wire — for a switching one that is its
-    // base profile, and the next speed sample moves it up if the rider is
-    // already fast. Only an unchanged switching mode keeps the wire it is on.
-    final wire =
-        (modeChanged || !nowSwitching) ? initialWireFor(newSel) : asserted;
+    // Evaluated at the queue head, not here: a speed transition can change
+    // [_assertedWire] while this write waits behind other register work, and
+    // the packet must carry the wire the app intends at the moment it goes on
+    // the wire — see the 2026-08-08 ride log, 20:12:29. A wire the selection
+    // never asserts is normalised exactly as [wireVerdict] normalises it, so
+    // a heal write can never contradict the verdict that asked for it.
+    int computeWire() => wireForWrite(
+        sel: newSel,
+        modeChanged: modeChanged,
+        nowSwitching: nowSwitching,
+        assertedWire: _assertedWire);
+    var wire = computeWire();
     if (wasSwitching && !nowSwitching && state.modeLockAuto) {
       // Only the lock a switching mode turned on is turned off again.
       newState = newState.copyWith(modeLock: false, modeLockAuto: false);
@@ -513,6 +518,7 @@ class Bike extends _$Bike {
           final composed = _composePacket(newState, authoritative, fresh);
           newState =
               newState.copyWith(light: composed.light, assist: composed.assist);
+          wire = computeWire();
           data = newState.toWriteData(wire: wire);
           await repo.write(data!);
         });

@@ -371,6 +371,30 @@ void main() {
       expect(bikeWire(container), 4,
           reason: 'a connection dropout must not tear down the controller');
     });
+
+    test('a write composed before a switch still carries the new wire',
+        () async {
+      final container = makeContainer();
+      await openBike(container,
+          region: BikeRegion.us, modeId: tour30.id, customModes: const [tour30]);
+      final bike = container.read(bikeProvider(id).notifier);
+      final store = container.read(fakeBikeStoreProvider);
+      store.setSpeed(id, 10);
+      await settle();
+      expect(bikeWire(container), 1);
+
+      // The rider changes assist on the handlebar; the poll answers with a
+      // write. The speed crosses the limit while that write waits in the
+      // register queue — the interleaving of the 2026-08-08 20:12:29 ride log.
+      bike.writeStateData(container.read(bikeProvider(id)).copyWith(assist: 3));
+      bike.debugHandleSpeedSample(35);
+      await settle();
+
+      expect(bikeWire(container), 4,
+          reason: 'the queued write must not put the pre-switch wire back');
+      expect(bikeAssist(container), 3,
+          reason: 'the assist change itself has to land');
+    });
   });
 
   group('wire verdict in the poll', () {

@@ -274,6 +274,27 @@ int initialWireFor(SelectedMode sel) => switch (sel) {
         baseProfileFor(mode.effectiveLimitKmh, mode.throttle).wire,
     };
 
+/// The wire byte a settings write must carry, given the wire the app asserts
+/// at this moment. A mode change and a non-switching mode enter on the
+/// selection's initial wire; an unchanged switching mode keeps the asserted
+/// wire, normalised through [assertsWire] exactly as [wireVerdict] normalises
+/// it.
+///
+/// Callers evaluate this at the head of the register queue, never at compose
+/// time: a write composed before a speed transition must not put the
+/// pre-transition wire back on the bike.
+int wireForWrite({
+  required SelectedMode sel,
+  required bool modeChanged,
+  required bool nowSwitching,
+  required int assertedWire,
+}) {
+  if (modeChanged || !nowSwitching) {
+    return initialWireFor(sel);
+  }
+  return assertsWire(sel, assertedWire) ? assertedWire : initialWireFor(sel);
+}
+
 /// Whether [wire] is one [sel] ever asserts: a native mode's single wire, or
 /// one of a custom mode's base/cap pair.
 ///
