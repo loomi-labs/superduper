@@ -66,6 +66,18 @@ class _ReentrantReadStore extends FakeBikeStore {
   }
 }
 
+/// A bike that records every write, so a test can count how often the app
+/// put a given wire byte on the bus.
+class _CountingWriteStore extends FakeBikeStore {
+  final writes = <List<int>>[];
+
+  @override
+  void write(String deviceId, List<int> data) {
+    writes.add(List.of(data));
+    super.write(deviceId, data);
+  }
+}
+
 /// A switching custom mode: base wire 1 (32 km/h + throttle), cap wire 4
 /// (EPAC 25). Switches up above 30 km/h, back down below 28.
 const tour30 =
@@ -557,6 +569,35 @@ void main() {
           reason: 'a read that is not a settings packet must be dropped');
       expect(bikeWire(container), unusedWire,
           reason: 'and must never be written back to the bike');
+    });
+
+    test('the poll does not heal while a switch write waits in the queue',
+        () async {
+      final store = _CountingWriteStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      await openBike(container,
+          region: BikeRegion.us, modeId: tour30.id, customModes: const [tour30]);
+      final bike = container.read(bikeProvider(id).notifier);
+      store.setSpeed(id, 10);
+      await settle();
+      expect(bikeWire(container), 1);
+
+      // The poll read enters the register queue first; the switch decision
+      // lands behind it. The read then reports wire 1 — true, but outdated.
+      final poll = bike.updateStateDataNow();
+      bike.debugHandleSpeedSample(35);
+      await poll;
+      await settle();
+
+      expect(bikeWire(container), 4);
+      final capWrites =
+          store.writes.where((d) => d.first == 0 && d[4] == 4).length;
+      expect(capWrites, 1,
+          reason: 'the queued switch write already asserts wire 4; a heal '
+              'would put the same packet on the bus twice');
     });
   });
 

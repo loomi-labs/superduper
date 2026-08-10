@@ -100,6 +100,11 @@ class Bike extends _$Bike {
   /// ride data, which the poll would then write to the bike as settings.
   Future<void> _registerQueue = Future<void>.value();
 
+  /// Settings writes queued but not yet completed. A poll read that returns
+  /// while this is non-zero predates the write behind it, so its wire byte
+  /// says nothing the verdict may act on.
+  int _pendingWrites = 0;
+
   /// Every line this notifier writes carries the device id: it is the join key
   /// against the `[Bluetooth]` lines, which log the same id, and it is the only
   /// way to tell two bikes apart in one session. Through helpers rather than at
@@ -358,6 +363,14 @@ class Bike extends _$Bike {
     }
     // Bike truth, before any lock override turns it into app desire.
     _lastKnown = (light: data[4] == 1, assist: data[2]);
+    if (_pendingWrites > 0) {
+      // This read predates a settings write that waits in the queue. Judging
+      // its wire byte would heal against the past — the ride log shows the
+      // same packet written twice after ~10 % of switches. The next poll
+      // judges fresh data.
+      _logD('Skipping state update, a write is pending');
+      return;
+    }
     var newState = state.updateFromData(data);
     // Judged on [newState], not on [state]: for a legacy bike without a region
     // this read is what guesses one, and the guess moves the selection into
@@ -494,6 +507,7 @@ class Bike extends _$Bike {
               _needsBikeTruth(PacketField.assist, newState, authoritative);
       List<int>? data;
       var aborted = false;
+      _pendingWrites++;
       try {
         // One queue slot for read and write both: a settings write is a
         // select-then-write sequence on the same characteristic reads and ride
@@ -528,6 +542,8 @@ class Bike extends _$Bike {
         _writing = false;
         _logE('Error writing to bike', e);
         return;
+      } finally {
+        _pendingWrites--;
       }
       if (aborted) {
         // Nothing went on the wire, so nothing about the bike is known now —
