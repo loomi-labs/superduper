@@ -103,7 +103,7 @@ final class SettingsDBProvider
   }
 }
 
-String _$settingsDBHash() => r'be5fefb75813f8c2cd654f28ea321b83930aa96b';
+String _$settingsDBHash() => r'62fce323c50dfb1060894342613b473224d282d4';
 
 abstract class _$SettingsDB extends $Notifier<SettingsModel> {
   SettingsModel build();

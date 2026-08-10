@@ -21,6 +21,18 @@ Map<String, dynamic> _$CustomModeToJson(_CustomMode instance) =>
       'throttle': instance.throttle,
     };
 
+_LastSeen _$LastSeenFromJson(Map<String, dynamic> json) => _LastSeen(
+  assist: (json['assist'] as num).toInt(),
+  light: json['light'] as bool,
+  wire: (json['wire'] as num).toInt(),
+);
+
+Map<String, dynamic> _$LastSeenToJson(_LastSeen instance) => <String, dynamic>{
+  'assist': instance.assist,
+  'light': instance.light,
+  'wire': instance.wire,
+};
+
 _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
   id: json['id'] as String,
   legacyMode: (json['mode'] as num?)?.toInt() ?? 0,
@@ -30,11 +42,23 @@ _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
           ?.map((e) => CustomMode.fromJson(e as Map<String, dynamic>))
           .toList() ??
       const <CustomMode>[],
-  modeLocked: json['modeLocked'] as bool? ?? false,
+  pinMode: json['modeLocked'] == null
+      ? PinState.open
+      : _pinFromJson(json['modeLocked']),
   light: json['light'] as bool,
-  lightLocked: json['lightLocked'] as bool? ?? false,
+  pinLight: json['lightLocked'] == null
+      ? PinState.open
+      : _pinFromJson(json['lightLocked']),
   assist: (json['assist'] as num).toInt(),
-  assistLocked: json['assistLocked'] as bool? ?? false,
+  pinAssist: json['assistLocked'] == null
+      ? PinState.open
+      : _pinFromJson(json['assistLocked']),
+  startupLight: json['startupLight'] as bool?,
+  startupModeId: json['startupModeId'] as String?,
+  startupAssist: (json['startupAssist'] as num?)?.toInt(),
+  lastSeen: json['lastSeen'] == null
+      ? null
+      : LastSeen.fromJson(json['lastSeen'] as Map<String, dynamic>),
   name: json['name'] as String,
   region: $enumDecodeNullable(_$BikeRegionEnumMap, json['region']),
   modeLock: json['modeLock'] as bool? ?? false,
@@ -49,11 +73,15 @@ Map<String, dynamic> _$BikeStateToJson(_BikeState instance) =>
       'mode': instance.legacyMode,
       'modeId': instance.modeId,
       'customModes': instance.customModes.map((e) => e.toJson()).toList(),
-      'modeLocked': instance.modeLocked,
+      'modeLocked': _pinToJson(instance.pinMode),
       'light': instance.light,
-      'lightLocked': instance.lightLocked,
+      'lightLocked': _pinToJson(instance.pinLight),
       'assist': instance.assist,
-      'assistLocked': instance.assistLocked,
+      'assistLocked': _pinToJson(instance.pinAssist),
+      'startupLight': instance.startupLight,
+      'startupModeId': instance.startupModeId,
+      'startupAssist': instance.startupAssist,
+      'lastSeen': instance.lastSeen?.toJson(),
       'name': instance.name,
       'region': _$BikeRegionEnumMap[instance.region],
       'modeLock': instance.modeLock,

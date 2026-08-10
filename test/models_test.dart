@@ -513,6 +513,78 @@ void main() {
     });
   });
 
+  group('pin state', () {
+    // A bike whose selection round-trips on its own, so a failure here is
+    // about the pins and not about the mode migration.
+    BikeState saved() =>
+        bike(region: BikeRegion.ch, customModes: [seededChMode])
+            .withSelectedMode(seededChModeId);
+
+    test('a fresh bike pins nothing and has seen nothing', () {
+      final b = BikeState.defaultState('id');
+      expect(b.pinLight, PinState.open);
+      expect(b.pinMode, PinState.open);
+      expect(b.pinAssist, PinState.open);
+      expect(b.startupLight, isNull);
+      expect(b.startupModeId, isNull);
+      expect(b.startupAssist, isNull);
+      expect(b.lastSeen, isNull);
+    });
+
+    test('a saved padlock boolean becomes a locked pin', () {
+      final json = legacyJson()
+        ..['modeLocked'] = true
+        ..['lightLocked'] = false
+        ..['assistLocked'] = true;
+      final b = BikeState.fromJson(json);
+      expect(b.pinMode, PinState.locked, reason: 'a saved lock must survive');
+      expect(b.pinLight, PinState.open);
+      expect(b.pinAssist, PinState.locked);
+    });
+
+    test('a file with no padlock keys and no last read decodes to the defaults',
+        () {
+      final json = legacyJson()
+        ..remove('modeLocked')
+        ..remove('lightLocked')
+        ..remove('assistLocked');
+      expect(json.containsKey('lastSeen'), isFalse);
+      final b = BikeState.fromJson(json);
+      expect(b.pinMode, PinState.open);
+      expect(b.pinLight, PinState.open);
+      expect(b.pinAssist, PinState.open);
+      expect(b.lastSeen, isNull);
+    });
+
+    test('every pin state survives a save', () {
+      for (final pin in PinState.values) {
+        final b =
+            saved().copyWith(pinMode: pin, pinLight: pin, pinAssist: pin);
+        final decoded = BikeState.fromJson(b.toJson());
+        expect(decoded.pinMode, pin, reason: '$pin must survive a save');
+        expect(decoded.pinLight, pin);
+        expect(decoded.pinAssist, pin);
+      }
+    });
+
+    test('an open or locked pin saves as a boolean, so a downgrade reads it',
+        () {
+      expect(saved().copyWith(pinMode: PinState.locked).toJson()['modeLocked'],
+          isTrue);
+      expect(saved().copyWith(pinMode: PinState.open).toJson()['modeLocked'],
+          isFalse);
+    });
+
+    test('the pinned values and the last read survive a save', () {
+      final b = saved().copyWith(
+          startupLight: true,
+          startupModeId: nativeModeId(2),
+          startupAssist: 3,
+          lastSeen: const LastSeen(assist: 1, light: false, wire: 4));
+      expect(BikeState.fromJson(b.toJson()), b);
+    });
+  });
+
   group('mode selection', () {
     test('withSelectedMode keeps the legacy projection in sync', () {
       expect(

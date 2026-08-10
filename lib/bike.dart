@@ -415,7 +415,7 @@ class Bike extends _$Bike {
       case WireFollow(:final modeId):
         // A locked mode is the one thing that does not follow: the rider asked
         // the app to hold this mode against anything that moves it.
-        if (state.modeLocked) {
+        if (state.pinMode == PinState.locked) {
           heal = true;
         } else {
           newState = newState.withSelectedMode(modeId);
@@ -431,11 +431,11 @@ class Bike extends _$Bike {
       return;
     }
     _logD('State update from data: $data');
-    if (state.lightLocked && state.light != newState.light) {
+    if (state.pinLight == PinState.locked && state.light != newState.light) {
       newState = newState.copyWith(light: state.light);
     }
 
-    if (state.assistLocked && state.assist != newState.assist) {
+    if (state.pinAssist == PinState.locked && state.assist != newState.assist) {
       newState = newState.copyWith(assist: state.assist);
     }
     writeStateData(newState);
@@ -448,7 +448,11 @@ class Bike extends _$Bike {
     if (authoritative.contains(field)) {
       return false;
     }
-    return !(field == PacketField.light ? bike.lightLocked : bike.assistLocked);
+    // Only a locked pin holds a value against the bike. A startup pin acts on
+    // one moment, so between those moments it follows the bike like an open
+    // one.
+    final pin = field == PacketField.light ? bike.pinLight : bike.pinAssist;
+    return pin != PinState.locked;
   }
 
   /// Rider-owned packet fields, per the priority in [writeStateData].
@@ -735,22 +739,27 @@ class Bike extends _$Bike {
         authoritative: const {PacketField.assist});
   }
 
+  /// Where a padlock tap moves the pin. The startup state is not in the cycle
+  /// yet: it needs a control that can show which value it pins.
+  static PinState _flipPin(PinState pin) =>
+      pin == PinState.locked ? PinState.open : PinState.locked;
+
   void toggleLightLocked() async {
-    _logD('Toggling light lock: ${!state.lightLocked}');
-    writeStateData(state.copyWith(lightLocked: !state.lightLocked),
-        saveToBike: false);
+    final next = _flipPin(state.pinLight);
+    _logD('Toggling light lock: ${next.name}');
+    writeStateData(state.copyWith(pinLight: next), saveToBike: false);
   }
 
   void toggleModeLocked() async {
-    _logD('Toggling mode lock: ${!state.modeLocked}');
-    writeStateData(state.copyWith(modeLocked: !state.modeLocked),
-        saveToBike: false);
+    final next = _flipPin(state.pinMode);
+    _logD('Toggling mode lock: ${next.name}');
+    writeStateData(state.copyWith(pinMode: next), saveToBike: false);
   }
 
   void toggleAssistLocked() async {
-    _logD('Toggling assist lock: ${!state.assistLocked}');
-    writeStateData(state.copyWith(assistLocked: !state.assistLocked),
-        saveToBike: false);
+    final next = _flipPin(state.pinAssist);
+    _logD('Toggling assist lock: ${next.name}');
+    writeStateData(state.copyWith(pinAssist: next), saveToBike: false);
   }
 
   void toggleBackgroundLock() async {
@@ -1184,7 +1193,7 @@ class EnhancedLightControlWidget extends ConsumerWidget {
       enabled: connected,
       onTap: connected ? bikeControl.toggleLight : null,
       trailing: EnhancedLockWidget(
-        locked: bike.lightLocked,
+        locked: bike.pinLight == PinState.locked,
         onTap: bikeControl.toggleLightLocked,
         tooltip: 'Lock the light',
       ),
@@ -1220,7 +1229,7 @@ class EnhancedModeControlWidget extends ConsumerWidget {
           showSwitch: false,
           enabled: connected,
           trailing: EnhancedLockWidget(
-            locked: bike.modeLocked,
+            locked: bike.pinMode == PinState.locked,
             onTap: bikeControl.toggleModeLocked,
             tooltip: 'Lock the mode',
           ),
@@ -1332,7 +1341,7 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
       showSwitch: false,
       enabled: connected,
       trailing: EnhancedLockWidget(
-        locked: bike.assistLocked,
+        locked: bike.pinAssist == PinState.locked,
         onTap: bikeControl.toggleAssistLocked,
         tooltip: 'Lock the assist',
       ),

@@ -499,7 +499,7 @@ void main() {
           customModes: const []);
       bike.toggleModeLocked();
       await settle();
-      expect(container.read(bikeProvider(id)).modeLocked, isTrue);
+      expect(container.read(bikeProvider(id)).pinMode, PinState.locked);
 
       setBikeWire(container, 1);
       await bike.updateStateDataNow();
@@ -1075,7 +1075,7 @@ void main() {
 
       bike.writeStateData(container
           .read(bikeProvider(id))
-          .copyWith(assist: 2, assistLocked: true));
+          .copyWith(assist: 2, pinAssist: PinState.locked));
       await settle();
       expect(bikeAssist(container), 2);
 

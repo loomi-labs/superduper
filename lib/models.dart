@@ -363,8 +363,8 @@ class WireHeal extends WireVerdict {
 ///
 /// [assertedWire] is the controller's own last written wire: for a switching
 /// custom mode it is the only thing that knows which half of the pair the mode
-/// is on. A `modeLocked` bike turns a [WireFollow] into a heal — that is the
-/// caller's job, not this function's.
+/// is on. A bike whose mode pin is locked turns a [WireFollow] into a heal —
+/// that is the caller's job, not this function's.
 WireVerdict wireVerdict({
   required BikeRegion? region,
   required SelectedMode selected,
@@ -412,6 +412,64 @@ WireVerdict wireVerdict({
   return WireHeal(expected);
 }
 
+/// How hard a padlock holds the value it pins.
+///
+/// Persistence does not go through the enum's own json mapping: the same key
+/// held a bool before, so [_pinFromJson] and [_pinToJson] are the wire format.
+/// Declaration order is therefore free, and it is what the control cycles
+/// through.
+enum PinState {
+  /// Follow the bike. Nothing is pinned.
+  open,
+
+  /// Apply the pinned value once, when a ride starts.
+  startup,
+
+  /// Hold the pinned value always. This is what a lock did before.
+  locked,
+}
+
+/// Reads a padlock out of json, in the old shape and the new one.
+///
+/// A build before three-state padlocks wrote a bool under the same key, so
+/// `true` is a lock, and anything that build could write means open.
+PinState _pinFromJson(Object? json) => switch (json) {
+      true => PinState.locked,
+      'locked' => PinState.locked,
+      'startup' => PinState.startup,
+      _ => PinState.open,
+    };
+
+/// Writes a padlock as the bool an older build can still read, wherever there
+/// is a bool that means the same thing.
+///
+/// Only a startup pin has none. That bike is dropped by a downgraded build,
+/// which is the price of a state the old model cannot express — and an older
+/// build could not act on the pin anyway.
+Object _pinToJson(PinState pin) => switch (pin) {
+      PinState.locked => true,
+      PinState.open => false,
+      PinState.startup => 'startup',
+    };
+
+/// What the bike itself last reported.
+///
+/// Bike truth, never app intent: only a read may write it. A write lost to a
+/// disconnect makes intent differ from reality with no power cycle involved,
+/// so intent cannot answer the question this record exists for — whether the
+/// bike kept its settings across an outage. Nothing in the UI shows it.
+@freezed
+abstract class LastSeen with _$LastSeen {
+  const factory LastSeen({
+    required int assist,
+    required bool light,
+    required int wire,
+  }) = _LastSeen;
+
+  factory LastSeen.fromJson(Map<String, Object?> json) =>
+      _$LastSeenFromJson(json);
+}
+
 /// The mode a CH bike is seeded with: what the old CH dynamic mode was, as a
 /// custom mode. Its id is fixed so migration can recognise it.
 const seededChModeId = 'seed-ch-25';
@@ -434,11 +492,27 @@ abstract class BikeState with _$BikeState {
       // '' only pre-migration and in tests; resolution falls back.
       @Default('') String modeId,
       @Default(<CustomMode>[]) List<CustomMode> customModes,
-      @Default(false) bool modeLocked,
+      // The three padlocks. They keep the key names the two-state booleans
+      // wrote, so the locks in an existing bikes.json survive the upgrade.
+      @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson)
+      @Default(PinState.open)
+      PinState pinMode,
       required bool light,
-      @Default(false) bool lightLocked,
+      @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson)
+      @Default(PinState.open)
+      PinState pinLight,
       required int assist,
-      @Default(false) bool assistLocked,
+      @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson)
+      @Default(PinState.open)
+      PinState pinAssist,
+      // The value each padlock pins, captured when the pin is armed. Held
+      // apart from the live value, which the bike keeps moving.
+      bool? startupLight,
+      String? startupModeId,
+      int? startupAssist,
+      // Null as a group: a bike the app has never read has nothing to compare
+      // a fresh read against.
+      LastSeen? lastSeen,
       required String name,
       BikeRegion? region,
       @Default(false) bool modeLock,
