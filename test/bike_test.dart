@@ -601,6 +601,236 @@ void main() {
     });
   });
 
+  group('the power cycle verdict', () {
+    /// The whole register, the way the bike itself reports it after a power
+    /// cycle. [setBikeWire] cannot stand in for this: it zeroes the light and
+    /// the assist bytes, which would make every case differ in all three
+    /// values and prove nothing about the wire.
+    void setBikeRegister(ProviderContainer container,
+            {required bool light, required int assist, required int wire}) =>
+        container
+            .read(fakeBikeStoreProvider)
+            .write(id, [0, 209, light ? 1 : 0, assist, wire, 0, 0, 0, 0, 0]);
+
+    /// Drops the connection and brings it back. A fake bike is otherwise
+    /// always connected, so the states are set directly.
+    Future<void> cycleConnection(ProviderContainer container) async {
+      for (final next in [
+        SDBluetoothConnectionState.disconnected,
+        SDBluetoothConnectionState.connected,
+      ]) {
+        // ignore: invalid_use_of_protected_member
+        container.read(connectionHandlerProvider(id).notifier).state = next;
+        await settle();
+      }
+    }
+
+    /// Arms the padlocks the way the rider does: a value given here is pinned
+    /// on startup, a null one leaves that padlock open.
+    Future<void> armStartupPins(ProviderContainer container, Bike bike,
+        {String? modeId, bool? light, int? assist}) async {
+      bike.writeStateData(
+          container.read(bikeProvider(id)).copyWith(
+              pinMode: modeId == null ? PinState.open : PinState.startup,
+              startupModeId: modeId,
+              pinLight: light == null ? PinState.open : PinState.startup,
+              startupLight: light,
+              pinAssist: assist == null ? PinState.open : PinState.startup,
+              startupAssist: assist),
+          saveToBike: false);
+      await settle();
+    }
+
+    /// A US bike on its mildest native mode, with one read behind it — so the
+    /// app knows what this bike last reported.
+    Future<Bike> readBike(ProviderContainer container) async {
+      final bike = await openBike(container,
+          region: BikeRegion.us, modeId: nativeModeId(0), customModes: const []);
+      await bike.updateStateDataNow();
+      await settle();
+      return bike;
+    }
+
+    test('a dropout applies nothing', () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(3), light: true, assist: 4);
+
+      // The bike kept every value it reported, so it never lost power.
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(0),
+          reason: 'a signal dropout must not start a new ride');
+      expect(bikeWire(container), 0);
+      expect(bikeLight(container), 0);
+      expect(bikeAssist(container), 0);
+    });
+
+    test('a power cycle applies the pins', () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(3), light: false, assist: 4);
+
+      // The bike came back reporting none of the values it reported before:
+      // it lost its settings, so it was switched off and on again.
+      setBikeRegister(container, light: true, assist: 2, wire: 1);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(3),
+          reason: 'the ride starts on the pinned mode');
+      expect(bikeWire(container), 3, reason: 'and the mode reaches the bike');
+      expect(bikeLight(container), 0, reason: 'the light is pinned off');
+      expect(bikeAssist(container), 4);
+    });
+
+    test('an unconfirmed write is not a power cycle', () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(3), light: true, assist: 4);
+
+      // The write is lost to the disconnect: the app intends assist 3, the
+      // bike never confirmed it. The 2026-08-07 ride log has nine of these in
+      // one ride, and comparing against intent would call every one of them a
+      // power cycle.
+      bike.writeStateData(
+          container.read(bikeProvider(id)).copyWith(assist: 3),
+          saveToBike: false);
+      await settle();
+      expect(container.read(bikeProvider(id)).assist, 3);
+      expect(bikeAssist(container), 0,
+          reason: 'the harness has to hold app intent apart from bike truth, '
+              'or this test proves nothing');
+
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(0),
+          reason: 'the bike reports what it always reported');
+      expect(bikeLight(container), 0);
+      expect(bikeAssist(container), isNot(4),
+          reason: 'app intent must never answer the power cycle question');
+    });
+
+    test('a switching mode cap wire is not a power cycle', () async {
+      final container = makeContainer();
+      // The seeded CH mode: base wire [chWireLow], cap wire [chWireHigh].
+      final bike = await openBike(container, region: BikeRegion.ch);
+      await bike.updateStateDataNow();
+      await settle();
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(chWireOffroad), light: true, assist: 4);
+
+      // The bike is on the other half of the mode's own profile pair, which is
+      // no memory loss at all.
+      setBikeRegister(container, light: false, assist: 0, wire: chWireHigh);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), seededChModeId,
+          reason: 'both wires of the pair mean the bike kept its mode');
+      expect(bikeLight(container), 0);
+      expect(bikeAssist(container), 0);
+    });
+
+    test('no record means the pins are applied', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.us, modeId: nativeModeId(0), customModes: const []);
+      expect(container.read(bikeProvider(id)).lastSeen, isNull,
+          reason: 'nothing has been read off this bike yet');
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(3), light: true, assist: 4);
+
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(3),
+          reason: 'a bike the app never read has no state it can claim to be '
+              'preserving');
+      expect(bikeWire(container), 3);
+      expect(bikeLight(container), 1);
+      expect(bikeAssist(container), 4);
+    });
+
+    test('an open padlock applies nothing on a power cycle', () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      // The pinned values are there, and every padlock is open.
+      bike.writeStateData(
+          container.read(bikeProvider(id)).copyWith(
+              startupModeId: nativeModeId(3),
+              startupLight: false,
+              startupAssist: 4),
+          saveToBike: false);
+      await settle();
+
+      setBikeRegister(container, light: true, assist: 2, wire: 1);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(1),
+          reason: 'an open padlock follows the bike');
+      expect(bikeLight(container), 1, reason: 'the pinned value is not read');
+      expect(bikeAssist(container), 2);
+    });
+
+    test('a handlebar change mid ride is not a power cycle', () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(3), light: true, assist: 4);
+
+      // The rider turns the assist up on the bike itself, with no outage at
+      // all. The question is asked once per outage: asking it again here would
+      // read the rider as a power cycle and write the pins over their change.
+      container.read(fakeBikeStoreProvider).cycleAssist(id);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(bikeAssist(container), 1,
+          reason: 'the app follows the rider between outages');
+      expect(selectedId(container), nativeModeId(0));
+      expect(bikeLight(container), 0);
+    });
+
+    test('a locked padlock keeps forcing its value through a power cycle',
+        () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      bike.toggleLight();
+      await settle();
+      await bike.updateStateDataNow();
+      await settle();
+      expect(bikeLight(container), 1);
+      // Locked, with a startup value beside it that a locked padlock must
+      // ignore.
+      bike.writeStateData(
+          container
+              .read(bikeProvider(id))
+              .copyWith(pinLight: PinState.locked, startupLight: false),
+          saveToBike: false);
+      await settle();
+
+      setBikeRegister(container, light: false, assist: 2, wire: 0);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(bikeLight(container), 1,
+          reason: 'a locked padlock holds its value as it always did');
+    });
+  });
+
   group('mode selection', () {
     test('selectMode moves the bike onto the new mode initial wire', () async {
       final container = makeContainer();

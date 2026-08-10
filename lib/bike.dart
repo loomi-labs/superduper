@@ -117,6 +117,15 @@ class Bike extends _$Bike {
   /// says nothing the verdict may act on.
   int _pendingWrites = 0;
 
+  /// Whether the next settings read still has to answer whether the bike was
+  /// power-cycled.
+  ///
+  /// Armed on every connect, and once here for a bike that is connected before
+  /// this notifier is built. Cleared by the read that answers it, so a startup
+  /// pin is applied at most once per outage — a later poll compares two reads
+  /// of the same ride, where every difference is the rider on the handlebar.
+  bool _powerCycleCheckDue = true;
+
   /// Every line this notifier writes carries the device id: it is the join key
   /// against the `[Bluetooth]` lines, which log the same id, and it is the only
   /// way to tell two bikes apart in one session. Through helpers rather than at
@@ -196,6 +205,9 @@ class Bike extends _$Bike {
         .read(connectionHandlerProvider(id).notifier)
         .speedStream
         .listen(_onSpeedSample);
+    // The first read after this connect decides whether the bike kept its
+    // settings across the outage, and a startup pin acts on that answer alone.
+    _powerCycleCheckDue = true;
     // The bike may have power-cycled into its own default mode, so re-assert
     // ours. Every mode needs this, not just a switching one: without it a
     // reconnected bike keeps whatever it came up with until the next poll, and
@@ -397,6 +409,27 @@ class Bike extends _$Bike {
       _logD('Skipping state update, a write is pending');
       return;
     }
+    if (!ref.mounted || _deleted) {
+      // The bike went away while the read was in flight: touching state now
+      // would throw, and saving would put a deleted bike back.
+      return;
+    }
+    // Bike truth, and only out of a read the gate above let through: a read
+    // that predates a queued write says nothing about what the bike came up
+    // with, and answering the question with it would consume the power cycle
+    // signature and lose the pins for this outage.
+    final seen = LastSeen(assist: data[2], light: data[4] == 1, wire: data[5]);
+    final powerCycled = _powerCycleCheckDue && _isPowerCycle(seen);
+    _powerCycleCheckDue = false;
+    if (seen != state.lastSeen) {
+      // Saved on its own, because an unchanged poll returns below without ever
+      // reaching a write — and the record has to survive an app restart: the
+      // sequence this exists for (bike off overnight, app opened, bike
+      // switched on) is a cold start.
+      final next = state.copyWith(lastSeen: seen);
+      ref.read(bikesDBProvider.notifier).saveBike(next);
+      state = next;
+    }
     var newState = state.updateFromData(data);
     // Judged on [newState], not on [state]: for a legacy bike without a region
     // this read is what guesses one, and the guess moves the selection into
@@ -427,7 +460,20 @@ class Bike extends _$Bike {
       _logD(
           'Bike is on wire ${data[5]}, re-asserting ${state.selectedMode.name}');
     }
-    if (newState == state && !force && !heal) {
+    // The one moment a startup pin acts: the ride starts on the pinned values.
+    // After the verdict, so a pinned mode wins over the mode the bike came up
+    // with; before the return, so a pin that changes nothing the read can see
+    // still reaches the bike — the mode lives in the wire byte.
+    var pinned = false;
+    if (powerCycled) {
+      final withPins = _applyStartupPins(newState);
+      if (withPins != null) {
+        _logI('Bike was power-cycled, applying the pinned values');
+        newState = withPins;
+        pinned = true;
+      }
+    }
+    if (newState == state && !force && !heal && !pinned) {
       return;
     }
     _logD('State update from data: $data');
@@ -439,6 +485,59 @@ class Bike extends _$Bike {
       newState = newState.copyWith(assist: state.assist);
     }
     writeStateData(newState);
+  }
+
+  /// Whether [seen] says the bike lost the settings it had before the outage,
+  /// which only a power cycle does.
+  ///
+  /// Compared against the last value the bike itself reported, never against
+  /// what the app wanted: a write lost to a disconnect makes intent differ
+  /// from reality with no power cycle involved, and the 2026-08-07 ride log
+  /// has nine of those in one ride without a single power cycle.
+  bool _isPowerCycle(LastSeen seen) {
+    final before = state.lastSeen;
+    if (before == null) {
+      // The app has never read this bike, so there is no state it can claim
+      // the bike preserved. Honouring the pin beats being careful about a bike
+      // we know nothing about.
+      return true;
+    }
+    if (before.assist != seen.assist || before.light != seen.light) {
+      return true;
+    }
+    if (before.wire == seen.wire) {
+      return false;
+    }
+    // Normalised, not raw: a switching mode rides its base profile or its cap
+    // profile, and both mean the bike kept the mode it was in. Raw equality
+    // would call every speed switch a power cycle.
+    final selected = state.selectedMode;
+    return !assertsWire(selected, before.wire) ||
+        !assertsWire(selected, seen.wire);
+  }
+
+  /// [bike] with the value of every padlock that is on [PinState.startup], or
+  /// null when no padlock pins anything — so the caller does not force a write
+  /// for a bike that has no startup pin at all.
+  BikeState? _applyStartupPins(BikeState bike) {
+    var next = bike;
+    var any = false;
+    final modeId = bike.startupModeId;
+    if (bike.pinMode == PinState.startup && modeId != null) {
+      next = next.withSelectedMode(modeId);
+      any = true;
+    }
+    final light = bike.startupLight;
+    if (bike.pinLight == PinState.startup && light != null) {
+      next = next.copyWith(light: light);
+      any = true;
+    }
+    final assist = bike.startupAssist;
+    if (bike.pinAssist == PinState.startup && assist != null) {
+      next = next.copyWith(assist: assist);
+      any = true;
+    }
+    return any ? next : null;
   }
 
   /// Whether [field] has to come off the bike rather than out of the app: the
