@@ -536,7 +536,10 @@ void main() {
           'Above 32 km/h no firmware profile has both a throttle and a limit, '
           'so the bike rides OFFROAD below 40 km/h. This app holds the limit, '
           'not the bike: if Bluetooth drops while you ride below 40 km/h, the '
-          'bike stays unlimited until the app reconnects.');
+          'bike stays unlimited until the app reconnects. The app also needs '
+          'live speed for the throttle. The bike sends no speed when it stands '
+          'still, so the throttle does not work at a stop until you pedal '
+          'away.');
       container.dispose();
       expect(cost, findsOneWidget,
           reason: 'the rider trades the dropout fail-safe for the throttle, '

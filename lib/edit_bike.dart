@@ -889,7 +889,9 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
           'limit, so the bike rides ${base.name} below $_limitKmh km/h. This '
           'app holds the limit, not the bike: if Bluetooth drops while you '
           'ride below $_limitKmh km/h, the bike stays unlimited until the app '
-          'reconnects.';
+          'reconnects. The app also needs live speed for the throttle. The '
+          'bike sends no speed when it stands still, so the throttle does not '
+          'work at a stop until you pedal away.';
     }
     return 'If Bluetooth drops while riding below $_limitKmh km/h, the bike '
         'stays capped at ${base.capKmh} km/h until the app reconnects.';

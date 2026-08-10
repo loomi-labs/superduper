@@ -96,12 +96,23 @@ String? backgroundStatusText(BackgroundStatus status, BikeState bike,
   // Named rather than "your locks": a switching mode is the thing riders came
   // for, and its name is what they picked.
   final what = bike.needsSpeedSwitching ? bike.selectedMode.name : 'your locks';
+  // A mode with a fallback wire rides an unlimited base profile: the firmware
+  // holds no limit under it, so "the app stops" does not mean "you get the
+  // firmware limit", it means the bike can be left unlimited. Say that.
+  final unlimited = unwatchedWireFor(bike.selectedMode, bike.region) != null;
   return switch (status) {
     BackgroundStatus.none => null,
     BackgroundStatus.active =>
       'Keeping $what active while your phone is locked. Uses some battery.',
+    BackgroundStatus.degraded when !hasService && unlimited =>
+      'Locks and speed limiting only work while the app is open. $what has no '
+          'firmware limit. If you close the app, the bike can stay unlimited.',
     BackgroundStatus.degraded when !hasService =>
       'Locks and speed limiting only work while the app is open.',
+    BackgroundStatus.degraded when unlimited =>
+      'Notifications are off, so $what can stop when your phone is locked. '
+          '$what has no firmware limit, so the bike can stay unlimited. '
+          'Turn notifications on to keep it active.',
     BackgroundStatus.degraded =>
       'Notifications are off, so $what can stop when your phone is locked. '
           'Turn notifications on to keep it active.',
@@ -1525,7 +1536,17 @@ class EnhancedModeControlWidget extends ConsumerWidget {
               children: [
                 Flexible(
                   child: Text(
-                    "Dynamic mode switching stops when the app is closed or the phone is locked. The bike stays in the profile written last.",
+                    // A mode on an unlimited base gets the plain word: "the
+                    // profile written last" hides that the last profile can be
+                    // OFFROAD.
+                    unwatchedWireFor(bike.selectedMode, bike.region) != null
+                        ? 'Dynamic mode switching stops when the app is closed '
+                            'or the phone is locked. ${bike.selectedMode.name} '
+                            'has no firmware limit, so the bike can stay '
+                            'unlimited.'
+                        : 'Dynamic mode switching stops when the app is closed '
+                            'or the phone is locked. The bike stays in the '
+                            'profile written last.',
                     style: Theme.of(context).textTheme.bodySmall!.copyWith(
                           color: Colors.grey,
                           fontSize: 12,

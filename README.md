@@ -43,9 +43,13 @@ Optionally, you can tap the "Edit" button to change the name of the bike.
 
 ## Bike Functions
 
-Control your bike's functions by tapping the buttons on the screen. Press the lock icon to lock the setting.
-A locked setting tells the bike to use that setting when it turns on. An unlocked setting will reset to the default
-when the bike turns on.
+Control your bike's functions by tapping the buttons on the screen. Each card has a padlock icon with three states.
+One tap moves to the next state:
+
+- **Open** — the app holds nothing. The bike turns on with its own default.
+- **Pinned for the ride start** (pin icon) — the app keeps the value you had when you tapped. When the bike is turned
+  off and on again, the app writes that value back.
+- **Locked** — the app holds the value all the time. If the bike reports a different value, the app writes yours back.
 
 ### Light
 
