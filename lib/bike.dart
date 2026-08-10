@@ -7,10 +7,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show KeepAliveLink;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:superduper/colors.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/edit_bike.dart' as edit;
 import 'package:superduper/models.dart';
 import 'package:superduper/repository.dart';
+import 'package:superduper/theme.dart';
 import 'package:superduper/utils/logger.dart';
 import 'package:superduper/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -900,26 +902,21 @@ class BikePageState extends ConsumerState<BikePage> {
     return ForegroundNotificationWrapper(
       enabled: bike.modeLock,
       child: Scaffold(
-          backgroundColor: Colors.black,
+          backgroundColor: SDSurface.page,
           body: CustomScrollView(
             physics: const BouncingScrollPhysics(),
             slivers: [
               // Modern App Bar without bike name
               SliverAppBar(
-                backgroundColor: Colors.black,
+                backgroundColor: SDSurface.page,
                 pinned: true,
                 expandedHeight: 60, // Reduced height without the title
                 stretch: true,
                 leading: IconButton(
                   tooltip: 'Back',
-                  icon: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withAlpha(51), // 0.2 opacity
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.arrow_back, color: Colors.white),
-                  ),
+                  // No box behind the icon: the old one painted black on a
+                  // black page, so it only made the icon look boxed in.
+                  icon: const Icon(Icons.arrow_back, color: SDSurface.text),
                   onPressed: () {
                     var settings = ref.read(settingsDBProvider);
                     ref
@@ -931,14 +928,7 @@ class BikePageState extends ConsumerState<BikePage> {
                 actions: [
                   IconButton(
                     tooltip: 'Bike settings',
-                    icon: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withAlpha(51), // 0.2 opacity
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Icon(Icons.settings, color: Colors.white),
-                    ),
+                    icon: const Icon(Icons.settings, color: SDSurface.text),
                     onPressed: () {
                       edit.show(context, bike);
                     },
@@ -946,7 +936,7 @@ class BikePageState extends ConsumerState<BikePage> {
                   const SizedBox(width: 8),
                 ],
                 flexibleSpace: FlexibleSpaceBar(
-                  background: Container(color: Colors.black),
+                  background: Container(color: SDSurface.page),
                   collapseMode: CollapseMode.pin,
                   stretchModes: const [],
                 ),
@@ -957,7 +947,29 @@ class BikePageState extends ConsumerState<BikePage> {
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // The one place the bike's full gradient survives: an
+                      // identity dot. No card is painted with it any more.
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Container(
+                          width: 14,
+                          height: 14,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: LinearGradient(
+                              colors: [
+                                getColor(bike.color).start,
+                                getColor(bike.color).end,
+                              ],
+                              begin: Alignment.bottomLeft,
+                              end: Alignment.topRight,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -969,7 +981,7 @@ class BikePageState extends ConsumerState<BikePage> {
                                   .headlineSmall
                                   ?.copyWith(
                                     fontWeight: FontWeight.bold,
-                                    color: Colors.white,
+                                    color: SDSurface.text,
                                   ),
                               overflow: TextOverflow.ellipsis,
                               maxLines: 2,
@@ -1014,7 +1026,9 @@ class BikePageState extends ConsumerState<BikePage> {
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 32.0),
                       child: Center(
-                        child: ElevatedButton.icon(
+                        // A quiet text button: help is not a control, so it
+                        // must not compete with the cards above it.
+                        child: TextButton.icon(
                           onPressed: () {
                             final Uri url = Uri.parse(
                                 'https://github.com/blopker/superduper/?tab=readme-ov-file#getting-started');
@@ -1023,20 +1037,13 @@ class BikePageState extends ConsumerState<BikePage> {
                           },
                           icon: const Icon(Icons.help_outline, size: 18),
                           label: Text(
-                            "HELP & TIPS",
-                            style:
-                                Theme.of(context).textTheme.bodySmall!.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                    ),
+                            "Help & tips",
+                            style: Theme.of(context).textTheme.bodySmall,
                           ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xff4A80F0)
-                                .withAlpha(51), // 0.2 opacity
-                            foregroundColor: const Color(0xff4A80F0),
+                          style: TextButton.styleFrom(
+                            foregroundColor: SDSurface.muted,
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 16, vertical: 12),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12)),
                           ),
                         ),
                       ),
@@ -1129,39 +1136,28 @@ class EnhancedConnectionWidget extends ConsumerWidget {
 }
 
 class EnhancedLockWidget extends StatelessWidget {
-  const EnhancedLockWidget(
-      {super.key,
-      required this.locked,
-      required this.onTap,
-      this.activeColor = Colors.white});
+  const EnhancedLockWidget({
+    super.key,
+    required this.locked,
+    required this.onTap,
+    required this.tooltip,
+  });
 
   final bool locked;
   final VoidCallback onTap;
-  final Color activeColor;
+  final String tooltip;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(left: 8),
-      decoration: BoxDecoration(
-        color: locked
-            ? Colors.grey.withAlpha(38)
-            : Colors.transparent, // 0.15 opacity
-        borderRadius: BorderRadius.circular(50),
-      ),
-      child: IconButton(
-        iconSize: 24,
-        padding: const EdgeInsets.all(12),
-        onPressed: onTap,
-        icon: Icon(
-          locked ? Icons.lock : Icons.lock_open,
-          color: locked ? activeColor : Colors.grey[600],
-        ),
-        style: IconButton.styleFrom(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(50),
-          ),
-        ),
+    return IconButton(
+      tooltip: tooltip,
+      iconSize: 20,
+      padding: const EdgeInsets.all(12),
+      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+      onPressed: onTap,
+      icon: Icon(
+        locked ? Icons.lock : Icons.lock_open,
+        color: locked ? SDSurface.text : SDSurface.muted,
       ),
     );
   }
@@ -1180,32 +1176,18 @@ class EnhancedLightControlWidget extends ConsumerWidget {
     // the Connect chip.
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Expanded(
-          child: Opacity(
-            opacity: connected ? 1.0 : 0.5,
-            child: DiscoverCard(
-              colorIndex: bike.color,
-              title: "Light",
-              metric: bike.light ? "On" : "Off",
-              titleIcon: bike.light ? Icons.lightbulb : Icons.lightbulb_outline,
-              selected: bike.light,
-              onTap: connected
-                  ? () {
-                      bikeControl.toggleLight();
-                    }
-                  : null,
-            ),
-          ),
-        ),
-        EnhancedLockWidget(
-          locked: bike.lightLocked,
-          onTap: bikeControl.toggleLightLocked,
-          activeColor: Colors.white,
-        )
-      ],
+    return ControlCard(
+      colorIndex: bike.color,
+      title: "Light",
+      titleIcon: bike.light ? Icons.lightbulb : Icons.lightbulb_outline,
+      active: bike.light,
+      enabled: connected,
+      onTap: connected ? bikeControl.toggleLight : null,
+      trailing: EnhancedLockWidget(
+        locked: bike.lightLocked,
+        onTap: bikeControl.toggleLightLocked,
+        tooltip: 'Lock the light',
+      ),
     );
   }
 }
@@ -1231,38 +1213,32 @@ class EnhancedModeControlWidget extends ConsumerWidget {
 
     return Column(
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Opacity(
-                opacity: connected ? 1.0 : 0.5,
-                child: SelectorCard(
-                  colorIndex: bike.color,
-                  title: "Mode",
-                  titleIcon: Icons.electric_bike,
-                  items: [
-                    for (final mode in bike.selectableModes)
-                      SelectorItem(
-                        keyValue: 'modeChip:${mode.id}',
-                        label: mode.name,
-                        tooltip: 'Select mode ${mode.name}',
-                        selected: mode.id == selectedModeId,
-                        onTap: connected
-                            ? () {
-                                bikeControl.selectMode(mode.id);
-                              }
-                            : null,
-                      ),
-                  ],
+        ControlCard(
+          colorIndex: bike.color,
+          title: "Mode",
+          titleIcon: Icons.electric_bike,
+          showSwitch: false,
+          enabled: connected,
+          trailing: EnhancedLockWidget(
+            locked: bike.modeLocked,
+            onTap: bikeControl.toggleModeLocked,
+            tooltip: 'Lock the mode',
+          ),
+          body: SelectorBody(
+            colorIndex: bike.color,
+            layout: SelectorLayout.rows,
+            items: [
+              for (final mode in bike.selectableModes)
+                SelectorItem(
+                  keyValue: 'modeChip:${mode.id}',
+                  label: mode.name,
+                  tooltip: 'Select mode ${mode.name}',
+                  selected: mode.id == selectedModeId,
+                  onTap:
+                      connected ? () => bikeControl.selectMode(mode.id) : null,
                 ),
-              ),
-            ),
-            EnhancedLockWidget(
-              locked: bike.modeLocked,
-              onTap: bikeControl.toggleModeLocked,
-              activeColor: Colors.white,
-            )
-          ],
+            ],
+          ),
         ),
         // iOS has no background service, so a custom mode's speed switching
         // only runs while the app is in the foreground.
@@ -1299,12 +1275,13 @@ class EnhancedBackgroundLockWidget extends ConsumerWidget {
     var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
     return Column(
       children: [
-        DiscoverCard(
-          title: "Background Lock",
-          metric: bike.modeLock ? "On" : "Off",
-          titleIcon: Icons.phonelink_lock,
-          selected: bike.modeLock,
+        ControlCard(
           colorIndex: bike.color,
+          title: "Background Lock",
+          titleIcon: Icons.phonelink_lock,
+          active: bike.modeLock,
+          // No [enabled] gate: Background Lock is app state, and works while
+          // the bike is out of range, exactly like the lock buttons.
           onTap: () async {
             await Permission.notification.request();
             if (Platform.isAndroid) {
@@ -1348,38 +1325,31 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
 
-    return Row(
-      children: [
-        Expanded(
-          child: Opacity(
-            opacity: connected ? 1.0 : 0.5,
-            child: SelectorCard(
-              colorIndex: bike.color,
-              title: "Assist",
-              titleIcon: Icons.autorenew,
-              items: [
-                for (var level = 0; level <= 4; level++)
-                  SelectorItem(
-                    keyValue: 'assistChip:$level',
-                    label: '$level',
-                    tooltip: 'Select assist $level',
-                    selected: bike.assist == level,
-                    onTap: connected
-                        ? () {
-                            bikeControl.setAssist(level);
-                          }
-                        : null,
-                  ),
-              ],
+    return ControlCard(
+      colorIndex: bike.color,
+      title: "Assist",
+      titleIcon: Icons.autorenew,
+      showSwitch: false,
+      enabled: connected,
+      trailing: EnhancedLockWidget(
+        locked: bike.assistLocked,
+        onTap: bikeControl.toggleAssistLocked,
+        tooltip: 'Lock the assist',
+      ),
+      body: SelectorBody(
+        colorIndex: bike.color,
+        layout: SelectorLayout.segments,
+        items: [
+          for (var level = 0; level <= 4; level++)
+            SelectorItem(
+              keyValue: 'assistChip:$level',
+              label: '$level',
+              tooltip: 'Select assist $level',
+              selected: bike.assist == level,
+              onTap: connected ? () => bikeControl.setAssist(level) : null,
             ),
-          ),
-        ),
-        EnhancedLockWidget(
-          locked: bike.assistLocked,
-          onTap: bikeControl.toggleAssistLocked,
-          activeColor: Colors.white,
-        )
-      ],
+        ],
+      ),
     );
   }
 }

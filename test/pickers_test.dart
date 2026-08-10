@@ -275,20 +275,40 @@ void main() {
     expect(light, isFalse);
   });
 
-  /// How faded a card renders: the [Opacity] the control widget wraps it in.
-  double cardOpacity(WidgetTester tester, Type cardType) => tester
-      .widget<Opacity>(find.ancestor(
-        of: find.byType(cardType),
+  /// How faded a card renders. A [ControlCard] dims itself from the inside, so
+  /// the [Opacity] widgets are its descendants, not its ancestor: one around
+  /// the header, and one more around the body when the card has one.
+  List<double> cardOpacities(WidgetTester tester) => tester
+      .widgetList<Opacity>(find.descendant(
+        of: find.byType(ControlCard),
         matching: find.byType(Opacity),
       ))
-      .opacity;
+      .map((o) => o.opacity)
+      .toList();
+
+  /// Proves the lock sits outside every dimmed part of the card. Scoped to the
+  /// card's own [Opacity] widgets rather than searched upwards from the lock,
+  /// because a route can put widgets of its own above the whole page.
+  void expectLockOutsideDimming(WidgetTester tester) {
+    final dimmed = find.descendant(
+      of: find.byType(ControlCard),
+      matching: find.byType(Opacity),
+    );
+    for (var i = 0; i < tester.widgetList<Opacity>(dimmed).length; i++) {
+      expect(
+          find.descendant(
+              of: dimmed.at(i), matching: find.byType(EnhancedLockWidget)),
+          findsNothing,
+          reason: 'the lock must keep full contrast while the bike is away');
+    }
+  }
 
   testWidgets('a disconnected assist card is greyed out and inert',
       (tester) async {
     final container = await pumpControl(tester,
         bike: BikeState.defaultState(id).copyWith(assist: 1),
         build: (b) => EnhancedAssistControlWidget(bike: b));
-    expect(cardOpacity(tester, SelectorCard), 1.0,
+    expect(cardOpacities(tester), everyElement(1.0),
         reason: 'a connected bike must render at full strength');
 
     // ignore: invalid_use_of_protected_member
@@ -296,10 +316,12 @@ void main() {
         SDBluetoothConnectionState.disconnected;
     await settle(tester);
 
-    final opacity = cardOpacity(tester, SelectorCard);
+    final opacities = cardOpacities(tester);
     final taps = chips(tester).map((c) => c.item.onTap).toList();
+    expectLockOutsideDimming(tester);
     container.dispose();
-    expect(opacity, 0.5);
+    expect(opacities, isNotEmpty);
+    expect(opacities, everyElement(0.5));
     expect(taps, everyElement(isNull),
         reason: 'a null onTap is what makes the chip inert');
   });
@@ -311,7 +333,7 @@ void main() {
             .copyWith(region: BikeRegion.us, customModes: const [tour30])
             .withSelectedMode(tour30.id),
         build: (b) => EnhancedModeControlWidget(bike: b));
-    expect(cardOpacity(tester, SelectorCard), 1.0,
+    expect(cardOpacities(tester), everyElement(1.0),
         reason: 'a connected bike must render at full strength');
 
     // ignore: invalid_use_of_protected_member
@@ -319,10 +341,12 @@ void main() {
         SDBluetoothConnectionState.disconnected;
     await settle(tester);
 
-    final opacity = cardOpacity(tester, SelectorCard);
+    final opacities = cardOpacities(tester);
     final taps = chips(tester).map((c) => c.item.onTap).toList();
+    expectLockOutsideDimming(tester);
     container.dispose();
-    expect(opacity, 0.5);
+    expect(opacities, isNotEmpty);
+    expect(opacities, everyElement(0.5));
     expect(taps, everyElement(isNull));
   });
 
@@ -331,7 +355,7 @@ void main() {
     final container = await pumpControl(tester,
         bike: BikeState.defaultState(id).copyWith(light: false),
         build: (b) => EnhancedLightControlWidget(bike: b));
-    expect(cardOpacity(tester, DiscoverCard), 1.0,
+    expect(cardOpacities(tester), everyElement(1.0),
         reason: 'a connected bike must render at full strength');
 
     // ignore: invalid_use_of_protected_member
@@ -339,13 +363,15 @@ void main() {
         SDBluetoothConnectionState.disconnected;
     await settle(tester);
 
-    final opacity = cardOpacity(tester, DiscoverCard);
-    final onTap = tester.widget<DiscoverCard>(find.byType(DiscoverCard)).onTap;
+    final opacities = cardOpacities(tester);
+    final onTap = tester.widget<ControlCard>(find.byType(ControlCard)).onTap;
     // The lock button is app state and works offline, so it stays live.
     final lockOnTap =
         tester.widget<EnhancedLockWidget>(find.byType(EnhancedLockWidget)).onTap;
+    expectLockOutsideDimming(tester);
     container.dispose();
-    expect(opacity, 0.5);
+    expect(opacities, isNotEmpty);
+    expect(opacities, everyElement(0.5));
     expect(onTap, isNull);
     expect(lockOnTap, isNotNull);
   });
