@@ -69,29 +69,54 @@ const firmwareProfiles = <FirmwareProfile>[
 
 FirmwareProfile profileByWire(int wire) => firmwareProfiles[wire];
 
+/// The off-road profile of [region]'s own bank. Both are unlimited and both
+/// carry a throttle; only the wire byte differs.
+int offroadWireFor(BikeRegion? region) =>
+    region == BikeRegion.us || region == null ? chWireUsOffroad : chWireOffroad;
+
+/// Whether [wire] belongs to the bank [region]'s firmware addresses. CH rides
+/// the EU bank: a CH bike is an EU bike whose only native mode is off-road.
+///
+/// A bank is a tie-break, never a filter: the seeded CH mode rides wire 1, a
+/// US-bank profile, because the EU bank has no profile with a throttle at all.
+bool _inBankOf(int wire, BikeRegion? region) =>
+    (region == BikeRegion.eu || region == BikeRegion.ch) == (wire >= 4);
+
 /// The profile a custom mode rides *below* its limit: the closest profile at or
 /// above [limitKmh] with a matching [throttle], i.e. the smallest finite cap
-/// that still holds the limit. Ties break to the lowest wire.
+/// that still holds the limit. A tie goes to [region]'s own bank, then to the
+/// lowest wire.
+///
+/// The result is unlimited only when no capped profile of the requested
+/// throttle can hold the limit at all — a throttle above 32 km/h, where the
+/// table pairs a throttle with no limiter. Such a mode rides off-road below its
+/// limit and the APP holds the limit, not the firmware: see [initialWireFor],
+/// which enters it on its cap rather than on this base.
 ///
 /// [limitKmh] is clamped exactly as [CustomMode.effectiveLimitKmh] clamps it,
-/// which is what makes the answer total: within the slider range every throttle
-/// has a limiter that holds it, so the result is never an unlimited profile —
-/// asking for a limit must never hand the rider off-road.
-FirmwareProfile baseProfileFor(int limitKmh, bool throttle) {
-  final limit = limitKmh
-      .clamp(customLimitMin, throttle ? customLimitMaxThrottle : customLimitMax)
-      .toInt();
+/// so the answer is total.
+FirmwareProfile baseProfileFor(int limitKmh, bool throttle,
+    {BikeRegion? region}) {
+  final limit = limitKmh.clamp(customLimitMin, customLimitMax).toInt();
   FirmwareProfile? best;
   for (final p in firmwareProfiles) {
     if (p.unlimited || p.throttle != throttle || p.capKmh! < limit) {
       continue;
     }
-    // Strictly smaller only, so a tie keeps the profile with the lower wire.
-    if (best == null || p.capKmh! < best.capKmh!) {
+    // Strictly smaller, so a tie keeps the profile found first — which the
+    // bank rule may then take, and otherwise the lower wire keeps.
+    final smaller = best == null || p.capKmh! < best.capKmh!;
+    final ownBank = best != null &&
+        p.capKmh == best.capKmh &&
+        _inBankOf(p.wire, region) &&
+        !_inBankOf(best.wire, region);
+    if (smaller || ownBank) {
       best = p;
     }
   }
-  return best!;
+  // No limiter in the table holds this limit with a throttle. Off-road is the
+  // only profile that can carry the mode; the caller holds the limit itself.
+  return best ?? profileByWire(offroadWireFor(region));
 }
 
 /// The profile a custom mode rides *above* its limit: the fastest profile whose
@@ -99,15 +124,16 @@ FirmwareProfile baseProfileFor(int limitKmh, bool throttle) {
 /// asked for, and no profile in the table pairs a throttle with a low cap.
 ///
 /// [throttle] is a tie-break only: among equal caps the matching-throttle
-/// profile wins, then the lowest wire. That is what makes an exact firmware
-/// match fall out as `base == cap` (e.g. {32, throttle} ties wires 0 and 1 at
-/// cap 32, and the tie-break picks 1 — the base).
+/// profile wins, then [region]'s own bank, then the lowest wire. That is what
+/// makes an exact firmware match fall out as `base == cap` (e.g. {32, throttle}
+/// ties wires 0 and 1 at cap 32, and the tie-break picks 1 — the base).
 ///
-/// The clamp has no throttle ceiling, unlike [baseProfileFor]: a cap profile is
-/// not required to have a throttle, so the throttle says nothing about how high
-/// it may cap. The slider floor is the slowest profile's cap, so the answer
-/// always exists and is never unlimited.
-FirmwareProfile capProfileFor(int limitKmh, {required bool throttle}) {
+/// A cap profile is not required to have a throttle, so the throttle says
+/// nothing about how high it may cap. The slider floor is the slowest profile's
+/// cap, so the answer always exists and is never unlimited: this is the profile
+/// a mode falls back to, and it must always hold a limit.
+FirmwareProfile capProfileFor(int limitKmh,
+    {required bool throttle, BikeRegion? region}) {
   final limit = limitKmh.clamp(customLimitMin, customLimitMax).toInt();
   FirmwareProfile? best;
   for (final p in firmwareProfiles) {
@@ -115,10 +141,12 @@ FirmwareProfile capProfileFor(int limitKmh, {required bool throttle}) {
       continue;
     }
     final faster = best == null || p.capKmh! > best.capKmh!;
-    final betterTie = best != null &&
-        p.capKmh == best.capKmh &&
-        p.throttle == throttle &&
-        best.throttle != throttle;
+    final tie = best != null && p.capKmh == best.capKmh;
+    // The throttle answers first; the bank only decides where it cannot.
+    final betterTie = tie &&
+        (p.throttle != best.throttle
+            ? p.throttle == throttle
+            : _inBankOf(p.wire, region) && !_inBankOf(best.wire, region));
     if (faster || betterTie) {
       best = p;
     }
@@ -127,27 +155,59 @@ FirmwareProfile capProfileFor(int limitKmh, {required bool throttle}) {
 }
 
 /// The two wires a custom mode ever asserts: below its limit and above it.
-({int base, int cap}) _wirePairFor(CustomMode m) {
+({int base, int cap}) _wirePairFor(CustomMode m, BikeRegion? region) {
   final limit = m.effectiveLimitKmh;
   return (
-    base: baseProfileFor(limit, m.throttle).wire,
-    cap: capProfileFor(limit, throttle: m.throttle).wire
+    base: baseProfileFor(limit, m.throttle, region: region).wire,
+    cap: capProfileFor(limit, throttle: m.throttle, region: region).wire
   );
 }
 
+/// The wire a custom mode is put on with no speed information: its base
+/// profile, unless that base is unlimited — then its cap.
+///
+/// Inverted for an unlimited base on purpose. Such a mode has no firmware
+/// limiter below its limit, so entering it on its base would hand the rider
+/// off-road the moment they pick it, before a single speed sample proves the
+/// app is watching. It enters capped, and [dynamicWireFor] drops it to the base
+/// on the first sample below the limit. The rider loses full assistance for a
+/// moment; in exchange the unlimited profile is only ever on the bike while the
+/// app receives speed.
+int entryWireFor(CustomMode m, BikeRegion? region) {
+  final (:base, :cap) = _wirePairFor(m, region);
+  return profileByWire(base).unlimited ? cap : base;
+}
+
+/// The wire a switching mode has to fall back to when the app loses sight of
+/// the speed, or null when there is nothing to fall back from.
+///
+/// Only a mode whose base is unlimited has: on every other mode the firmware
+/// holds the limit on the base profile, so a blind app still leaves a limited
+/// bike. The controller's speed-stream watchdog is what asks.
+int? unwatchedWireFor(SelectedMode sel, BikeRegion? region) => switch (sel) {
+      NativeSelection() => null,
+      CustomSelection(:final mode) =>
+        baseProfileFor(mode.effectiveLimitKmh, mode.throttle, region: region)
+                .unlimited
+            ? _wirePairFor(mode, region).cap
+            : null,
+    };
+
 /// A wire read as a position in [m]'s own pair. A wire the mode never asserts —
 /// left over from an edit of the mode, or another app's — means nothing to it
-/// and is read as the base: the mode must never be believed to be riding a wire
-/// it cannot have written, least of all an unlimited one.
-int _pairWireFor(CustomMode m, int wire) {
-  final pair = _wirePairFor(m);
-  return wire == pair.base || wire == pair.cap ? wire : pair.base;
+/// and is read as [entryWireFor]: the mode must never be believed to be riding
+/// a wire it cannot have written, and never an unlimited one on no evidence.
+int _pairWireFor(CustomMode m, int wire, BikeRegion? region) {
+  final pair = _wirePairFor(m, region);
+  return wire == pair.base || wire == pair.cap
+      ? wire
+      : entryWireFor(m, region);
 }
 
 /// Whether a custom mode is an exact firmware match: one profile does the whole
 /// job, so there is nothing to switch and no speed stream to keep up.
-bool isStaticCustomMode(CustomMode m) {
-  final pair = _wirePairFor(m);
+bool isStaticCustomMode(CustomMode m, {BikeRegion? region}) {
+  final pair = _wirePairFor(m, region);
   return pair.base == pair.cap;
 }
 
@@ -160,14 +220,15 @@ const dynamicHysteresisKmh = 2.0;
 
 /// The wire a switching custom mode should assert at [speedKmh]. [currentWire]
 /// carries both the stopped-speed hold and the hysteresis memory.
-int dynamicWireFor(CustomMode m, double speedKmh, int currentWire) {
+int dynamicWireFor(CustomMode m, double speedKmh, int currentWire,
+    {BikeRegion? region}) {
   final limit = m.effectiveLimitKmh;
-  final (:base, :cap) = _wirePairFor(m);
+  final (:base, :cap) = _wirePairFor(m, region);
   if (base == cap) {
     return base; // static — callers gate on needsSpeedSwitching anyway
   }
   // A wire this mode never asserts carries no hysteresis memory and no hold.
-  final current = _pairWireFor(m, currentWire);
+  final current = _pairWireFor(m, currentWire, region);
   if (speedKmh <= 0) {
     return current; // stopped: a parked bike keeps the wire it has
   }
@@ -178,11 +239,11 @@ int dynamicWireFor(CustomMode m, double speedKmh, int currentWire) {
   return speedKmh > limit ? cap : base;
 }
 
-// Slider range of a custom mode. A throttle mode is capped lower: above 32 km/h
-// the only profiles with a throttle are the unlimited ones.
+// Slider range of a custom mode. One range for every mode: above 32 km/h a
+// throttle mode rides an unlimited base and the app holds the limit, which is
+// a cost the editor states rather than a reason to refuse the mode.
 const customLimitMin = 25;
 const customLimitMax = 45;
-const customLimitMaxThrottle = 32;
 
 @freezed
 abstract class CustomMode with _$CustomMode {
@@ -198,12 +259,10 @@ abstract class CustomMode with _$CustomMode {
   factory CustomMode.fromJson(Map<String, Object?> json) =>
       _$CustomModeFromJson(json);
 
-  /// The limit the engine actually enforces: clamped to the slider range and to
-  /// 32 with throttle, so a hand-edited or future-version json can never select
-  /// an unlimited base profile.
-  int get effectiveLimitKmh => limitKmh
-      .clamp(customLimitMin, throttle ? customLimitMaxThrottle : customLimitMax)
-      .toInt();
+  /// The limit the engine actually enforces: clamped to the slider range, so a
+  /// hand-edited or future-version json rides a limit the app can hold.
+  int get effectiveLimitKmh =>
+      limitKmh.clamp(customLimitMin, customLimitMax).toInt();
 }
 
 /// Id for a user created mode: time + random suffix, no uuid dependency.
@@ -267,11 +326,11 @@ class CustomSelection implements SelectedMode {
 
 /// The wire a selection asserts with no speed information: entering the mode,
 /// reconnecting, or a mode that never switches. A switching custom mode enters
-/// on its base profile and lets the next speed sample move it up.
-int initialWireFor(SelectedMode sel) => switch (sel) {
+/// on [entryWireFor] — its base profile, or its cap where that base is
+/// unlimited — and lets the next speed sample move it.
+int initialWireFor(SelectedMode sel, {BikeRegion? region}) => switch (sel) {
       NativeSelection(:final profile) => profile.wire,
-      CustomSelection(:final mode) =>
-        baseProfileFor(mode.effectiveLimitKmh, mode.throttle).wire,
+      CustomSelection(:final mode) => entryWireFor(mode, region),
     };
 
 /// The wire byte a settings write must carry, given the wire the app asserts
@@ -288,11 +347,14 @@ int wireForWrite({
   required bool modeChanged,
   required bool nowSwitching,
   required int assertedWire,
+  BikeRegion? region,
 }) {
   if (modeChanged || !nowSwitching) {
-    return initialWireFor(sel);
+    return initialWireFor(sel, region: region);
   }
-  return assertsWire(sel, assertedWire) ? assertedWire : initialWireFor(sel);
+  return assertsWire(sel, assertedWire, region: region)
+      ? assertedWire
+      : initialWireFor(sel, region: region);
 }
 
 /// Whether [wire] is one [sel] ever asserts: a native mode's single wire, or
@@ -302,9 +364,10 @@ int wireForWrite({
 /// that moved the mode's profile pair, or written by another app. Both
 /// [wireVerdict] and the controller's own wire choice fall back to
 /// [initialWireFor] on it, so the two can never disagree.
-bool assertsWire(SelectedMode sel, int wire) => switch (sel) {
+bool assertsWire(SelectedMode sel, int wire, {BikeRegion? region}) =>
+    switch (sel) {
       NativeSelection(:final profile) => wire == profile.wire,
-      CustomSelection(:final mode) => _pairWireFor(mode, wire) == wire,
+      CustomSelection(:final mode) => _pairWireFor(mode, wire, region) == wire,
     };
 
 /// What to do about a wire byte the bike reports. Replaces the byte-to-mode
@@ -376,9 +439,9 @@ WireVerdict wireVerdict({
     // An asserted wire the mode does not own — stale after an edit of the mode,
     // or never written — would make a foreign byte read as in sync, or heal the
     // bike onto a wire this mode never asserts.
-    CustomSelection(:final mode) => isStaticCustomMode(mode)
-        ? initialWireFor(selected)
-        : _pairWireFor(mode, assertedWire),
+    CustomSelection(:final mode) => isStaticCustomMode(mode, region: region)
+        ? initialWireFor(selected, region: region)
+        : _pairWireFor(mode, assertedWire, region),
   };
   if (reportedWire == expected) {
     return const WireInSync();
@@ -401,11 +464,15 @@ WireVerdict wireVerdict({
   // Off-road escape hatch, every region and every selection type: 3 and 7 are
   // both unlimited with a throttle, so the bike really is off-road and the app
   // has to say so rather than pull it back into a limit.
-  if (reportedWire == chWireUsOffroad || reportedWire == chWireOffroad) {
-    return WireFollow(nativeModeId(
-        region == BikeRegion.us || region == null
-            ? chWireUsOffroad
-            : chWireOffroad));
+  //
+  // Not for a mode that asserts the reported wire itself. A throttle mode above
+  // 32 km/h rides off-road below its limit, so its own base wire would read as
+  // "the rider went off-road": one lost cap write would drop the mode for good
+  // and take both fail-safes with it. That wire is the app's own, and the heal
+  // below puts the cap back.
+  if ((reportedWire == chWireUsOffroad || reportedWire == chWireOffroad) &&
+      !assertsWire(selected, reportedWire, region: region)) {
+    return WireFollow(nativeModeId(offroadWireFor(region)));
   }
   // Custom modes are the app's own composition: wires stop being 1:1 with
   // modes, so anything else is a lost write or another app, and gets healed.
@@ -655,7 +722,8 @@ abstract class BikeState with _$BikeState {
   /// and cap profiles differ has anything to switch. An exact-match custom mode
   /// is as static as a native one — no stream, no keepAlive, no auto lock.
   bool get needsSpeedSwitching => switch (selectedMode) {
-        CustomSelection(:final mode) => !isStaticCustomMode(mode),
+        CustomSelection(:final mode) =>
+          !isStaticCustomMode(mode, region: region),
         NativeSelection() => false,
       };
 
@@ -696,11 +764,8 @@ BikeState remapModeForRegion(BikeState bike, BikeRegion? newRegion) {
 }
 
 String _remappedNativeId(int wire, BikeRegion? newRegion) {
-  final offroad = newRegion == BikeRegion.us || newRegion == null
-      ? chWireUsOffroad
-      : chWireOffroad;
   if (wire == chWireUsOffroad || wire == chWireOffroad) {
-    return nativeModeId(offroad);
+    return nativeModeId(offroadWireFor(newRegion));
   }
   if (newRegion == BikeRegion.ch) {
     // A limited native has to stay limited: CH has no native limit, so the

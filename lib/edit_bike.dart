@@ -214,7 +214,8 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
     setState(() {
       _draftModes = [..._draftModes, mode];
     });
-    final edited = await _showCustomModeEditor(context, mode);
+    final edited =
+        await _showCustomModeEditor(context, mode, _draftBike.region);
     if (!mounted) {
       return;
     }
@@ -227,7 +228,8 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
   }
 
   Future<void> _editCustomMode(CustomMode mode) async {
-    final edited = await _showCustomModeEditor(context, mode);
+    final edited =
+        await _showCustomModeEditor(context, mode, _draftBike.region);
     if (edited == null || !mounted) {
       return;
     }
@@ -767,7 +769,7 @@ class _CustomModeTile extends StatelessWidget {
 /// Returns the edited mode, or null when the rider backs out — the caller's
 /// draft list is what decides, so nothing here reaches the bike.
 Future<CustomMode?> _showCustomModeEditor(
-    BuildContext context, CustomMode mode) {
+    BuildContext context, CustomMode mode, BikeRegion? region) {
   return showModalBottomSheet<CustomMode>(
     context: context,
     isScrollControlled: true,
@@ -776,14 +778,19 @@ Future<CustomMode?> _showCustomModeEditor(
       borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
     ),
     builder: (BuildContext context) {
-      return _CustomModeEditor(mode: mode);
+      return _CustomModeEditor(mode: mode, region: region);
     },
   );
 }
 
 class _CustomModeEditor extends StatefulWidget {
-  const _CustomModeEditor({required this.mode});
+  const _CustomModeEditor({required this.mode, required this.region});
   final CustomMode mode;
+
+  /// The region as the sheet would SAVE it, not as the bike has it: the region
+  /// decides which bank a mode's profiles come from, so a caption taken from
+  /// the stale region would name a profile the bike will not ride.
+  final BikeRegion? region;
 
   @override
   State<_CustomModeEditor> createState() => _CustomModeEditorState();
@@ -811,21 +818,15 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
     super.dispose();
   }
 
-  int get _maxKmh => _throttle ? customLimitMaxThrottle : customLimitMax;
-
   void _setLimit(int kmh) {
     setState(() {
-      _limitKmh = kmh.clamp(customLimitMin, _maxKmh).toInt();
+      _limitKmh = kmh.clamp(customLimitMin, customLimitMax).toInt();
     });
   }
 
   void _setThrottle(bool value) {
     setState(() {
       _throttle = value;
-      // In the same frame as the switch: above 32 km/h every profile with a
-      // throttle is an unlimited one, so a throttle mode cannot ask for more
-      // (and the slider would assert on a value past its new max).
-      _limitKmh = _limitKmh.clamp(customLimitMin, _maxKmh).toInt();
     });
   }
 
@@ -833,11 +834,22 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
   /// the engine, so the sheet cannot promise something the controller does not
   /// do.
   String get _dropoutCaption {
-    final base = baseProfileFor(_limitKmh, _throttle);
+    final base =
+        baseProfileFor(_limitKmh, _throttle, region: widget.region);
     if (isStaticCustomMode(
-        widget.mode.copyWith(limitKmh: _limitKmh, throttle: _throttle))) {
+        widget.mode.copyWith(limitKmh: _limitKmh, throttle: _throttle),
+        region: widget.region)) {
       return 'Exactly matches the ${base.name} firmware profile — the bike '
           'enforces this limit itself, no app needed.';
+    }
+    if (base.unlimited) {
+      // The one mode the firmware does not hold. Said plainly: the rider is
+      // trading the dropout fail-safe for a throttle above 32 km/h.
+      return 'Above 32 km/h no firmware profile has both a throttle and a '
+          'limit, so the bike rides ${base.name} below $_limitKmh km/h. This '
+          'app holds the limit, not the bike: if Bluetooth drops while you '
+          'ride below $_limitKmh km/h, the bike stays unlimited until the app '
+          'reconnects.';
     }
     return 'If Bluetooth drops while riding below $_limitKmh km/h, the bike '
         'stays capped at ${base.capKmh} km/h until the app reconnects.';
@@ -925,18 +937,6 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
                           onChanged: _setThrottle,
                         ),
 
-                        if (_throttle)
-                          Padding(
-                            key: const ValueKey('customModeThrottleCaption'),
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Text(
-                              'Limited to $customLimitMaxThrottle km/h with '
-                              'throttle — a Bluetooth dropout must never leave '
-                              'the bike unlimited.',
-                              style: captionStyle,
-                            ),
-                          ),
-
                         Row(
                           children: [
                             IconButton(
@@ -950,8 +950,8 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
                                 key: const ValueKey('customModeLimitSlider'),
                                 value: _limitKmh.toDouble(),
                                 min: customLimitMin.toDouble(),
-                                max: _maxKmh.toDouble(),
-                                divisions: _maxKmh - customLimitMin,
+                                max: customLimitMax.toDouble(),
+                                divisions: customLimitMax - customLimitMin,
                                 label: '$_limitKmh km/h',
                                 onChanged: (value) => _setLimit(value.round()),
                               ),

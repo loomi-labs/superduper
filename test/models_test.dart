@@ -190,10 +190,12 @@ void main() {
           customLimitMax);
     });
 
-    test('a throttle mode is clamped to 32 km/h', () {
-      // Above 32 the only profiles with a throttle are the unlimited ones.
-      expect(tour30.copyWith(limitKmh: 40).effectiveLimitKmh,
-          customLimitMaxThrottle);
+    test('a throttle mode keeps a limit above 32 km/h', () {
+      // Above 32 every profile with a throttle is unlimited, so the mode rides
+      // an unlimited base and the app holds the limit. The limit itself stands.
+      expect(tour30.copyWith(limitKmh: 40).effectiveLimitKmh, 40);
+      expect(tour30.copyWith(limitKmh: 45).effectiveLimitKmh, customLimitMax);
+      expect(tour30.copyWith(limitKmh: 46).effectiveLimitKmh, customLimitMax);
     });
 
     test('ids are unique', () {
@@ -791,14 +793,14 @@ void main() {
       (32, false, 0, 0),
       (32, true, 1, 1),
       (35, false, 5, 5),
-      (35, true, 1, 5), // the base clamps to 32; only the base knows throttle
+      (35, true, 3, 5), // no capped throttle holds 35: US off-road below
       (45, false, 2, 2),
-      (45, true, 1, 2),
+      (45, true, 3, 2),
       (26, false, 0, 4),
       (31, true, 1, 4),
       (33, false, 5, 0),
-      (33, true, 1, 1), // clamped to 32: an exact match
-      (100, true, 1, 2),
+      (33, true, 3, 1), // over 32 with a throttle: off-road below, TOUR above
+      (100, true, 3, 2), // clamped to 45, still off-road below
       (46, false, 2, 2),
       (24, false, 4, 4), // clamped up to the slider floor
     ];
@@ -814,10 +816,9 @@ void main() {
 
     test('the base holds the limit, the cap is at or below it', () {
       for (final (limit, throttle, _, _) in cases) {
-        final wanted = limit.clamp(customLimitMin,
-            throttle ? customLimitMaxThrottle : customLimitMax);
-        expect(baseProfileFor(limit, throttle).capKmh!,
-            greaterThanOrEqualTo(wanted),
+        final wanted = limit.clamp(customLimitMin, customLimitMax);
+        final base = baseProfileFor(limit, throttle);
+        expect(base.capKmh ?? 1000, greaterThanOrEqualTo(wanted),
             reason: 'base of $limit must not limit below the limit');
         expect(capProfileFor(limit, throttle: throttle).capKmh!,
             lessThanOrEqualTo(limit.clamp(customLimitMin, customLimitMax)),
@@ -825,16 +826,35 @@ void main() {
       }
     });
 
-    test('never resolve onto an unlimited profile', () {
-      // An unlimited base would hand the rider off-road for asking for a limit.
+    test('the cap profile is never unlimited, in any region', () {
+      // The cap is what a mode falls back to — the profile that holds the limit
+      // when the app cannot. It must always carry a limiter.
       for (var limit = 0; limit <= 100; limit++) {
         for (final throttle in [true, false]) {
-          expect(baseProfileFor(limit, throttle).unlimited, isFalse,
-              reason: 'base of $limit km/h, throttle $throttle');
-          expect(capProfileFor(limit, throttle: throttle).unlimited, isFalse,
-              reason: 'cap of $limit km/h, throttle $throttle');
-          expect(baseProfileFor(limit, throttle).throttle, throttle,
-              reason: 'base of $limit km/h must not change the throttle');
+          for (final region in [null, ...BikeRegion.values]) {
+            expect(
+                capProfileFor(limit, throttle: throttle, region: region)
+                    .unlimited,
+                isFalse,
+                reason: 'cap of $limit km/h, throttle $throttle, $region');
+          }
+        }
+      }
+    });
+
+    test('a base is unlimited only for a throttle above 32 km/h', () {
+      // The one case the table cannot serve: no profile pairs a throttle with a
+      // cap over 32. Everywhere else asking for a limit still gets a limiter.
+      for (var limit = 0; limit <= 100; limit++) {
+        for (final throttle in [true, false]) {
+          for (final region in [null, ...BikeRegion.values]) {
+            final base = baseProfileFor(limit, throttle, region: region);
+            final effective = limit.clamp(customLimitMin, customLimitMax);
+            expect(base.unlimited, throttle && effective > 32,
+                reason: 'base of $limit km/h, throttle $throttle, $region');
+            expect(base.throttle, throttle,
+                reason: 'base of $limit km/h must not change the throttle');
+          }
         }
       }
     });
@@ -846,11 +866,12 @@ void main() {
       }
     });
 
-    test('ties break to the lowest wire', () {
-      // Wires 2 and 6 both cap at 45.
+    test('ties break to the lowest wire of the bank', () {
+      // Wires 2 and 6 both cap at 45; the US bank is the default.
       expect(capProfileFor(45, throttle: false).wire, 2);
       expect(baseProfileFor(45, false).wire, 2);
       expect(baseProfileFor(41, false).wire, 2);
+      expect(capProfileFor(45, throttle: false, region: BikeRegion.eu).wire, 6);
     });
 
     test('an equal cap prefers the matching throttle', () {
@@ -858,6 +879,74 @@ void main() {
       expect(capProfileFor(32, throttle: true).wire, 1);
       expect(capProfileFor(32, throttle: false).wire, 0);
       expect(capProfileFor(34, throttle: true).wire, 1);
+    });
+  });
+
+  // Named so the brief's `--name "ProfileFor"` run selects it.
+  group('baseProfileFor above the throttle ceiling', () {
+    test('a throttle mode over 32 rides the off-road profile of its bank', () {
+      // No capped profile in the table pairs a throttle with a cap over 32, so
+      // an unlimited base is the only way to build this mode.
+      expect(baseProfileFor(40, true, region: BikeRegion.eu).wire,
+          chWireOffroad);
+      expect(baseProfileFor(40, true, region: BikeRegion.ch).wire,
+          chWireOffroad);
+      expect(baseProfileFor(40, true, region: BikeRegion.us).wire,
+          chWireUsOffroad);
+      for (final region in BikeRegion.values) {
+        expect(baseProfileFor(40, true, region: region).unlimited, isTrue);
+        expect(baseProfileFor(40, true, region: region).throttle, isTrue);
+      }
+    });
+
+    test('a throttle mode at 40 switches, and keeps the limit it asked for',
+        () {
+      const throttle40 =
+          CustomMode(id: 'c40', name: 'T40', limitKmh: 40, throttle: true);
+      expect(throttle40.effectiveLimitKmh, 40,
+          reason: 'the 32 km/h throttle ceiling is gone');
+      expect(isStaticCustomMode(throttle40, region: BikeRegion.ch), isFalse,
+          reason: 'base 7 and cap 5 differ, so the app has to switch');
+      final b = bike(region: BikeRegion.ch, customModes: const [throttle40])
+          .withSelectedMode(throttle40.id);
+      expect(b.needsSpeedSwitching, isTrue);
+    });
+  });
+
+  group('the region breaks a tie in baseProfileFor', () {
+    test('an EU or CH bike takes the EU-bank profile where two caps tie', () {
+      // Wires 2 and 6 both cap at 45, so limits 36-45 tie.
+      for (final limit in [36, 40, 45]) {
+        expect(baseProfileFor(limit, false, region: BikeRegion.eu).wire, 6,
+            reason: '$limit km/h on EU');
+        expect(baseProfileFor(limit, false, region: BikeRegion.ch).wire, 6,
+            reason: '$limit km/h on CH');
+        expect(baseProfileFor(limit, false, region: BikeRegion.us).wire, 2,
+            reason: '$limit km/h on US');
+      }
+    });
+
+    test('the smallest cap wins before the region does', () {
+      // 25 km/h is EPAC alone: no tie, so no bank preference applies.
+      expect(baseProfileFor(25, false).wire, 4);
+      expect(baseProfileFor(25, false, region: BikeRegion.us).wire, 4);
+      expect(baseProfileFor(35, false, region: BikeRegion.us).wire, 5);
+    });
+
+    test('a bank with no matching profile leaves the choice alone', () {
+      // The seeded CH mode rides wire 1, a US-bank profile: the EU bank has no
+      // throttle profile at all, so there is nothing to tie against.
+      expect(baseProfileFor(25, true, region: BikeRegion.ch).wire, chWireLow);
+      expect(baseProfileFor(30, true, region: BikeRegion.eu).wire, chWireLow);
+      expect(capProfileFor(25, throttle: true, region: BikeRegion.ch).wire,
+          chWireHigh);
+    });
+
+    test('the US bank is the default, so a missed call site cannot move', () {
+      expect(baseProfileFor(30, false).wire, 0);
+      expect(baseProfileFor(30, true).wire, 1);
+      expect(baseProfileFor(45, false).wire, 2);
+      expect(capProfileFor(45, throttle: false).wire, 2);
     });
   });
 
@@ -890,9 +979,16 @@ void main() {
       }
     });
 
-    test('a throttle mode clamped to 32 becomes static', () {
-      // effectiveLimitKmh caps a throttle mode at 32, which is an exact match.
-      expect(isStaticCustomMode(m(40, throttle: true)), isTrue);
+    test('a throttle mode above 32 always switches', () {
+      // Its base is unlimited and its cap is not, so the two can never be the
+      // same profile — there is no exact firmware match to be had.
+      for (final limit in [33, 40, 45]) {
+        for (final region in [null, ...BikeRegion.values]) {
+          expect(isStaticCustomMode(m(limit, throttle: true), region: region),
+              isFalse,
+              reason: '$limit km/h with a throttle in $region');
+        }
+      }
     });
   });
 
@@ -989,21 +1085,28 @@ void main() {
     test('agrees with what wireVerdict expects', () {
       // The two must never disagree: a heal write is chosen with assertsWire
       // and asked for by wireVerdict.
-      for (final sel in <SelectedMode>[
-        NativeSelection(profileByWire(2)),
-        const CustomSelection(tour30),
-        const CustomSelection(sport45),
-        const CustomSelection(fast40),
-      ]) {
-        for (var wire = 0; wire < 8; wire++) {
-          final verdict = wireVerdict(
-              region: BikeRegion.us,
-              selected: sel,
-              reportedWire: 99,
-              assertedWire: wire);
-          final chosen = assertsWire(sel, wire) ? wire : initialWireFor(sel);
-          expect((verdict as WireHeal).expectedWire, chosen,
-              reason: '$sel with asserted wire $wire');
+      const throttle40 =
+          CustomMode(id: 'c40', name: 'T40', limitKmh: 40, throttle: true);
+      for (final region in [null, ...BikeRegion.values]) {
+        for (final sel in <SelectedMode>[
+          NativeSelection(profileByWire(2)),
+          const CustomSelection(tour30),
+          const CustomSelection(sport45),
+          const CustomSelection(fast40),
+          const CustomSelection(throttle40),
+        ]) {
+          for (var wire = 0; wire < 8; wire++) {
+            final verdict = wireVerdict(
+                region: region,
+                selected: sel,
+                reportedWire: 99,
+                assertedWire: wire);
+            final chosen = assertsWire(sel, wire, region: region)
+                ? wire
+                : initialWireFor(sel, region: region);
+            expect((verdict as WireHeal).expectedWire, chosen,
+                reason: '$sel with asserted wire $wire in $region');
+          }
         }
       }
     });
@@ -1023,6 +1126,50 @@ void main() {
 
     test('a static mode asserts its single wire', () {
       expect(initialWireFor(const CustomSelection(sport45)), 2);
+    });
+
+    test('a mode with an unlimited base enters on its cap', () {
+      // The fail-safe of Task 16: entering on the base would hand the rider
+      // off-road the moment they pick the mode, with no speed sample yet.
+      const throttle40 =
+          CustomMode(id: 'c40', name: 'T40', limitKmh: 40, throttle: true);
+      const sel = CustomSelection(throttle40);
+      for (final region in [BikeRegion.eu, BikeRegion.ch]) {
+        expect(baseProfileFor(40, true, region: region).wire, chWireOffroad);
+        expect(initialWireFor(sel, region: region), 5,
+            reason: 'MODE 2, the cap profile — not the off-road base');
+      }
+      expect(initialWireFor(sel, region: BikeRegion.us), 5);
+      expect(entryWireFor(throttle40, BikeRegion.ch), 5);
+    });
+
+    test('a foreign asserted wire reads as the cap, not the unlimited base',
+        () {
+      // _pairWireFor's fallback and initialWireFor must stay the same wire, or
+      // a heal write and the verdict that asked for it disagree.
+      const throttle40 =
+          CustomMode(id: 'c40', name: 'T40', limitKmh: 40, throttle: true);
+      const sel = CustomSelection(throttle40);
+      for (final foreign in [0, 1, 2, 4, 6, 99]) {
+        expect(
+            wireForWrite(
+                sel: sel,
+                modeChanged: false,
+                nowSwitching: true,
+                assertedWire: foreign,
+                region: BikeRegion.ch),
+            5,
+            reason: 'wire $foreign is no memory of anything');
+      }
+      expect(
+          wireForWrite(
+              sel: sel,
+              modeChanged: false,
+              nowSwitching: true,
+              assertedWire: chWireOffroad,
+              region: BikeRegion.ch),
+          chWireOffroad,
+          reason: 'the base is its own, once a speed sample has put it there');
     });
 
     test('follows what a bike resolves its selection to', () {
@@ -1089,6 +1236,32 @@ void main() {
     });
   });
 
+  group('unwatchedWireFor', () {
+    const throttle40 =
+        CustomMode(id: 'c40', name: 'T40', limitKmh: 40, throttle: true);
+
+    test('names the cap of a mode whose base is unlimited', () {
+      expect(unwatchedWireFor(const CustomSelection(throttle40), BikeRegion.ch),
+          5);
+      expect(unwatchedWireFor(const CustomSelection(throttle40), BikeRegion.us),
+          5);
+    });
+
+    test('says nothing for a mode the firmware still limits', () {
+      // Their base profile carries a limiter, so an app that cannot see the
+      // speed still leaves a limited bike: there is nothing to fall back from.
+      for (final region in [null, ...BikeRegion.values]) {
+        expect(unwatchedWireFor(const CustomSelection(tour30), region), isNull);
+        expect(unwatchedWireFor(const CustomSelection(sport45), region), isNull);
+        expect(unwatchedWireFor(const CustomSelection(seededChMode), region),
+            isNull);
+        expect(unwatchedWireFor(NativeSelection(profileByWire(7)), region),
+            isNull,
+            reason: 'off-road picked on purpose is not the app losing sight');
+      }
+    });
+  });
+
   group('wireVerdict', () {
     // One row per region and selection: what every reported wire 0..9 means.
     // '.' in sync, 'h' heal to the expected wire, a digit follows native:<digit>.
@@ -1104,10 +1277,12 @@ void main() {
           'hhh7hhh.hh'),
       ('US static custom', BikeRegion.us, const CustomSelection(sport45), 6, 2,
           'hh.3hhh3hh'),
-      ('EU static custom', BikeRegion.eu, const CustomSelection(sport45), 6, 2,
-          'hh.7hhh7hh'),
-      ('CH static custom', BikeRegion.ch, const CustomSelection(sport45), 6, 2,
-          'hh.7hhh7hh'),
+      // 45 km/h without a throttle is an exact match in both banks: wire 2 on
+      // US, wire 6 on EU and CH. The bike's own bank is what the mode rides.
+      ('EU static custom', BikeRegion.eu, const CustomSelection(sport45), 6, 6,
+          'hhh7hh.7hh'),
+      ('CH static custom', BikeRegion.ch, const CustomSelection(sport45), 6, 6,
+          'hhh7hh.7hh'),
       ('no region, static custom', null, const CustomSelection(sport45), 6, 2,
           'hh.3hhh3hh'),
       ('US switching custom on base', BikeRegion.us,
@@ -1175,6 +1350,81 @@ void main() {
       // Off-road is still followed, whatever the asserted wire was.
       expect(verdictOf(chWireUsOffroad, 99),
           WireFollow(nativeModeId(chWireUsOffroad)));
+    });
+
+    test('a mode that rides off-road is not read as the rider going off-road',
+        () {
+      // The off-road escape hatch would drop the mode for good: one lost cap
+      // write, and the app converts a throttle-40 selection to OFFROAD and
+      // stops limiting. Wire 7 here is the app's own base, so it heals.
+      const throttle40 =
+          CustomMode(id: 'c40', name: 'T40', limitKmh: 40, throttle: true);
+      const sel = CustomSelection(throttle40);
+      for (final region in [BikeRegion.eu, BikeRegion.ch]) {
+        expect(
+            wireVerdict(
+                region: region,
+                selected: sel,
+                reportedWire: chWireOffroad,
+                assertedWire: 5),
+            const WireHeal(5),
+            reason: '$region: the cap write was lost, so put the cap back');
+        expect(
+            wireVerdict(
+                region: region,
+                selected: sel,
+                reportedWire: chWireOffroad,
+                assertedWire: chWireOffroad),
+            const WireInSync(),
+            reason: '$region: a speed sample put the mode on its base');
+        expect(
+            wireVerdict(
+                region: region,
+                selected: sel,
+                reportedWire: chWireUsOffroad,
+                assertedWire: 5),
+            WireFollow(nativeModeId(chWireOffroad)),
+            reason: '$region: wire 3 is not one this mode ever asserts');
+      }
+      // US: the same mode rides wire 3, so it is wire 7 that is foreign there.
+      expect(
+          wireVerdict(
+              region: BikeRegion.us,
+              selected: sel,
+              reportedWire: chWireUsOffroad,
+              assertedWire: 5),
+          const WireHeal(5));
+      expect(
+          wireVerdict(
+              region: BikeRegion.us,
+              selected: sel,
+              reportedWire: chWireOffroad,
+              assertedWire: 5),
+          WireFollow(nativeModeId(chWireUsOffroad)));
+    });
+
+    test('an EU custom mode is judged in the EU bank', () {
+      // The seeded CH mode rides the same pair {1, 4} under the US default, so
+      // a call site that forgot its region passes every CH test and still
+      // heals an EU bike onto wire 2.
+      const eu40 = CustomMode(id: 'c41', name: 'EU40', limitKmh: 40);
+      const sel = CustomSelection(eu40);
+      // Base wire 6 on EU (wire 2 on US), cap wire 5 in both banks.
+      expect(
+          wireVerdict(
+              region: BikeRegion.eu,
+              selected: sel,
+              reportedWire: 6,
+              assertedWire: 6),
+          const WireInSync());
+      expect(
+          wireVerdict(
+              region: BikeRegion.eu,
+              selected: sel,
+              reportedWire: 2,
+              assertedWire: 99),
+          const WireHeal(6),
+          reason: 'wire 2 caps at 45 too, but an EU bike never rides it here');
     });
 
     test('verdicts compare by value', () {

@@ -416,6 +416,99 @@ void main() {
     });
   });
 
+  /// A throttle mode above 32 km/h: no capped profile in the table pairs a
+  /// throttle with a cap over 32, so it rides EU off-road (wire 7, unlimited)
+  /// below its limit and MODE 2 (wire 5, 35 km/h) above it. The firmware holds
+  /// no limit on the base, so the APP is the limiter — which is what the two
+  /// fail-safes here exist for.
+  group('a throttle mode above 32 km/h', () {
+    const throttle40 =
+        CustomMode(id: 'c40', name: 'T40', limitKmh: 40, throttle: true);
+
+    Future<Bike> openThrottle40(ProviderContainer container) => openBike(
+        container,
+        region: BikeRegion.ch,
+        modeId: throttle40.id,
+        customModes: const [seededChMode, throttle40]);
+
+    test('is entered on its cap, and reaches its base on a speed sample',
+        () async {
+      final container = makeContainer();
+      await openThrottle40(container);
+      final store = container.read(fakeBikeStoreProvider);
+      expect(container.read(bikeProvider(id)).needsSpeedSwitching, isTrue);
+      expect(bikeWire(container), 5,
+          reason: 'picking the mode must not hand the rider off-road before a '
+              'single speed sample has arrived');
+
+      store.setSpeed(id, 20);
+      await settle();
+      expect(bikeWire(container), chWireOffroad,
+          reason: 'a sample below the limit proves the app is watching');
+
+      store.setSpeed(id, 41);
+      await settle();
+      expect(bikeWire(container), 5, reason: 'over the limit it caps as usual');
+    });
+
+    test('goes back to its cap when the speed stream dies', () async {
+      final container = makeContainer();
+      final bike = await openThrottle40(container);
+      final store = container.read(fakeBikeStoreProvider);
+      store.setSpeed(id, 20);
+      await settle();
+      expect(bikeWire(container), chWireOffroad);
+
+      // The bike stopped streaming ride data: the app is now blind, and a
+      // limiter that cannot see the speed has to give the bike back to the
+      // firmware.
+      bike.debugExpireSpeedStream();
+      await settle();
+      expect(bikeWire(container), 5,
+          reason: 'a blind app must not leave the bike unlimited');
+    });
+
+    test('a dead speed stream leaves a firmware-limited mode alone', () async {
+      final container = makeContainer();
+      final bike = await openBike(container, region: BikeRegion.ch);
+      final store = container.read(fakeBikeStoreProvider);
+      store.setSpeed(id, 10);
+      await settle();
+      expect(bikeWire(container), chWireLow);
+
+      // The seeded mode's base profile carries a 32 km/h limiter of its own, so
+      // a blind app still leaves a limited bike: nothing to write.
+      setBikeWire(container, unusedWire);
+      bike.debugExpireSpeedStream();
+      await settle();
+      expect(bikeWire(container), unusedWire,
+          reason: 'the watchdog must only touch a mode with no firmware limit');
+    });
+
+    test('comes back on its cap after a reconnect', () async {
+      final container = makeContainer();
+      await openThrottle40(container);
+      container.read(fakeBikeStoreProvider).setSpeed(id, 20);
+      await settle();
+      expect(bikeWire(container), chWireOffroad);
+
+      for (var next in [
+        SDBluetoothConnectionState.disconnected,
+        SDBluetoothConnectionState.connected,
+      ]) {
+        // ignore: invalid_use_of_protected_member
+        container.read(connectionHandlerProvider(id).notifier).state = next;
+        await settle();
+      }
+      // Real time, because the re-assert waits out the connect settle.
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      await settle();
+      expect(bikeWire(container), 5,
+          reason: 'no speed has arrived on this connection, so nothing says '
+              'the app can see the bike');
+    });
+  });
+
   group('wire verdict in the poll', () {
     test('the poll re-asserts a lost transition write', () async {
       final container = makeContainer();

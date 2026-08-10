@@ -483,37 +483,57 @@ void main() {
       expect(find.text('Custom'), findsNothing);
     });
 
-    testWidgets('turning the throttle on clamps the limit to 32',
+    testWidgets('turning the throttle on keeps a limit above 32',
         (tester) async {
+      // The 32 km/h throttle ceiling is gone: the mode rides an unlimited base
+      // and the app holds the limit. The slider keeps the whole range.
       final container = await openWith(
           tester, const [seededChMode, fast40], seededChModeId);
 
       await tapKey(tester, 'customModeTile:${fast40.id}');
       expect(sliderValue(tester), 40);
-      expect(find.byKey(const ValueKey('customModeThrottleCaption')),
-          findsNothing);
 
       await tapKey(tester, 'customModeThrottleSwitch');
 
-      final clamped = sliderValue(tester);
-      final caption = find.byKey(const ValueKey('customModeThrottleCaption'));
+      final kept = sliderValue(tester);
+      final slider = tester
+          .widget<Slider>(find.byKey(const ValueKey('customModeLimitSlider')))
+          .max;
       container.dispose();
-      expect(clamped, 32,
-          reason: 'above 32 km/h every profile with a throttle is unlimited');
-      expect(caption, findsOneWidget);
+      expect(kept, 40, reason: 'the throttle no longer takes the limit down');
+      expect(slider, 45, reason: 'the ceiling is the same for every mode');
+    });
+
+    testWidgets('a throttle above 32 says the app holds the limit',
+        (tester) async {
+      final container = await openWith(
+          tester, const [seededChMode, fast40], seededChModeId);
+
+      await tapKey(tester, 'customModeTile:${fast40.id}');
+      await tapKey(tester, 'customModeThrottleSwitch');
+
+      final cost = find.text(
+          'Above 32 km/h no firmware profile has both a throttle and a limit, '
+          'so the bike rides OFFROAD below 40 km/h. This app holds the limit, '
+          'not the bike: if Bluetooth drops while you ride below 40 km/h, the '
+          'bike stays unlimited until the app reconnects.');
+      container.dispose();
+      expect(cost, findsOneWidget,
+          reason: 'the rider trades the dropout fail-safe for the throttle, '
+              'and has to be told so');
     });
 
     testWidgets('the caption names the profile the switch just picked',
         (tester) async {
-      // 37 km/h has no exact profile; the throttle clamps it to 32, which does
-      // — and the name has to be the one for the limit AND the throttle as they
-      // are after the tap, not for the pair the sheet showed before it.
-      const fast37 =
-          CustomMode(id: 'c1', name: 'Fast', limitKmh: 37, throttle: false);
+      // 32 km/h is an exact profile either way, and a different one each way:
+      // the name has to be the one for the limit AND the throttle as they are
+      // after the tap, not for the pair the sheet showed before it.
+      const fast32 =
+          CustomMode(id: 'c1', name: 'Fast', limitKmh: 32, throttle: false);
       final container =
-          await openWith(tester, const [seededChMode, fast37], seededChModeId);
+          await openWith(tester, const [seededChMode, fast32], seededChModeId);
 
-      await tapKey(tester, 'customModeTile:${fast37.id}');
+      await tapKey(tester, 'customModeTile:${fast32.id}');
       await tapKey(tester, 'customModeThrottleSwitch');
 
       expect(sliderValue(tester), 32);
@@ -543,35 +563,36 @@ void main() {
               'stays capped at 45 km/h until the app reconnects.'),
           findsOneWidget);
 
-      // 45 km/h is SPORT exactly: one profile does the whole job.
+      // 45 km/h is MODE 3 exactly on this CH bike: one profile does the whole
+      // job, and it is the EU bank's, not the US SPORT that caps at 45 too.
       for (var i = 0; i < 5; i++) {
         await tapKey(tester, 'customModeLimitPlus');
       }
 
       final exact = find.text(
-          'Exactly matches the SPORT firmware profile — the bike enforces '
+          'Exactly matches the MODE 3 firmware profile — the bike enforces '
           'this limit itself, no app needed.');
       container.dispose();
       expect(exact, findsOneWidget);
     });
 
-    testWidgets('a stored limit above what the mode rides opens clamped',
+    testWidgets('a stored limit above the slider range opens clamped',
         (tester) async {
-      // Hand-edited json: 40 km/h with a throttle is a limit no profile holds,
-      // and the engine rides 32.
+      // Hand-edited json, or a file from a build with a wider range: the tile
+      // and the slider both show the limit the engine actually enforces.
       const overLimit =
-          CustomMode(id: 'c9', name: 'Legacy', limitKmh: 40, throttle: true);
+          CustomMode(id: 'c9', name: 'Legacy', limitKmh: 60, throttle: true);
       final container = await openWith(
           tester, const [seededChMode, overLimit], seededChModeId);
 
-      expect(find.text('32 km/h · throttle'), findsOneWidget,
+      expect(find.text('45 km/h · throttle'), findsOneWidget,
           reason: 'the tile shows the limit the bike actually rides');
 
       await tapKey(tester, 'customModeTile:${overLimit.id}');
 
       final opened = sliderValue(tester);
       container.dispose();
-      expect(opened, 32);
+      expect(opened, 45);
     });
 
     testWidgets('deleting a mode nobody is on asks nothing', (tester) async {
@@ -771,7 +792,7 @@ void main() {
 
       await tapKey(tester, 'customModeTile:${fast40.id}');
       await tester.enterText(
-          find.byKey(const ValueKey('customModeNameField')), 'Tour 30');
+          find.byKey(const ValueKey('customModeNameField')), 'Tour 38');
       await tapKey(tester, 'customModeThrottleSwitch');
       for (var i = 0; i < 2; i++) {
         await tapKey(tester, 'customModeLimitMinus');
@@ -786,7 +807,7 @@ void main() {
       container.dispose();
       expect(saved.customModes, const [
         seededChMode,
-        CustomMode(id: 'c1', name: 'Tour 30', limitKmh: 30, throttle: true)
+        CustomMode(id: 'c1', name: 'Tour 38', limitKmh: 38, throttle: true)
       ]);
     });
 

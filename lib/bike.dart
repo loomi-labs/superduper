@@ -273,7 +273,7 @@ class Bike extends _$Bike {
     // a bike that comes back from bikes.json on a mode whose base profile is
     // not [chWireLow] would otherwise have every write until the first speed
     // sample assert a wire that mode never rides.
-    _assertedWire = initialWireFor(bike.selectedMode);
+    _assertedWire = initialWireFor(bike.selectedMode, region: bike.region);
     _syncKeepAlive(bike);
     _refreshNotificationPermission();
     if (bike.needsSpeedSwitching) {
@@ -338,6 +338,13 @@ class Bike extends _$Bike {
     if (!ref.mounted || !_isConnected) {
       return;
     }
+    // A mode with an unlimited base may not come back on that base: no speed
+    // has arrived on this connection yet, so nothing says the app can see the
+    // bike. Re-entered on its cap, exactly as selecting it enters it.
+    final capped = unwatchedWireFor(state.selectedMode, state.region);
+    if (capped != null) {
+      _assertedWire = capped;
+    }
     _logD('Reconnected, re-asserting state');
     await updateStateDataNow(force: true);
   }
@@ -361,7 +368,8 @@ class Bike extends _$Bike {
       // Unreachable: only a custom mode ever needs speed switching.
       return;
     }
-    var newWire = dynamicWireFor(selected.mode, speedKmh, _assertedWire);
+    var newWire = dynamicWireFor(selected.mode, speedKmh, _assertedWire,
+        region: state.region);
     if (newWire == _assertedWire) {
       return;
     }
@@ -382,6 +390,11 @@ class Bike extends _$Bike {
 
   /// The bike stops streaming ride data on its own; without speed samples a
   /// switching mode is blind, so re-arm the stream when it dries up.
+  ///
+  /// A blind app is also the one moment a mode with an unlimited base must not
+  /// stay on it: the firmware holds no limit there, so the app is the limiter,
+  /// and a limiter that cannot see the speed has to give the bike back to the
+  /// firmware. The cap goes on the wire first, before the ride data request.
   void _checkSpeedStream() {
     if (!state.needsSpeedSwitching || !_isConnected) {
       return;
@@ -390,8 +403,33 @@ class Bike extends _$Bike {
     if (last != null && DateTime.now().difference(last) < _speedTimeout) {
       return;
     }
+    _capUnwatchedMode();
     _logD('No speed samples, requesting ride data again');
     unawaited(_requestRideData());
+  }
+
+  /// Puts a mode whose base is unlimited back on its cap profile. Does nothing
+  /// for every other mode: their base profile carries a firmware limiter, so a
+  /// blind app still leaves a limited bike.
+  void _capUnwatchedMode() {
+    final wire = unwatchedWireFor(state.selectedMode, state.region);
+    if (wire == null || wire == _assertedWire) {
+      return;
+    }
+    _logW('No speed samples, capping ${state.selectedMode.name}: '
+        'wire $_assertedWire -> $wire');
+    _assertedWire = wire;
+    // Same settings, new wire byte, exactly as a speed transition writes it.
+    writeStateData(state, authoritative: const {}, abortIfStale: true);
+  }
+
+  /// Ages the last speed sample past the watchdog's timeout and runs the
+  /// watchdog, so a test can reach the stream-death path without waiting out
+  /// five real seconds.
+  @visibleForTesting
+  void debugExpireSpeedStream() {
+    _lastSpeedAt = DateTime.now().subtract(_speedTimeout * 2);
+    _checkSpeedStream();
   }
 
   /// Writes one speed line per tick of [_traceTimer], so a ride leaves a
@@ -628,8 +666,8 @@ class Bike extends _$Bike {
     // profile, and both mean the bike kept the mode it was in. Raw equality
     // would call every speed switch a power cycle.
     final selected = state.selectedMode;
-    return !assertsWire(selected, before.wire) ||
-        !assertsWire(selected, seen.wire);
+    return !assertsWire(selected, before.wire, region: state.region) ||
+        !assertsWire(selected, seen.wire, region: state.region);
   }
 
   /// [bike] with the value of every padlock that is on [PinState.startup], or
@@ -732,7 +770,8 @@ class Bike extends _$Bike {
         sel: newSel,
         modeChanged: modeChanged,
         nowSwitching: nowSwitching,
-        assertedWire: _assertedWire);
+        assertedWire: _assertedWire,
+        region: newState.region);
     var wire = computeWire();
     var status = ref.read(connectionHandlerProvider(state.id));
     if (saveToBike) {
