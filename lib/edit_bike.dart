@@ -208,14 +208,17 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
   Future<void> _addCustomMode() async {
     final mode = CustomMode(
         id: newCustomModeId(),
-        name: 'Custom',
+        name: customModeNameFor(customLimitMin),
         limitKmh: customLimitMin,
         throttle: false);
     setState(() {
       _draftModes = [..._draftModes, mode];
     });
-    final edited =
-        await _showCustomModeEditor(context, mode, _draftBike.region);
+    // Only the add path names the mode by itself. The flag is passed, never
+    // guessed from the name: a mode the rider deliberately called '30 km/h'
+    // would otherwise get renamed under their hands.
+    final edited = await _showCustomModeEditor(context, mode, _draftBike.region,
+        autoName: true);
     if (!mounted) {
       return;
     }
@@ -228,8 +231,8 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
   }
 
   Future<void> _editCustomMode(CustomMode mode) async {
-    final edited =
-        await _showCustomModeEditor(context, mode, _draftBike.region);
+    final edited = await _showCustomModeEditor(context, mode, _draftBike.region,
+        autoName: false);
     if (edited == null || !mounted) {
       return;
     }
@@ -765,11 +768,17 @@ class _CustomModeTile extends StatelessWidget {
   }
 }
 
+/// The name a new custom mode carries while the rider has not named it: the
+/// speed it holds. One function for both the seed and the live update in the
+/// editor, so the two cannot drift apart.
+String customModeNameFor(int limitKmh) => '$limitKmh km/h';
+
 /// Edits one custom mode in a sheet of its own (the colour picker's precedent).
 /// Returns the edited mode, or null when the rider backs out — the caller's
 /// draft list is what decides, so nothing here reaches the bike.
 Future<CustomMode?> _showCustomModeEditor(
-    BuildContext context, CustomMode mode, BikeRegion? region) {
+    BuildContext context, CustomMode mode, BikeRegion? region,
+    {required bool autoName}) {
   return showModalBottomSheet<CustomMode>(
     context: context,
     isScrollControlled: true,
@@ -778,19 +787,25 @@ Future<CustomMode?> _showCustomModeEditor(
       borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
     ),
     builder: (BuildContext context) {
-      return _CustomModeEditor(mode: mode, region: region);
+      return _CustomModeEditor(mode: mode, region: region, autoName: autoName);
     },
   );
 }
 
 class _CustomModeEditor extends StatefulWidget {
-  const _CustomModeEditor({required this.mode, required this.region});
+  const _CustomModeEditor(
+      {required this.mode, required this.region, required this.autoName});
   final CustomMode mode;
 
   /// The region as the sheet would SAVE it, not as the bike has it: the region
   /// decides which bank a mode's profiles come from, so a caption taken from
   /// the stale region would name a profile the bike will not ride.
   final BikeRegion? region;
+
+  /// True for a mode the rider has just added. Its name then follows the limit
+  /// until the rider types one of their own. False for every existing mode: a
+  /// name already given is never overwritten.
+  final bool autoName;
 
   @override
   State<_CustomModeEditor> createState() => _CustomModeEditorState();
@@ -801,6 +816,11 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
   late TextEditingController _nameController;
   late int _limitKmh;
   late bool _throttle;
+
+  /// True while the name field holds text the rider typed. An empty field
+  /// counts as not edited, so clearing the name gives the mode back to the
+  /// automatic name instead of leaving it blank for the validator to refuse.
+  bool _nameEdited = false;
 
   @override
   void initState() {
@@ -822,6 +842,26 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
     setState(() {
       _limitKmh = kmh.clamp(customLimitMin, customLimitMax).toInt();
     });
+    _syncAutoName();
+  }
+
+  /// Writes the automatic name after the limit moved. Only [_setLimit] calls
+  /// it: the throttle switch no longer changes the limit.
+  ///
+  /// The decision is the flag and the flag only. Reading the field to guess
+  /// whether the name looks automatic would rename a mode the rider called
+  /// '30 km/h' on purpose.
+  void _syncAutoName() {
+    if (!widget.autoName || _nameEdited) {
+      return;
+    }
+    final name = customModeNameFor(_limitKmh);
+    // Not the plain `text` setter: it leaves the selection invalid, and the
+    // field can hold the cursor while the rider drags the slider.
+    _nameController.value = TextEditingValue(
+      text: name,
+      selection: TextSelection.collapsed(offset: name.length),
+    );
   }
 
   void _setThrottle(bool value) {
@@ -922,6 +962,13 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
                             contentPadding: const EdgeInsets.symmetric(
                                 horizontal: 16, vertical: 16),
                           ),
+                          // The field's own onChanged, not a listener on the
+                          // controller: a listener also fires when
+                          // _syncAutoName writes, which would mark the name
+                          // edited on the first slider move.
+                          onChanged: (value) {
+                            _nameEdited = value.trim().isNotEmpty;
+                          },
                           validator: (value) =>
                               (value ?? '').trim().isEmpty ? 'Required' : null,
                         ),

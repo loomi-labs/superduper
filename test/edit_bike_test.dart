@@ -445,6 +445,24 @@ void main() {
         .widget<Slider>(find.byKey(const ValueKey('customModeLimitSlider')))
         .value;
 
+    /// The text the name field holds. Read from the controller, never through
+    /// `find.text`: on a CH bike the auto name '25 km/h' is also the seeded
+    /// tile's title, its delete tooltip and the slider readout, so a text
+    /// finder proves nothing about the field.
+    String nameFieldText(WidgetTester tester) => tester
+        .widget<TextField>(find.descendant(
+            of: find.byKey(const ValueKey('customModeNameField')),
+            matching: find.byType(TextField)))
+        .controller!
+        .text;
+
+    /// Raises the limit by [steps] km/h, one tap of the plus button each.
+    Future<void> raiseLimit(WidgetTester tester, int steps) async {
+      for (var i = 0; i < steps; i++) {
+        await tapKey(tester, 'customModeLimitPlus');
+      }
+    }
+
     testWidgets('adding a mode opens the editor and lands a tile',
         (tester) async {
       final container = await openWith(
@@ -480,7 +498,9 @@ void main() {
       await tester.pumpAndSettle();
 
       container.dispose();
-      expect(find.text('Custom'), findsNothing);
+      // The new mode carries the seeded mode's name, so counting the tiles is
+      // the only proof left that the draft one is gone.
+      expect(find.byTooltip('Delete 25 km/h'), findsOneWidget);
     });
 
     testWidgets('turning the throttle on keeps a limit above 32',
@@ -881,6 +901,95 @@ void main() {
       final field = find.byKey(const ValueKey('customModeNameField'));
       container.dispose();
       expect(field, findsOneWidget);
+    });
+
+    // A new mode used to open as 'Custom', so two of them said nothing about
+    // what they do. It now follows its limit until the rider types a name.
+    group('auto name', () {
+      testWidgets('a new mode opens named after its limit', (tester) async {
+        final container =
+            await openWith(tester, const [seededChMode], seededChModeId);
+
+        await tapKey(tester, 'addCustomModeButton');
+
+        final opened = nameFieldText(tester);
+        container.dispose();
+        expect(opened, '25 km/h',
+            reason: 'the name says the speed, not the word Custom');
+      });
+
+      testWidgets('the name follows the slider', (tester) async {
+        final container =
+            await openWith(tester, const [seededChMode], seededChModeId);
+
+        await tapKey(tester, 'addCustomModeButton');
+        await raiseLimit(tester, 5);
+
+        final followed = nameFieldText(tester);
+        container.dispose();
+        expect(followed, '30 km/h');
+      });
+
+      testWidgets('a typed name stops the slider from renaming it',
+          (tester) async {
+        final container =
+            await openWith(tester, const [seededChMode], seededChModeId);
+
+        await tapKey(tester, 'addCustomModeButton');
+        await tester.enterText(
+            find.byKey(const ValueKey('customModeNameField')), 'Trail');
+        await raiseLimit(tester, 10);
+
+        final kept = nameFieldText(tester);
+        final limit = sliderValue(tester);
+        container.dispose();
+        expect(limit, 35, reason: 'the slider still moves');
+        expect(kept, 'Trail', reason: 'the name belongs to the rider now');
+      });
+
+      testWidgets('clearing the name brings the auto name back', (tester) async {
+        final container =
+            await openWith(tester, const [seededChMode], seededChModeId);
+
+        await tapKey(tester, 'addCustomModeButton');
+        await tester.enterText(
+            find.byKey(const ValueKey('customModeNameField')), 'Trail');
+        await tester.enterText(
+            find.byKey(const ValueKey('customModeNameField')), '');
+        await raiseLimit(tester, 5);
+
+        expect(nameFieldText(tester), '30 km/h',
+            reason: 'an empty name is untouched again');
+        expect(find.text('Required'), findsNothing,
+            reason: 'the rider never sees the validator for a name the app '
+                'fills in itself');
+
+        // And the mode saves: the refilled name passes the validator, so the
+        // editor closes on Done.
+        await tapKey(tester, 'customModeEditorDone');
+
+        final field = find.byKey(const ValueKey('customModeNameField'));
+        container.dispose();
+        expect(field, findsNothing);
+      });
+
+      testWidgets('an existing mode keeps its name', (tester) async {
+        // Auto-naming is for new modes only: a name the rider gave a mode
+        // survives every later edit of its limit.
+        const trail = CustomMode(
+            id: 'c1', name: 'Trail', limitKmh: 30, throttle: false);
+        final container =
+            await openWith(tester, const [seededChMode, trail], seededChModeId);
+
+        await tapKey(tester, 'customModeTile:${trail.id}');
+        await raiseLimit(tester, 5);
+
+        final kept = nameFieldText(tester);
+        final limit = sliderValue(tester);
+        container.dispose();
+        expect(limit, 35);
+        expect(kept, 'Trail');
+      });
     });
   });
 }
