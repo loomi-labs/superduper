@@ -61,8 +61,6 @@ _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
       : LastSeen.fromJson(json['lastSeen'] as Map<String, dynamic>),
   name: json['name'] as String,
   region: $enumDecodeNullable(_$BikeRegionEnumMap, json['region']),
-  modeLock: json['modeLock'] as bool? ?? false,
-  modeLockAuto: json['modeLockAuto'] as bool? ?? false,
   autoReconnect: json['autoReconnect'] as bool? ?? true,
   color: (json['color'] as num?)?.toInt() ?? 0,
 );
@@ -84,8 +82,6 @@ Map<String, dynamic> _$BikeStateToJson(_BikeState instance) =>
       'lastSeen': instance.lastSeen?.toJson(),
       'name': instance.name,
       'region': _$BikeRegionEnumMap[instance.region],
-      'modeLock': instance.modeLock,
-      'modeLockAuto': instance.modeLockAuto,
       'autoReconnect': instance.autoReconnect,
       'color': instance.color,
     };

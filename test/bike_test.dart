@@ -990,11 +990,7 @@ void main() {
       final sub = container.listen(bikeProvider(id), (previous, next) {});
       final bike = container.read(bikeProvider(id).notifier);
       bike.writeStateData(BikeState.defaultState(id)
-          .copyWith(
-              region: BikeRegion.us,
-              customModes: const [tour30],
-              modeLock: true,
-              modeLockAuto: true)
+          .copyWith(region: BikeRegion.us, customModes: const [tour30])
           .withSelectedMode(tour30.id));
       await settle();
       expect(bikeWire(container), 1);
@@ -1008,9 +1004,6 @@ void main() {
           reason: 'and the fallback wire goes to the bike');
       expect(state.customModes, isEmpty);
       expect(state.needsSpeedSwitching, isFalse);
-      expect(state.modeLock, isFalse,
-          reason: 'the lock the switching mode turned on goes with it');
-      expect(state.modeLockAuto, isFalse);
 
       sub.close();
       await settle();
@@ -1481,76 +1474,182 @@ void main() {
         reason: 'a write that threw must not update the app state');
   });
 
-  group('background lock ownership', () {
-    /// Stands in for the Android-only auto-enable, which cannot run in tests.
-    Future<Bike> autoLockedBike(ProviderContainer container,
-        {required bool auto}) async {
-      container.listen(bikeProvider(id), (previous, next) {});
+  group('background enforcement', () {
+    /// A bike in one of the four combinations of the two conditions that need
+    /// the app to keep working with no UI on screen.
+    BikeState combo({required bool switching, required bool locked}) =>
+        BikeState.defaultState(id)
+            .copyWith(
+                region: BikeRegion.us,
+                customModes: const [tour30, sport45],
+                pinMode: locked ? PinState.locked : PinState.open)
+            .withSelectedMode(switching ? tour30.id : sport45.id);
+
+    test('the background service follows the switching mode and the pins', () {
+      expect(needsBackgroundEnforcement(combo(switching: false, locked: false)),
+          isFalse,
+          reason: 'nothing to enforce, so nothing has to keep running');
+      expect(needsBackgroundEnforcement(combo(switching: true, locked: false)),
+          isTrue,
+          reason: 'a switching mode limits the speed in the rider pocket');
+      expect(needsBackgroundEnforcement(combo(switching: false, locked: true)),
+          isTrue,
+          reason: 'a locked value has to hold in the rider pocket too');
+      expect(needsBackgroundEnforcement(combo(switching: true, locked: true)),
+          isTrue);
+    });
+
+    test('every padlock can ask for the background service', () {
+      final open = combo(switching: false, locked: false);
+      for (final locked in [
+        open.copyWith(pinMode: PinState.locked),
+        open.copyWith(pinLight: PinState.locked),
+        open.copyWith(pinAssist: PinState.locked),
+      ]) {
+        expect(needsBackgroundEnforcement(locked), isTrue,
+            reason: 'each of the three padlocks holds a value');
+      }
+    });
+
+    test('a startup pin alone leaves the background service off', () {
+      final open = combo(switching: false, locked: false);
+      for (final pinned in [
+        open.copyWith(pinMode: PinState.startup),
+        open.copyWith(pinLight: PinState.startup),
+        open.copyWith(pinAssist: PinState.startup),
+      ]) {
+        expect(needsBackgroundEnforcement(pinned), isFalse,
+            reason: 'a startup pin acts on one moment, so a permanent '
+                'notification for it is not earned');
+      }
+    });
+
+    test('a locked pin keeps the control loop alive in the background',
+        () async {
+      final container = makeContainer();
+      final sub = container.listen(bikeProvider(id), (previous, next) {});
       final bike = container.read(bikeProvider(id).notifier);
-      bike.writeStateData(BikeState.defaultState(id).copyWith(
-          region: BikeRegion.ch, modeLock: true, modeLockAuto: auto));
+      bike.writeStateData(BikeState.defaultState(id)
+          .copyWith(region: BikeRegion.us, customModes: const [sport45])
+          .withSelectedMode(sport45.id));
       await settle();
-      return bike;
-    }
-
-    test('leaving a switching mode turns off the lock it turned on', () async {
-      final container = makeContainer();
-      final bike = await autoLockedBike(container, auto: true);
-
-      bike.selectMode(nativeModeId(chWireOffroad));
+      bike.toggleModeLocked();
       await settle();
-      final state = container.read(bikeProvider(id));
-      expect(state.needsSpeedSwitching, isFalse);
-      expect(state.modeLock, isFalse,
-          reason: 'a switching mode cleans up its own lock');
-      expect(state.modeLockAuto, isFalse);
+
+      // The page is popped. The rider asked the app to hold this mode, so the
+      // loop that holds it must not go with the page.
+      sub.close();
+      await settle();
+      expect(container.exists(bikeProvider(id)), isTrue,
+          reason: 'a locked value must still be held with no UI on screen');
     });
 
-    test('a lock the rider turned on is left alone', () async {
-      final container = makeContainer();
-      final bike = await autoLockedBike(container, auto: false);
-
-      bike.selectMode(nativeModeId(chWireOffroad));
-      await settle();
-      final state = container.read(bikeProvider(id));
-      expect(state.needsSpeedSwitching, isFalse);
-      expect(state.modeLock, isTrue,
-          reason: 'a rider enabled lock is never auto-disabled');
-    });
-
-    test('a rider toggle takes the lock over from the switching mode',
+    test('the last open padlock releases the background control loop',
         () async {
       final container = makeContainer();
-      final bike = await autoLockedBike(container, auto: true);
+      final sub = container.listen(bikeProvider(id), (previous, next) {});
+      final bike = container.read(bikeProvider(id).notifier);
+      bike.writeStateData(BikeState.defaultState(id)
+          .copyWith(region: BikeRegion.us, customModes: const [sport45])
+          .withSelectedMode(sport45.id));
+      await settle();
+      bike.toggleModeLocked();
+      await settle();
+      sub.close();
+      await settle();
+      expect(container.exists(bikeProvider(id)), isTrue);
 
-      // Rider turns the lock off and on again: it is theirs now.
-      bike.toggleBackgroundLock();
+      bike.toggleModeLocked();
       await settle();
-      bike.toggleBackgroundLock();
-      await settle();
-      expect(container.read(bikeProvider(id)).modeLock, isTrue);
-      expect(container.read(bikeProvider(id)).modeLockAuto, isFalse);
-
-      bike.selectMode(nativeModeId(chWireOffroad));
-      await settle();
-      expect(container.read(bikeProvider(id)).modeLock, isTrue,
-          reason: 'leaving a switching mode must not undo the rider');
+      expect(container.exists(bikeProvider(id)), isFalse,
+          reason: 'with nothing pinned there is nothing left to enforce');
     });
 
-    test('the lock survives a move from one switching mode to another',
+    test('a refused notification shows the padlock as degraded', () {
+      expect(
+          pinDegraded(PinState.locked,
+              hasService: true, notificationsBlocked: true),
+          isTrue,
+          reason: 'without the notification the lock cannot hold in a pocket, '
+              'and the page must not pretend that it does');
+      expect(
+          pinDegraded(PinState.locked,
+              hasService: true, notificationsBlocked: false),
+          isFalse);
+      expect(
+          pinDegraded(PinState.open,
+              hasService: true, notificationsBlocked: true),
+          isFalse,
+          reason: 'an open padlock holds nothing, so nothing is degraded');
+      expect(
+          pinDegraded(PinState.startup,
+              hasService: true, notificationsBlocked: true),
+          isFalse);
+      expect(
+          pinDegraded(PinState.locked,
+              hasService: false, notificationsBlocked: true),
+          isFalse,
+          reason: 'a platform with no service at all would mark every padlock '
+              'with a warning nobody can act on');
+    });
+
+    test('the background status line says what is kept active', () {
+      final switching = combo(switching: true, locked: false);
+      final locked = combo(switching: false, locked: true);
+      final idle = combo(switching: false, locked: false);
+
+      expect(
+          backgroundStatusFor(idle,
+              hasService: true, notificationsBlocked: false),
+          BackgroundStatus.none);
+      expect(backgroundStatusText(BackgroundStatus.none, idle, hasService: true),
+          isNull, reason: 'with nothing to enforce the page says nothing');
+
+      final active = backgroundStatusFor(switching,
+          hasService: true, notificationsBlocked: false);
+      expect(active, BackgroundStatus.active);
+      expect(backgroundStatusText(active, switching, hasService: true),
+          'Keeping ${switching.selectedMode.name} active while your phone is '
+          'locked. Uses some battery.',
+          reason: 'a service the rider did not ask for has to say why it runs');
+      expect(backgroundStatusText(active, locked, hasService: true),
+          contains('your locks'));
+
+      final blocked =
+          backgroundStatusFor(locked, hasService: true, notificationsBlocked: true);
+      expect(blocked, BackgroundStatus.degraded);
+      expect(backgroundStatusText(blocked, locked, hasService: true),
+          contains('Notifications are off'));
+    });
+
+    test('a platform with no background service says so', () {
+      final locked = combo(switching: false, locked: true);
+      final status = backgroundStatusFor(locked,
+          hasService: false, notificationsBlocked: false);
+      expect(status, BackgroundStatus.degraded);
+      expect(backgroundStatusText(status, locked, hasService: false),
+          'Locks and speed limiting only work while the app is open.');
+    });
+
+    test('a locked pin holds the loop after a switching mode is left',
         () async {
       final container = makeContainer();
-      final bike = await autoLockedBike(container, auto: true);
-      bike.upsertCustomMode(tour30);
+      final sub = container.listen(bikeProvider(id), (previous, next) {});
+      final bike = container.read(bikeProvider(id).notifier);
+      bike.writeStateData(BikeState.defaultState(id)
+          .copyWith(region: BikeRegion.us, customModes: const [tour30, sport45])
+          .withSelectedMode(tour30.id));
+      await settle();
+      bike.toggleModeLocked();
       await settle();
 
-      bike.selectMode(tour30.id);
+      bike.selectMode(sport45.id);
       await settle();
-      final state = container.read(bikeProvider(id));
-      expect(state.needsSpeedSwitching, isTrue);
-      expect(state.modeLock, isTrue,
-          reason: 'the lock is torn down on leaving, not on changing mode');
-      expect(state.modeLockAuto, isTrue);
+      sub.close();
+      await settle();
+      expect(container.exists(bikeProvider(id)), isTrue,
+          reason: 'the padlock is the rider own, so leaving a switching mode '
+              'must not take the enforcement with it');
     });
   });
 

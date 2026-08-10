@@ -56,15 +56,19 @@ void main() {
     expect(BikeState.defaultState('id').region, BikeRegion.ch);
   });
 
-  test('modeLockAuto persists, defaults to false, tolerates legacy files', () {
-    expect(BikeState.defaultState('id').modeLockAuto, isFalse);
-    final auto = bike().copyWith(modeLock: true, modeLockAuto: true);
-    expect(BikeState.fromJson(auto.toJson()).modeLockAuto, isTrue,
-        reason: 'whose lock it is must survive an app restart');
-    // bikes.json written by an older build has no such key.
-    final legacy = Map<String, Object?>.from(auto.toJson())
-      ..remove('modeLockAuto');
-    expect(BikeState.fromJson(legacy).modeLockAuto, isFalse);
+  test('a saved Background Lock is dropped, not refused', () {
+    // The rider who had it on gets the service back wherever it was doing
+    // something, because it now follows the locks and the switching modes. A
+    // file that still names it must decode all the same: _readBikes drops a
+    // bike it cannot read, and the next save deletes it from the file for good.
+    final json = legacyJson()
+      ..['modeLock'] = true
+      ..['modeLockAuto'] = true;
+    final b = BikeState.fromJson(json);
+    expect(b.id, 'test');
+    expect(b.toJson().containsKey('modeLock'), isFalse,
+        reason: 'the field goes with the feature');
+    expect(b.toJson().containsKey('modeLockAuto'), isFalse);
   });
 
   group('toWriteData', () {

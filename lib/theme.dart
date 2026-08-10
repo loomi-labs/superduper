@@ -26,4 +26,8 @@ abstract final class SDSurface {
 
   /// A caption, and an unselected label.
   static const muted = Color(0xff6b6e76);
+
+  /// A control that works less well than it says. Only ever a tint on an
+  /// existing icon: nothing on this page is painted with it.
+  static const warning = Color(0xffe0a030);
 }

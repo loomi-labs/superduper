@@ -515,11 +515,6 @@ abstract class BikeState with _$BikeState {
       LastSeen? lastSeen,
       required String name,
       BikeRegion? region,
-      @Default(false) bool modeLock,
-      // Set when [modeLock] was turned on by the CH dynamic mode rather than by
-      // the rider. Persisted, so an app restart still knows whose lock it is
-      // and only ever turns off its own.
-      @Default(false) bool modeLockAuto,
       // Whether the app keeps trying to reconnect to this bike on its own.
       @Default(true) bool autoReconnect,
       @Default(0) int color}) = _BikeState;
@@ -636,6 +631,15 @@ abstract class BikeState with _$BikeState {
     }
     return BikeRegion.us;
   }
+
+  /// Whether any padlock holds its value against the bike.
+  ///
+  /// A startup pin is deliberately not one of them: it acts on one moment, so
+  /// between those moments there is nothing to hold.
+  bool get anyPinLocked =>
+      pinMode == PinState.locked ||
+      pinLight == PinState.locked ||
+      pinAssist == PinState.locked;
 
   /// Whether this bike needs the speed stream: only a custom mode whose base
   /// and cap profiles differ has anything to switch. An exact-match custom mode

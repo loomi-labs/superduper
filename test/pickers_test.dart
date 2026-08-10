@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:superduper/bike.dart';
 import 'package:superduper/fake_bike.dart';
 import 'package:superduper/repository.dart';
+import 'package:superduper/theme.dart';
 import 'package:superduper/widgets.dart';
 
 /// A switching custom mode: base wire 1 (32 km/h + throttle), cap wire 4.
@@ -374,5 +375,35 @@ void main() {
     expect(opacities, everyElement(0.5));
     expect(onTap, isNull);
     expect(lockOnTap, isNotNull);
+  });
+
+  testWidgets('a degraded padlock is marked and says why', (tester) async {
+    // The padlock is on, but nothing can hold the value while the phone is in
+    // a pocket. Pumped directly: which platform and which permission put it
+    // there is [pinDegraded]'s job, and that is tested on its own.
+    Future<Icon> pumpLock({required bool degraded}) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: EnhancedLockWidget(
+            locked: true,
+            degraded: degraded,
+            onTap: () {},
+            tooltip: 'Lock the mode',
+          ),
+        ),
+      ));
+      return tester.widget<Icon>(find.byType(Icon));
+    }
+
+    final plain = await pumpLock(degraded: false);
+    expect(plain.color, SDSurface.text);
+    expect(tester.widget<IconButton>(find.byType(IconButton)).tooltip,
+        'Lock the mode');
+
+    final degraded = await pumpLock(degraded: true);
+    expect(degraded.color, SDSurface.warning,
+        reason: 'a padlock that cannot hold must not look like one that can');
+    expect(tester.widget<IconButton>(find.byType(IconButton)).tooltip,
+        contains('only holds while the app is open'));
   });
 }

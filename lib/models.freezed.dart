@@ -556,7 +556,7 @@ as int,
 /// @nodoc
 mixin _$BikeState {
 
- String get id;@JsonKey(name: 'mode') int get legacyMode; String get modeId; List<CustomMode> get customModes;@JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState get pinMode; bool get light;@JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState get pinLight; int get assist;@JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState get pinAssist; bool? get startupLight; String? get startupModeId; int? get startupAssist; LastSeen? get lastSeen; String get name; BikeRegion? get region; bool get modeLock; bool get modeLockAuto; bool get autoReconnect; int get color;
+ String get id;@JsonKey(name: 'mode') int get legacyMode; String get modeId; List<CustomMode> get customModes;@JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState get pinMode; bool get light;@JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState get pinLight; int get assist;@JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState get pinAssist; bool? get startupLight; String? get startupModeId; int? get startupAssist; LastSeen? get lastSeen; String get name; BikeRegion? get region; bool get autoReconnect; int get color;
 /// Create a copy of BikeState
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -569,16 +569,16 @@ $BikeStateCopyWith<BikeState> get copyWith => _$BikeStateCopyWithImpl<BikeState>
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.legacyMode, legacyMode) || other.legacyMode == legacyMode)&&(identical(other.modeId, modeId) || other.modeId == modeId)&&const DeepCollectionEquality().equals(other.customModes, customModes)&&(identical(other.pinMode, pinMode) || other.pinMode == pinMode)&&(identical(other.light, light) || other.light == light)&&(identical(other.pinLight, pinLight) || other.pinLight == pinLight)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.pinAssist, pinAssist) || other.pinAssist == pinAssist)&&(identical(other.startupLight, startupLight) || other.startupLight == startupLight)&&(identical(other.startupModeId, startupModeId) || other.startupModeId == startupModeId)&&(identical(other.startupAssist, startupAssist) || other.startupAssist == startupAssist)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.modeLock, modeLock) || other.modeLock == modeLock)&&(identical(other.modeLockAuto, modeLockAuto) || other.modeLockAuto == modeLockAuto)&&(identical(other.autoReconnect, autoReconnect) || other.autoReconnect == autoReconnect)&&(identical(other.color, color) || other.color == color));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.legacyMode, legacyMode) || other.legacyMode == legacyMode)&&(identical(other.modeId, modeId) || other.modeId == modeId)&&const DeepCollectionEquality().equals(other.customModes, customModes)&&(identical(other.pinMode, pinMode) || other.pinMode == pinMode)&&(identical(other.light, light) || other.light == light)&&(identical(other.pinLight, pinLight) || other.pinLight == pinLight)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.pinAssist, pinAssist) || other.pinAssist == pinAssist)&&(identical(other.startupLight, startupLight) || other.startupLight == startupLight)&&(identical(other.startupModeId, startupModeId) || other.startupModeId == startupModeId)&&(identical(other.startupAssist, startupAssist) || other.startupAssist == startupAssist)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.autoReconnect, autoReconnect) || other.autoReconnect == autoReconnect)&&(identical(other.color, color) || other.color == color));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hashAll([runtimeType,id,legacyMode,modeId,const DeepCollectionEquality().hash(customModes),pinMode,light,pinLight,assist,pinAssist,startupLight,startupModeId,startupAssist,lastSeen,name,region,modeLock,modeLockAuto,autoReconnect,color]);
+int get hashCode => Object.hash(runtimeType,id,legacyMode,modeId,const DeepCollectionEquality().hash(customModes),pinMode,light,pinLight,assist,pinAssist,startupLight,startupModeId,startupAssist,lastSeen,name,region,autoReconnect,color);
 
 @override
 String toString() {
-  return 'BikeState(id: $id, legacyMode: $legacyMode, modeId: $modeId, customModes: $customModes, pinMode: $pinMode, light: $light, pinLight: $pinLight, assist: $assist, pinAssist: $pinAssist, startupLight: $startupLight, startupModeId: $startupModeId, startupAssist: $startupAssist, lastSeen: $lastSeen, name: $name, region: $region, modeLock: $modeLock, modeLockAuto: $modeLockAuto, autoReconnect: $autoReconnect, color: $color)';
+  return 'BikeState(id: $id, legacyMode: $legacyMode, modeId: $modeId, customModes: $customModes, pinMode: $pinMode, light: $light, pinLight: $pinLight, assist: $assist, pinAssist: $pinAssist, startupLight: $startupLight, startupModeId: $startupModeId, startupAssist: $startupAssist, lastSeen: $lastSeen, name: $name, region: $region, autoReconnect: $autoReconnect, color: $color)';
 }
 
 
@@ -589,7 +589,7 @@ abstract mixin class $BikeStateCopyWith<$Res>  {
   factory $BikeStateCopyWith(BikeState value, $Res Function(BikeState) _then) = _$BikeStateCopyWithImpl;
 @useResult
 $Res call({
- String id,@JsonKey(name: 'mode') int legacyMode, String modeId, List<CustomMode> customModes,@JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinMode, bool light,@JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinLight, int assist,@JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinAssist, bool? startupLight, String? startupModeId, int? startupAssist, LastSeen? lastSeen, String name, BikeRegion? region, bool modeLock, bool modeLockAuto, bool autoReconnect, int color
+ String id,@JsonKey(name: 'mode') int legacyMode, String modeId, List<CustomMode> customModes,@JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinMode, bool light,@JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinLight, int assist,@JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinAssist, bool? startupLight, String? startupModeId, int? startupAssist, LastSeen? lastSeen, String name, BikeRegion? region, bool autoReconnect, int color
 });
 
 
@@ -606,7 +606,7 @@ class _$BikeStateCopyWithImpl<$Res>
 
 /// Create a copy of BikeState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? legacyMode = null,Object? modeId = null,Object? customModes = null,Object? pinMode = null,Object? light = null,Object? pinLight = null,Object? assist = null,Object? pinAssist = null,Object? startupLight = freezed,Object? startupModeId = freezed,Object? startupAssist = freezed,Object? lastSeen = freezed,Object? name = null,Object? region = freezed,Object? modeLock = null,Object? modeLockAuto = null,Object? autoReconnect = null,Object? color = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? legacyMode = null,Object? modeId = null,Object? customModes = null,Object? pinMode = null,Object? light = null,Object? pinLight = null,Object? assist = null,Object? pinAssist = null,Object? startupLight = freezed,Object? startupModeId = freezed,Object? startupAssist = freezed,Object? lastSeen = freezed,Object? name = null,Object? region = freezed,Object? autoReconnect = null,Object? color = null,}) {
   return _then(_self.copyWith(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as String,legacyMode: null == legacyMode ? _self.legacyMode : legacyMode // ignore: cast_nullable_to_non_nullable
@@ -623,9 +623,7 @@ as String?,startupAssist: freezed == startupAssist ? _self.startupAssist : start
 as int?,lastSeen: freezed == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
 as LastSeen?,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
 as String,region: freezed == region ? _self.region : region // ignore: cast_nullable_to_non_nullable
-as BikeRegion?,modeLock: null == modeLock ? _self.modeLock : modeLock // ignore: cast_nullable_to_non_nullable
-as bool,modeLockAuto: null == modeLockAuto ? _self.modeLockAuto : modeLockAuto // ignore: cast_nullable_to_non_nullable
-as bool,autoReconnect: null == autoReconnect ? _self.autoReconnect : autoReconnect // ignore: cast_nullable_to_non_nullable
+as BikeRegion?,autoReconnect: null == autoReconnect ? _self.autoReconnect : autoReconnect // ignore: cast_nullable_to_non_nullable
 as bool,color: null == color ? _self.color : color // ignore: cast_nullable_to_non_nullable
 as int,
   ));
@@ -724,10 +722,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id, @JsonKey(name: 'mode')  int legacyMode,  String modeId,  List<CustomMode> customModes, @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinMode,  bool light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinLight,  int assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinAssist,  bool? startupLight,  String? startupModeId,  int? startupAssist,  LastSeen? lastSeen,  String name,  BikeRegion? region,  bool modeLock,  bool modeLockAuto,  bool autoReconnect,  int color)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( String id, @JsonKey(name: 'mode')  int legacyMode,  String modeId,  List<CustomMode> customModes, @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinMode,  bool light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinLight,  int assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinAssist,  bool? startupLight,  String? startupModeId,  int? startupAssist,  LastSeen? lastSeen,  String name,  BikeRegion? region,  bool autoReconnect,  int color)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _BikeState() when $default != null:
-return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.pinMode,_that.light,_that.pinLight,_that.assist,_that.pinAssist,_that.startupLight,_that.startupModeId,_that.startupAssist,_that.lastSeen,_that.name,_that.region,_that.modeLock,_that.modeLockAuto,_that.autoReconnect,_that.color);case _:
+return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.pinMode,_that.light,_that.pinLight,_that.assist,_that.pinAssist,_that.startupLight,_that.startupModeId,_that.startupAssist,_that.lastSeen,_that.name,_that.region,_that.autoReconnect,_that.color);case _:
   return orElse();
 
 }
@@ -745,10 +743,10 @@ return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.p
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id, @JsonKey(name: 'mode')  int legacyMode,  String modeId,  List<CustomMode> customModes, @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinMode,  bool light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinLight,  int assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinAssist,  bool? startupLight,  String? startupModeId,  int? startupAssist,  LastSeen? lastSeen,  String name,  BikeRegion? region,  bool modeLock,  bool modeLockAuto,  bool autoReconnect,  int color)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( String id, @JsonKey(name: 'mode')  int legacyMode,  String modeId,  List<CustomMode> customModes, @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinMode,  bool light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinLight,  int assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinAssist,  bool? startupLight,  String? startupModeId,  int? startupAssist,  LastSeen? lastSeen,  String name,  BikeRegion? region,  bool autoReconnect,  int color)  $default,) {final _that = this;
 switch (_that) {
 case _BikeState():
-return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.pinMode,_that.light,_that.pinLight,_that.assist,_that.pinAssist,_that.startupLight,_that.startupModeId,_that.startupAssist,_that.lastSeen,_that.name,_that.region,_that.modeLock,_that.modeLockAuto,_that.autoReconnect,_that.color);case _:
+return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.pinMode,_that.light,_that.pinLight,_that.assist,_that.pinAssist,_that.startupLight,_that.startupModeId,_that.startupAssist,_that.lastSeen,_that.name,_that.region,_that.autoReconnect,_that.color);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -765,10 +763,10 @@ return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.p
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id, @JsonKey(name: 'mode')  int legacyMode,  String modeId,  List<CustomMode> customModes, @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinMode,  bool light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinLight,  int assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinAssist,  bool? startupLight,  String? startupModeId,  int? startupAssist,  LastSeen? lastSeen,  String name,  BikeRegion? region,  bool modeLock,  bool modeLockAuto,  bool autoReconnect,  int color)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( String id, @JsonKey(name: 'mode')  int legacyMode,  String modeId,  List<CustomMode> customModes, @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinMode,  bool light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinLight,  int assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson)  PinState pinAssist,  bool? startupLight,  String? startupModeId,  int? startupAssist,  LastSeen? lastSeen,  String name,  BikeRegion? region,  bool autoReconnect,  int color)?  $default,) {final _that = this;
 switch (_that) {
 case _BikeState() when $default != null:
-return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.pinMode,_that.light,_that.pinLight,_that.assist,_that.pinAssist,_that.startupLight,_that.startupModeId,_that.startupAssist,_that.lastSeen,_that.name,_that.region,_that.modeLock,_that.modeLockAuto,_that.autoReconnect,_that.color);case _:
+return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.pinMode,_that.light,_that.pinLight,_that.assist,_that.pinAssist,_that.startupLight,_that.startupModeId,_that.startupAssist,_that.lastSeen,_that.name,_that.region,_that.autoReconnect,_that.color);case _:
   return null;
 
 }
@@ -780,7 +778,7 @@ return $default(_that.id,_that.legacyMode,_that.modeId,_that.customModes,_that.p
 @JsonSerializable()
 
 class _BikeState extends BikeState {
-  const _BikeState({required this.id, @JsonKey(name: 'mode') this.legacyMode = 0, this.modeId = '', final  List<CustomMode> customModes = const <CustomMode>[], @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) this.pinMode = PinState.open, required this.light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) this.pinLight = PinState.open, required this.assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) this.pinAssist = PinState.open, this.startupLight, this.startupModeId, this.startupAssist, this.lastSeen, required this.name, this.region, this.modeLock = false, this.modeLockAuto = false, this.autoReconnect = true, this.color = 0}): assert(assist >= 0),assert(assist <= 4),assert(color >= 0),_customModes = customModes,super._();
+  const _BikeState({required this.id, @JsonKey(name: 'mode') this.legacyMode = 0, this.modeId = '', final  List<CustomMode> customModes = const <CustomMode>[], @JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) this.pinMode = PinState.open, required this.light, @JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) this.pinLight = PinState.open, required this.assist, @JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) this.pinAssist = PinState.open, this.startupLight, this.startupModeId, this.startupAssist, this.lastSeen, required this.name, this.region, this.autoReconnect = true, this.color = 0}): assert(assist >= 0),assert(assist <= 4),assert(color >= 0),_customModes = customModes,super._();
   factory _BikeState.fromJson(Map<String, dynamic> json) => _$BikeStateFromJson(json);
 
 @override final  String id;
@@ -804,8 +802,6 @@ class _BikeState extends BikeState {
 @override final  LastSeen? lastSeen;
 @override final  String name;
 @override final  BikeRegion? region;
-@override@JsonKey() final  bool modeLock;
-@override@JsonKey() final  bool modeLockAuto;
 @override@JsonKey() final  bool autoReconnect;
 @override@JsonKey() final  int color;
 
@@ -822,16 +818,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.legacyMode, legacyMode) || other.legacyMode == legacyMode)&&(identical(other.modeId, modeId) || other.modeId == modeId)&&const DeepCollectionEquality().equals(other._customModes, _customModes)&&(identical(other.pinMode, pinMode) || other.pinMode == pinMode)&&(identical(other.light, light) || other.light == light)&&(identical(other.pinLight, pinLight) || other.pinLight == pinLight)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.pinAssist, pinAssist) || other.pinAssist == pinAssist)&&(identical(other.startupLight, startupLight) || other.startupLight == startupLight)&&(identical(other.startupModeId, startupModeId) || other.startupModeId == startupModeId)&&(identical(other.startupAssist, startupAssist) || other.startupAssist == startupAssist)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.modeLock, modeLock) || other.modeLock == modeLock)&&(identical(other.modeLockAuto, modeLockAuto) || other.modeLockAuto == modeLockAuto)&&(identical(other.autoReconnect, autoReconnect) || other.autoReconnect == autoReconnect)&&(identical(other.color, color) || other.color == color));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _BikeState&&(identical(other.id, id) || other.id == id)&&(identical(other.legacyMode, legacyMode) || other.legacyMode == legacyMode)&&(identical(other.modeId, modeId) || other.modeId == modeId)&&const DeepCollectionEquality().equals(other._customModes, _customModes)&&(identical(other.pinMode, pinMode) || other.pinMode == pinMode)&&(identical(other.light, light) || other.light == light)&&(identical(other.pinLight, pinLight) || other.pinLight == pinLight)&&(identical(other.assist, assist) || other.assist == assist)&&(identical(other.pinAssist, pinAssist) || other.pinAssist == pinAssist)&&(identical(other.startupLight, startupLight) || other.startupLight == startupLight)&&(identical(other.startupModeId, startupModeId) || other.startupModeId == startupModeId)&&(identical(other.startupAssist, startupAssist) || other.startupAssist == startupAssist)&&(identical(other.lastSeen, lastSeen) || other.lastSeen == lastSeen)&&(identical(other.name, name) || other.name == name)&&(identical(other.region, region) || other.region == region)&&(identical(other.autoReconnect, autoReconnect) || other.autoReconnect == autoReconnect)&&(identical(other.color, color) || other.color == color));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hashAll([runtimeType,id,legacyMode,modeId,const DeepCollectionEquality().hash(_customModes),pinMode,light,pinLight,assist,pinAssist,startupLight,startupModeId,startupAssist,lastSeen,name,region,modeLock,modeLockAuto,autoReconnect,color]);
+int get hashCode => Object.hash(runtimeType,id,legacyMode,modeId,const DeepCollectionEquality().hash(_customModes),pinMode,light,pinLight,assist,pinAssist,startupLight,startupModeId,startupAssist,lastSeen,name,region,autoReconnect,color);
 
 @override
 String toString() {
-  return 'BikeState(id: $id, legacyMode: $legacyMode, modeId: $modeId, customModes: $customModes, pinMode: $pinMode, light: $light, pinLight: $pinLight, assist: $assist, pinAssist: $pinAssist, startupLight: $startupLight, startupModeId: $startupModeId, startupAssist: $startupAssist, lastSeen: $lastSeen, name: $name, region: $region, modeLock: $modeLock, modeLockAuto: $modeLockAuto, autoReconnect: $autoReconnect, color: $color)';
+  return 'BikeState(id: $id, legacyMode: $legacyMode, modeId: $modeId, customModes: $customModes, pinMode: $pinMode, light: $light, pinLight: $pinLight, assist: $assist, pinAssist: $pinAssist, startupLight: $startupLight, startupModeId: $startupModeId, startupAssist: $startupAssist, lastSeen: $lastSeen, name: $name, region: $region, autoReconnect: $autoReconnect, color: $color)';
 }
 
 
@@ -842,7 +838,7 @@ abstract mixin class _$BikeStateCopyWith<$Res> implements $BikeStateCopyWith<$Re
   factory _$BikeStateCopyWith(_BikeState value, $Res Function(_BikeState) _then) = __$BikeStateCopyWithImpl;
 @override @useResult
 $Res call({
- String id,@JsonKey(name: 'mode') int legacyMode, String modeId, List<CustomMode> customModes,@JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinMode, bool light,@JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinLight, int assist,@JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinAssist, bool? startupLight, String? startupModeId, int? startupAssist, LastSeen? lastSeen, String name, BikeRegion? region, bool modeLock, bool modeLockAuto, bool autoReconnect, int color
+ String id,@JsonKey(name: 'mode') int legacyMode, String modeId, List<CustomMode> customModes,@JsonKey(name: 'modeLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinMode, bool light,@JsonKey(name: 'lightLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinLight, int assist,@JsonKey(name: 'assistLocked', fromJson: _pinFromJson, toJson: _pinToJson) PinState pinAssist, bool? startupLight, String? startupModeId, int? startupAssist, LastSeen? lastSeen, String name, BikeRegion? region, bool autoReconnect, int color
 });
 
 
@@ -859,7 +855,7 @@ class __$BikeStateCopyWithImpl<$Res>
 
 /// Create a copy of BikeState
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? legacyMode = null,Object? modeId = null,Object? customModes = null,Object? pinMode = null,Object? light = null,Object? pinLight = null,Object? assist = null,Object? pinAssist = null,Object? startupLight = freezed,Object? startupModeId = freezed,Object? startupAssist = freezed,Object? lastSeen = freezed,Object? name = null,Object? region = freezed,Object? modeLock = null,Object? modeLockAuto = null,Object? autoReconnect = null,Object? color = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? legacyMode = null,Object? modeId = null,Object? customModes = null,Object? pinMode = null,Object? light = null,Object? pinLight = null,Object? assist = null,Object? pinAssist = null,Object? startupLight = freezed,Object? startupModeId = freezed,Object? startupAssist = freezed,Object? lastSeen = freezed,Object? name = null,Object? region = freezed,Object? autoReconnect = null,Object? color = null,}) {
   return _then(_BikeState(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as String,legacyMode: null == legacyMode ? _self.legacyMode : legacyMode // ignore: cast_nullable_to_non_nullable
@@ -876,9 +872,7 @@ as String?,startupAssist: freezed == startupAssist ? _self.startupAssist : start
 as int?,lastSeen: freezed == lastSeen ? _self.lastSeen : lastSeen // ignore: cast_nullable_to_non_nullable
 as LastSeen?,name: null == name ? _self.name : name // ignore: cast_nullable_to_non_nullable
 as String,region: freezed == region ? _self.region : region // ignore: cast_nullable_to_non_nullable
-as BikeRegion?,modeLock: null == modeLock ? _self.modeLock : modeLock // ignore: cast_nullable_to_non_nullable
-as bool,modeLockAuto: null == modeLockAuto ? _self.modeLockAuto : modeLockAuto // ignore: cast_nullable_to_non_nullable
-as bool,autoReconnect: null == autoReconnect ? _self.autoReconnect : autoReconnect // ignore: cast_nullable_to_non_nullable
+as BikeRegion?,autoReconnect: null == autoReconnect ? _self.autoReconnect : autoReconnect // ignore: cast_nullable_to_non_nullable
 as bool,color: null == color ? _self.color : color // ignore: cast_nullable_to_non_nullable
 as int,
   ));

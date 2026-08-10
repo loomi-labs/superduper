@@ -44,6 +44,101 @@ String? speedTraceLine({
         ? null
         : 'Speed $speedKmh km/h, wire $wire';
 
+/// Whether the app has to keep working for [bike] with no UI on screen.
+///
+/// The one rule both layers read: the keep-alive that holds the control loop,
+/// and the Android foreground service that holds the process. Two hand-written
+/// copies of it are what let a locked value stop being enforced the moment the
+/// page was popped.
+///
+/// Both conditions are continuous work — a switching mode limits the speed in
+/// the rider's pocket, a locked padlock holds its value there. A startup pin is
+/// deliberately not one of them: it needs the app awake for the one connect
+/// after a power cycle, which does not earn a permanent notification.
+bool needsBackgroundEnforcement(BikeState bike) =>
+    bike.needsSpeedSwitching || bike.anyPinLocked;
+
+/// What the page says at its foot about the work that goes on with no UI.
+enum BackgroundStatus {
+  /// Nothing has to keep running, so the page says nothing.
+  none,
+
+  /// The service holds the phone awake for it.
+  active,
+
+  /// It has to keep running, but nothing can hold the phone awake for it: the
+  /// notification permission was refused, or the platform has no service.
+  degraded,
+}
+
+/// The status of the background work for [bike].
+///
+/// [hasService] is false where there is no foreground service to run (iOS), and
+/// [notificationsBlocked] is true where the rider refused the notification the
+/// service needs. Both come in as values rather than being read here, so the
+/// rule can be tested on any platform.
+BackgroundStatus backgroundStatusFor(BikeState bike,
+    {required bool hasService, required bool notificationsBlocked}) {
+  if (!needsBackgroundEnforcement(bike)) {
+    return BackgroundStatus.none;
+  }
+  if (!hasService || notificationsBlocked) {
+    return BackgroundStatus.degraded;
+  }
+  return BackgroundStatus.active;
+}
+
+/// What [backgroundStatusFor] tells the rider, or null when there is nothing to
+/// say. [hasService] is false where there is no service to ask for at all, and
+/// the rider can do nothing about it.
+String? backgroundStatusText(BackgroundStatus status, BikeState bike,
+    {required bool hasService}) {
+  // Named rather than "your locks": a switching mode is the thing riders came
+  // for, and its name is what they picked.
+  final what = bike.needsSpeedSwitching ? bike.selectedMode.name : 'your locks';
+  return switch (status) {
+    BackgroundStatus.none => null,
+    BackgroundStatus.active =>
+      'Keeping $what active while your phone is locked. Uses some battery.',
+    BackgroundStatus.degraded when !hasService =>
+      'Locks and speed limiting only work while the app is open.',
+    BackgroundStatus.degraded =>
+      'Notifications are off, so $what can stop when your phone is locked. '
+          'Turn notifications on to keep it active.',
+  };
+}
+
+/// Whether this platform can hold the app awake with no UI.
+bool get _hasBackgroundService => Platform.isAndroid;
+
+/// Whether a padlock cannot be held while the phone is in a pocket, and the
+/// rider can do something about it.
+///
+/// A platform with no service at all is deliberately not marked here: every
+/// padlock would carry a warning nobody can act on. The page foot says that
+/// once, for the whole page.
+bool pinDegraded(PinState pin,
+        {required bool hasService, required bool notificationsBlocked}) =>
+    pin == PinState.locked && hasService && notificationsBlocked;
+
+/// Whether the rider refused the notification the foreground service needs, so
+/// a locked padlock cannot be held while the phone is in a pocket.
+///
+/// Not gated on the platform: the pins show as degraded from this one flag, and
+/// [backgroundStatusFor] adds what the platform can do.
+@Riverpod(keepAlive: true)
+class NotificationsBlocked extends _$NotificationsBlocked {
+  @override
+  bool build() => false;
+
+  void set(bool blocked) {
+    if (state != blocked) {
+      log.i(SDLogger.bike, 'Notification permission blocked: $blocked');
+    }
+    state = blocked;
+  }
+}
+
 @riverpod
 class Bike extends _$Bike {
   /// A speed stream quieter than this is assumed to have died: the bike stops
@@ -180,6 +275,7 @@ class Bike extends _$Bike {
     // sample assert a wire that mode never rides.
     _assertedWire = initialWireFor(bike.selectedMode);
     _syncKeepAlive(bike);
+    _refreshNotificationPermission();
     if (bike.needsSpeedSwitching) {
       // A switching mode is usually already active on the first build: it is
       // the default mode of a CH bike and it comes back from bikes.json that
@@ -322,10 +418,10 @@ class Bike extends _$Bike {
     _logD(line);
   }
 
-  /// A switching mode and the Background Lock both need the control loop to
-  /// keep running when the UI is gone.
+  /// Holds the control loop alive when the UI is gone, for as long as
+  /// [needsBackgroundEnforcement] says there is something to enforce.
   void _syncKeepAlive(BikeState bike) {
-    var needed = bike.modeLock || bike.needsSpeedSwitching;
+    var needed = needsBackgroundEnforcement(bike);
     if (needed == (_keepAlive != null)) {
       return;
     }
@@ -337,6 +433,26 @@ class Bike extends _$Bike {
       _keepAlive?.close();
       _keepAlive = null;
     }
+  }
+
+  /// Reads the notification permission without raising a dialog, so a padlock
+  /// shows as degraded from the first frame after an app start.
+  ///
+  /// The flag has to be refreshed here and not only when the app asks: a rider
+  /// who refused once keeps the refusal, and a flag that starts clean on every
+  /// launch would say the padlock works for the rest of the session.
+  void _refreshNotificationPermission() {
+    if (!_hasBackgroundService) {
+      return;
+    }
+    // Deferred: this runs from build, where ref may not be read yet.
+    unawaited(Future<void>.microtask(() async {
+      final granted = await Permission.notification.isGranted;
+      if (!ref.mounted) {
+        return;
+      }
+      ref.read(notificationsBlockedProvider.notifier).set(!granted);
+    }));
   }
 
   void _resetReadTimer() {
@@ -618,10 +734,6 @@ class Bike extends _$Bike {
         nowSwitching: nowSwitching,
         assertedWire: _assertedWire);
     var wire = computeWire();
-    if (wasSwitching && !nowSwitching && state.modeLockAuto) {
-      // Only the lock a switching mode turned on is turned off again.
-      newState = newState.copyWith(modeLock: false, modeLockAuto: false);
-    }
     var status = ref.read(connectionHandlerProvider(state.id));
     if (saveToBike) {
       if (status != SDBluetoothConnectionState.connected) {
@@ -690,12 +802,16 @@ class Bike extends _$Bike {
       _logD('Wrote data to bike: $data');
     }
     _assertedWire = wire;
-    var lockChanged = state.modeLock != newState.modeLock;
+    // Read here rather than before the write, which may not return for
+    // seconds: another write can land in that window and start the service
+    // already.
+    final wasNeeded = needsBackgroundEnforcement(state);
+    final nowNeeded = needsBackgroundEnforcement(newState);
     ref.read(bikesDBProvider.notifier).saveBike(newState);
     state = newState;
     _syncKeepAlive(newState);
-    if (lockChanged) {
-      _syncBackgroundLock(newState.modeLock);
+    if (wasNeeded != nowNeeded) {
+      unawaited(_syncBackgroundService(nowNeeded));
     }
     // Re-armed on any mode change, not only on leaving: switching from one
     // custom mode to another has to re-run the setup for the new one.
@@ -704,6 +820,11 @@ class Bike extends _$Bike {
     }
     if (nowSwitching) {
       _enterSwitchingMode();
+    }
+    if (!ref.mounted) {
+      // Releasing the keep-alive above disposes this notifier on the spot when
+      // the page is already popped, and everything below needs ref.
+      return;
     }
     updateStateData();
   }
@@ -726,39 +847,46 @@ class Bike extends _$Bike {
       if (!ref.mounted) {
         return;
       }
-      await _enableAutoBackgroundLock();
+      // A bike that comes back from bikes.json on a switching mode reaches this
+      // without ever passing the transition in [writeStateData]. Asked again
+      // rather than assumed: the rider can leave the mode while the ride data
+      // request above is still in flight.
+      if (!needsBackgroundEnforcement(state)) {
+        return;
+      }
+      await _syncBackgroundService(true);
     }));
   }
 
-  /// A switching mode has to keep limiting the speed while the phone sits in a
-  /// pocket, which on Android needs the foreground service. A lock the rider
-  /// turned on themselves is left alone (and never auto-disabled).
-  Future<void> _enableAutoBackgroundLock() async {
-    if (!Platform.isAndroid) {
+  /// Starts or stops the foreground service so it matches what has to be
+  /// enforced. Idempotent, so it can overlap with the widget path, and it runs
+  /// even when no BikePage is mounted.
+  ///
+  /// The Background Lock button used to ask for the notification permission and
+  /// the battery exemption on a deliberate tap. With the button gone, this is
+  /// that moment: a padlock reaching locked, or a switching mode being
+  /// selected.
+  Future<void> _syncBackgroundService(bool needed) async {
+    if (!_hasBackgroundService) {
       return;
     }
-    if (!ref.mounted || !state.needsSpeedSwitching || state.modeLock) {
-      return;
+    _initBackgroundService();
+    if (needed) {
+      final status = await Permission.notification.request();
+      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+      if (!ref.mounted) {
+        return;
+      }
+      ref.read(notificationsBlockedProvider.notifier).set(!status.isGranted);
+      if (!status.isGranted) {
+        // Started all the same: the service may still hold the process, and a
+        // rider who gets the enforcement is better off than one who does not.
+        // Nothing is promised either way — the page shows the padlocks as
+        // degraded while this flag is set.
+        _logW('Notification permission refused, the pins are degraded');
+      }
     }
-    await Permission.notification.request();
-    await FlutterForegroundTask.requestIgnoreBatteryOptimization();
-    if (!ref.mounted || !state.needsSpeedSwitching || state.modeLock) {
-      return;
-    }
-    _logI('Speed switching: turning Background Lock on');
-    writeStateData(state.copyWith(modeLock: true, modeLockAuto: true),
-        saveToBike: false);
-  }
-
-  /// Keeps the foreground service in step with [BikeState.modeLock] even when
-  /// no BikePage is mounted to do it. Idempotent, so it can overlap with the
-  /// widget path.
-  void _syncBackgroundLock(bool enabled) {
-    if (!Platform.isAndroid) {
-      return;
-    }
-    _initBackgroundLockService();
-    unawaited(_syncBackgroundLockService(enabled));
+    await _setBackgroundService(needed);
   }
 
   void toggleLight() async {
@@ -861,20 +989,12 @@ class Bike extends _$Bike {
     writeStateData(state.copyWith(pinAssist: next), saveToBike: false);
   }
 
-  void toggleBackgroundLock() async {
-    _logD('Toggling background lock: ${!state.modeLock}');
-    // The rider took over the lock, so dynamic mode stops managing it.
-    writeStateData(
-        state.copyWith(modeLock: !state.modeLock, modeLockAuto: false),
-        saveToBike: false);
-  }
-
   /// Deletes the bike and tears this notifier down with it.
   ///
-  /// Removing the record is not enough: a switching mode and the Background
-  /// Lock hold the notifier alive without any UI, so its poll, its samples and
-  /// the foreground service would all keep running — and the first write would
-  /// call [BikesDB.saveBike], putting the deleted bike straight back into
+  /// Removing the record is not enough: a switching mode and a locked padlock
+  /// hold the notifier alive without any UI, so its poll, its samples and the
+  /// foreground service would all keep running — and the first write would call
+  /// [BikesDB.saveBike], putting the deleted bike straight back into
   /// bikes.json.
   void deleteStateData(BikeState bike) {
     _logI('Deleting bike: ${bike.name}');
@@ -884,8 +1004,8 @@ class Bike extends _$Bike {
     _speedSub?.cancel();
     _speedSub = null;
     ref.read(bikesDBProvider.notifier).deleteBike(bike);
-    if (bike.modeLock) {
-      _syncBackgroundLock(false);
+    if (needsBackgroundEnforcement(bike)) {
+      unawaited(_syncBackgroundService(false));
     }
     // Last: with no UI listening this disposes the provider.
     _keepAlive?.close();
@@ -902,11 +1022,11 @@ class BikePage extends ConsumerStatefulWidget {
 }
 
 @pragma('vm:entry-point')
-void _startBackgroundLockCallback() {
-  FlutterForegroundTask.setTaskHandler(_BackgroundLockTaskHandler());
+void _startBackgroundServiceCallback() {
+  FlutterForegroundTask.setTaskHandler(_BackgroundServiceTaskHandler());
 }
 
-class _BackgroundLockTaskHandler extends TaskHandler {
+class _BackgroundServiceTaskHandler extends TaskHandler {
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
 
@@ -917,11 +1037,13 @@ class _BackgroundLockTaskHandler extends TaskHandler {
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
 }
 
-void _initBackgroundLockService() {
+void _initBackgroundService() {
   FlutterForegroundTask.init(
     androidNotificationOptions: AndroidNotificationOptions(
+      // The id an installed app already has its channel under. A new one would
+      // orphan the channel the rider may have tuned.
       channelId: 'notification_channel_id',
-      channelName: 'Background Lock Notification',
+      channelName: 'Background service',
       priority: NotificationPriority.LOW,
       channelImportance: NotificationChannelImportance.LOW,
     ),
@@ -932,14 +1054,14 @@ void _initBackgroundLockService() {
   );
 }
 
-Future<void> _syncBackgroundLockService(bool enabled) async {
+Future<void> _setBackgroundService(bool enabled) async {
   final running = await FlutterForegroundTask.isRunningService;
   if (enabled && !running) {
     await FlutterForegroundTask.startService(
       serviceId: 256,
-      notificationTitle: 'SuperDuper Background Lock On',
+      notificationTitle: 'SuperDuper is holding your bike settings',
       notificationText: 'Tap to return to the app',
-      callback: _startBackgroundLockCallback,
+      callback: _startBackgroundServiceCallback,
     );
   } else if (!enabled && running) {
     await FlutterForegroundTask.stopService();
@@ -963,8 +1085,8 @@ class _ForegroundNotificationWrapperState
   void initState() {
     super.initState();
     if (Platform.isAndroid) {
-      _initBackgroundLockService();
-      _syncBackgroundLockService(widget.enabled);
+      _initBackgroundService();
+      _setBackgroundService(widget.enabled);
     }
   }
 
@@ -972,7 +1094,7 @@ class _ForegroundNotificationWrapperState
   void didUpdateWidget(ForegroundNotificationWrapper oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (Platform.isAndroid && oldWidget.enabled != widget.enabled) {
-      _syncBackgroundLockService(widget.enabled);
+      _setBackgroundService(widget.enabled);
     }
   }
 
@@ -1008,7 +1130,10 @@ class BikePageState extends ConsumerState<BikePage> {
     // bike on reconnect (_onConnectionState), whether or not this page is
     // mounted.
     return ForegroundNotificationWrapper(
-      enabled: bike.modeLock,
+      // The same rule the notifier keeps its control loop alive by: two
+      // hand-written copies of it are what let a locked value lose its
+      // enforcement while the page said it was locked.
+      enabled: needsBackgroundEnforcement(bike),
       child: Scaffold(
           backgroundColor: SDSurface.page,
           body: CustomScrollView(
@@ -1124,11 +1249,10 @@ class BikePageState extends ConsumerState<BikePage> {
                     // Assist Control
                     EnhancedAssistControlWidget(bike: bike),
 
-                    // Background Lock (Android only)
-                    if (Platform.isAndroid) ...[
-                      const SizedBox(height: 16),
-                      EnhancedBackgroundLockWidget(bike: bike),
-                    ],
+                    // What the app keeps doing with the page closed. A status
+                    // line, not a control: the rider already asked for the work
+                    // by locking a value or picking a switching mode.
+                    BackgroundStatusWidget(bike: bike),
 
                     // Help Section
                     Padding(
@@ -1243,29 +1367,44 @@ class EnhancedConnectionWidget extends ConsumerWidget {
   }
 }
 
+/// [pinDegraded] with the platform and the permission filled in from the app.
+bool _pinDegradedNow(WidgetRef ref, PinState pin) => pinDegraded(pin,
+    hasService: _hasBackgroundService,
+    notificationsBlocked: ref.watch(notificationsBlockedProvider));
+
 class EnhancedLockWidget extends StatelessWidget {
   const EnhancedLockWidget({
     super.key,
     required this.locked,
     required this.onTap,
     required this.tooltip,
+    this.degraded = false,
   });
 
   final bool locked;
   final VoidCallback onTap;
   final String tooltip;
 
+  /// The lock is on, but the app cannot hold it while the phone is in a
+  /// pocket. Shown rather than hidden: a padlock that quietly stops working is
+  /// the bug this page was fixed for.
+  final bool degraded;
+
   @override
   Widget build(BuildContext context) {
     return IconButton(
-      tooltip: tooltip,
+      tooltip: degraded
+          ? '$tooltip (only holds while the app is open)'
+          : tooltip,
       iconSize: 20,
       padding: const EdgeInsets.all(12),
       constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
       onPressed: onTap,
       icon: Icon(
         locked ? Icons.lock : Icons.lock_open,
-        color: locked ? SDSurface.text : SDSurface.muted,
+        color: degraded
+            ? SDSurface.warning
+            : (locked ? SDSurface.text : SDSurface.muted),
       ),
     );
   }
@@ -1293,6 +1432,7 @@ class EnhancedLightControlWidget extends ConsumerWidget {
       onTap: connected ? bikeControl.toggleLight : null,
       trailing: EnhancedLockWidget(
         locked: bike.pinLight == PinState.locked,
+        degraded: _pinDegradedNow(ref, bike.pinLight),
         onTap: bikeControl.toggleLightLocked,
         tooltip: 'Lock the light',
       ),
@@ -1329,6 +1469,7 @@ class EnhancedModeControlWidget extends ConsumerWidget {
           enabled: connected,
           trailing: EnhancedLockWidget(
             locked: bike.pinMode == PinState.locked,
+            degraded: _pinDegradedNow(ref, bike.pinMode),
             onTap: bikeControl.toggleModeLocked,
             tooltip: 'Lock the mode',
           ),
@@ -1374,49 +1515,48 @@ class EnhancedModeControlWidget extends ConsumerWidget {
   }
 }
 
-class EnhancedBackgroundLockWidget extends ConsumerWidget {
-  const EnhancedBackgroundLockWidget({super.key, required this.bike});
+/// The read-only line where the Background Lock card used to be: what the app
+/// keeps doing while the rider is not looking, and what it cannot do.
+class BackgroundStatusWidget extends ConsumerWidget {
+  const BackgroundStatusWidget({super.key, required this.bike});
   final BikeState bike;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
-    return Column(
-      children: [
-        ControlCard(
-          colorIndex: bike.color,
-          title: "Background Lock",
-          titleIcon: Icons.phonelink_lock,
-          active: bike.modeLock,
-          // No [enabled] gate: Background Lock is app state, and works while
-          // the bike is out of range, exactly like the lock buttons.
-          onTap: () async {
-            await Permission.notification.request();
-            if (Platform.isAndroid) {
-              await FlutterForegroundTask.requestIgnoreBatteryOptimization();
-            }
-            bikeControl.toggleBackgroundLock();
-          },
-        ),
-        Padding(
-          padding: const EdgeInsets.only(top: 12.0, left: 8.0, right: 8.0),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Flexible(
-                child: Text(
-                  "Background Lock may cause phone battery drain. See Help for more info.",
-                  style: Theme.of(context).textTheme.bodySmall!.copyWith(
-                        color: Colors.grey,
-                        fontSize: 12,
-                      ),
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            ],
+    final status = backgroundStatusFor(bike,
+        hasService: _hasBackgroundService,
+        notificationsBlocked: ref.watch(notificationsBlockedProvider));
+    final text =
+        backgroundStatusText(status, bike, hasService: _hasBackgroundService);
+    if (text == null) {
+      return const SizedBox.shrink();
+    }
+    // Marked only where the rider can act. A platform that has no service at
+    // all gets a plain line: a warning nobody can answer is noise.
+    final actionable =
+        status == BackgroundStatus.degraded && _hasBackgroundService;
+    return Padding(
+      padding: const EdgeInsets.only(top: 20.0, left: 8.0, right: 8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (actionable) ...[
+            const Icon(Icons.warning_amber_rounded,
+                size: 16, color: SDSurface.label),
+            const SizedBox(width: 6),
+          ],
+          Flexible(
+            child: Text(
+              text,
+              style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                    color: SDSurface.muted,
+                    fontSize: 12,
+                  ),
+              textAlign: TextAlign.center,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -1441,6 +1581,7 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
       enabled: connected,
       trailing: EnhancedLockWidget(
         locked: bike.pinAssist == PinState.locked,
+        degraded: _pinDegradedNow(ref, bike.pinAssist),
         onTap: bikeControl.toggleAssistLocked,
         tooltip: 'Lock the assist',
       ),

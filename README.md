@@ -28,7 +28,7 @@ Features:
 - Quickly switch between multiple bikes
 - Lock settings, like Mode, to automatically switch when the bike is turned on and the app is running
 - Custom modes: pick your own speed limit, with or without throttle, on any bike
-- (Android only) Background Lock, which will keep your bike on whatever settings you set it at, even the phone is locked. Bikes turn it on by themselves while a dynamic custom mode is selected
+- (Android only) The app keeps your locks and your speed limiting working while the phone is locked, on its own
 - Open source
 
 ## Getting Started
@@ -125,13 +125,13 @@ stays in that first profile, and that profile's own cap can be as high as 45 km/
 app reconnects. It is never unlimited, but it is not your limit either. The mode editor spells
 out the exact number for each mode while you set it up.
 
-On Android, selecting a switching custom mode automatically turns on Background Lock (and shows
-its notification), so the switching keeps working while your phone is locked or in your pocket.
-New CH bikes start in such a mode, so this also happens the first time you open a newly added
-bike, without you selecting anything. It's turned off again when you leave the mode, unless you
-had turned Background Lock on yourself. On iOS there is no background service, so if the app is
-closed or the phone is locked the switching stops and the bike stays in the profile that was
-written last. A mode that exactly matches a firmware profile needs none of this.
+On Android, a switching custom mode keeps the app running in the background (and shows a
+notification), so the switching keeps working while your phone is locked or in your pocket. New
+CH bikes start in such a mode, so this also happens the first time you open a newly added bike,
+without you selecting anything. It stops when you leave the mode, unless one of your locks still
+needs it. On iOS there is no background service, so if the app is closed or the phone is locked
+the switching stops and the bike stays in the profile that was written last. A mode that exactly
+matches a firmware profile needs none of this.
 
 #### Coming from an older version
 
@@ -152,9 +152,13 @@ Changes the amount of assist your bike will provide while pedaling.
 0 is no assist, 4 is full assist. This does not affect throttle power.
 Each level is a button of its own, so one tap picks the level you want.
 
-### Background Lock (Android Only)
+### Running in the background (Android only)
 
-**Uses extra battery.** Locks the current "locked" settings in the background. This means that if you close the app, or your phone goes to sleep, the settings will continue to be applied.
+**Uses extra battery.** There is nothing to switch on. Whenever a lock is on, or a switching
+custom mode is selected, the app keeps itself running and shows a notification, so your settings
+are still applied after you close the app or your phone goes to sleep. It stops on its own when
+you open the last lock and leave the switching mode. A line at the foot of the bike page says
+what it is doing, and says so too if you refused the notification it needs.
 
 ### Auto-reconnect
 
@@ -181,13 +185,15 @@ You can also try restarting the bike and your phone.
 
 Finally, older bike firmware may not be supported. Make sure your bike firmware is up to date from the official app.
 
-### How does Background Lock work and how is it different from the setting lock?
+### Does a lock still work when the app is closed?
 
-The setting lock feature tells Superduper to ignore whatever the bike is set to and use the settings you have set in the app. This is useful for when the bike starts up and settings reset, like lights and mode. However, the app only enforces the setting lock when the app is open. If you close the app, the bike will go back to whatever settings it was set to. To use it, long press the setting button you want to lock.
+On Android, yes. The setting lock tells SuperDuper to ignore whatever the bike is set to and use
+the setting you locked in the app. This is useful for when the bike starts up and its settings
+reset, like lights and mode. A lock, or a switching custom mode, keeps the app running in the
+background on its own, so the setting is still applied while your phone is in your pocket. It
+takes extra battery, so it stops as soon as nothing needs it.
 
-Background Lock is a feature that will keep the bike on the settings you set in the app, even if the app is closed. This is useful for when you want to leave the bike on a certain setting, like lights and mode, but don't want to keep the app open. For now, this feature is only available on Android. It also takes extra battery to keep the app running in the background.
-
-It is usually yours to turn on and off, with one exception: on Android, a bike with a custom mode that switches profiles selected turns Background Lock on automatically, because the speed switching has to keep running while your phone is locked. It is turned off again when you leave that mode, unless you had turned it on yourself. See [Custom Modes](#custom-modes).
+On iOS there is no background service, so a lock only works while the app is open.
 
 ### What's up with the bike names?
 
