@@ -314,6 +314,11 @@ class SelectorChip extends StatelessWidget {
   }
 }
 
+/// A bike row on the select page.
+///
+/// The card uses the same graphite surface as a [ControlCard], so the first
+/// screen and the bike page read as one app. The bike's colour enters only as
+/// an accent on [titleIcon], and only while [selected].
 class DiscoverCard extends StatelessWidget {
   final String? title;
   final String? subtitle;
@@ -347,15 +352,7 @@ class DiscoverCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    var defaultColors = getColor(colorIndex);
-    var startColor = defaultColors.start;
-    var endColor = defaultColors.end;
-    var textColor = defaultColors.fontColor();
-
-    if (!selected) {
-      startColor = Colors.grey[800]!;
-      endColor = Colors.grey[800]!;
-    }
+    final accent = getColor(colorIndex).accent();
 
     return Material(
       color: Colors.transparent,
@@ -364,15 +361,9 @@ class DiscoverCard extends StatelessWidget {
         onLongPress: onLongPress,
         child: Container(
           decoration: BoxDecoration(
+            color: SDSurface.card,
             borderRadius: BorderRadius.circular(26),
-            gradient: LinearGradient(
-              colors: [
-                startColor,
-                endColor,
-              ],
-              begin: Alignment.bottomLeft,
-              end: Alignment.topRight,
-            ),
+            border: Border.all(color: SDSurface.border),
           ),
           child: Padding(
             padding:
@@ -390,7 +381,7 @@ class DiscoverCard extends StatelessWidget {
                             Icon(
                               titleIcon,
                               size: 24, // Adjust the size as needed
-                              color: textColor,
+                              color: selected ? accent : SDSurface.muted,
                             ),
                           if (titleIcon !=
                               null) // Add spacing if there's an icon
@@ -401,7 +392,7 @@ class DiscoverCard extends StatelessWidget {
                               style: Theme.of(context)
                                   .textTheme
                                   .bodyMedium
-                                  ?.copyWith(color: textColor),
+                                  ?.copyWith(color: SDSurface.text),
                             ),
                         ],
                       ),
@@ -418,7 +409,8 @@ class DiscoverCard extends StatelessWidget {
                               style: const TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w300,
-                              ).copyWith(color: textColor),
+                                color: SDSurface.label,
+                              ),
                             ),
                           ],
                         )
@@ -431,7 +423,7 @@ class DiscoverCard extends StatelessWidget {
                         style: Theme.of(context)
                             .textTheme
                             .bodyMedium
-                            ?.copyWith(color: textColor),
+                            ?.copyWith(color: SDSurface.label),
                       )
                     : Container(),
               ],
