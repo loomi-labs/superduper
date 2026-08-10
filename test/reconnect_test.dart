@@ -145,6 +145,40 @@ void main() {
     });
   });
 
+  group('rungFor', () {
+    test('walks the ladder in order', () {
+      expect(
+          [for (var attempt = 0; attempt < 5; attempt++) rungFor(attempt)],
+          const [
+            Duration(seconds: 2),
+            Duration(seconds: 2),
+            Duration(seconds: 5),
+            Duration(seconds: 5),
+            Duration(seconds: 10),
+          ],
+          reason: 'the first attempts come fast, because a switching mode '
+              'limits nothing while it is disconnected');
+    });
+
+    test('stays on the last rung for ever', () {
+      for (final attempt in [5, 6, 20, 1000]) {
+        expect(rungFor(attempt), const Duration(seconds: 10),
+            reason: 'the ladder never gives up while auto-reconnect is on, so '
+                'attempt $attempt still has to have a rung');
+      }
+    });
+
+    test('a reset puts the ladder back on its first rung', () {
+      expect(rungFor(0), const Duration(seconds: 2),
+          reason: 'every successful connect resets the count to 0');
+    });
+
+    test('a count below zero reads as a reset', () {
+      expect(rungFor(-1), const Duration(seconds: 2),
+          reason: 'no caller can count down, but the ladder must not throw');
+    });
+  });
+
   group('handler wiring', () {
     test('a bike saved before the handler is built seeds it', () {
       final container = makeContainer();

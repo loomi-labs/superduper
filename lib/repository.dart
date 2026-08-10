@@ -50,6 +50,30 @@ bool shouldAttemptConnect({
     (adapterState == BluetoothAdapterState.on ||
         adapterState == BluetoothAdapterState.unknown);
 
+/// How long the retry ladder waits before each attempt, by the number of
+/// attempts already made since the last successful connect.
+///
+/// The first rungs are short because a mode that switches profiles by speed
+/// limits nothing at all while the bike is out of reach, so the app has to get
+/// back fast. The rungs then grow, because a bike that is really away — off, or
+/// out of range — must not be asked every two seconds for the rest of the day.
+const _reconnectRungs = <Duration>[
+  Duration(seconds: 2),
+  Duration(seconds: 2),
+  Duration(seconds: 5),
+  Duration(seconds: 5),
+  _reconnectCap,
+];
+
+/// The last rung, which the ladder then keeps for ever: there is no give-up
+/// state while auto-reconnect is on. Also the idle cadence, see [_nextDelay].
+const _reconnectCap = Duration(seconds: 10);
+
+/// The rung for [attempt], counted from 0 for the first attempt after a reset.
+/// Past the end of the ladder every attempt gets the last rung.
+Duration rungFor(int attempt) =>
+    _reconnectRungs[attempt.clamp(0, _reconnectRungs.length - 1)];
+
 BikeState? _findBike(List<BikeState> bikes, String deviceId) {
   for (final bike in bikes) {
     if (bike.id == deviceId) return bike;
@@ -95,7 +119,22 @@ class ConnectionHandler extends _$ConnectionHandler {
   /// long as nothing else ever selected another register.
   static const _settingsId = [209];
 
+  /// Timeout of the one attempt that follows a drop. Short on purpose: every
+  /// successful reconnect in the 2026-08-07 ride log took 0.4 s to 2.6 s, so a
+  /// bike that does not answer in three seconds is away, and the ladder should
+  /// have the next attempt rather than this one waiting.
+  static const _probeTimeout = Duration(seconds: 3);
+
+  /// Timeout of every other attempt, the ladder's included. The tick waits for
+  /// its attempt to finish before it arms the next rung, so the real gap
+  /// between two attempts is the rung plus this. Well under the cap keeps that
+  /// sum near the rung; the 35 s default made it the 35 s instead.
+  static const _retryTimeout = Duration(seconds: 5);
+
   Timer? _reconnectTimer;
+
+  /// Attempts made since the last successful connect, the ladder's position.
+  int _reconnectAttempt = 0;
   late BluetoothDevice _device;
   StreamSubscription<BluetoothConnectionState>? _deviceSub;
   StreamSubscription<List<int>>? _notifySub;
@@ -109,6 +148,13 @@ class ConnectionHandler extends _$ConnectionHandler {
 
   /// Guards [connect] against overlapping connection attempts.
   bool _connecting = false;
+
+  /// Whether the radio link was really up before the last disconnect event.
+  ///
+  /// A failed attempt ends in a disconnect event as well, and answering that
+  /// one with the immediate attempt of [_onDeviceConnectionState] would loop
+  /// every three seconds and step over the ladder completely.
+  bool _linkWasUp = false;
 
   /// Serializes the post-connect work of [_becomeReady]: `_readyAgain` records
   /// a (re)connect that arrived while a pass was still running, so it is re-run
@@ -172,21 +218,20 @@ class ConnectionHandler extends _$ConnectionHandler {
     // mounted at all.
     _adapterState = FlutterBluePlus.adapterStateNow;
     _adapterSub = FlutterBluePlus.adapterState.listen(_onAdapterState);
-    // Backstop only: disconnects reconnect immediately, see
-    // _onDeviceConnectionState. Retries anything that is not fully ready, not
-    // just disconnects, so a failed readiness pass cannot strand the bike.
+    // Retries anything that is not fully ready, not just disconnects, so a
+    // failed readiness pass cannot strand the bike. It carries the whole retry
+    // ladder: the attempt on the drop itself comes from
+    // _onDeviceConnectionState, and every attempt after that comes from here.
     //
-    // The timer keeps running while auto-reconnect is off and the body does
+    // The timer keeps running while auto-reconnect is off and the tick does
     // nothing: turning the setting back on then resumes within 10 s, with no
-    // re-arming to get wrong. The body idles the same way while the adapter is
+    // re-arming to get wrong. The tick idles the same way while the adapter is
     // off — there is nothing to retry against a radio that is not there — and
     // _onAdapterState makes the resume immediate rather than up to 10 s late.
-    _reconnectTimer = Timer.periodic(const Duration(seconds: 10), (t) {
-      if (!_shouldAttemptConnect) return;
-      if (state != SDBluetoothConnectionState.connected) {
-        connect();
-      }
-    });
+    //
+    // Armed with the cap and not with _nextDelay(): `state` cannot be read
+    // before build returns. The first tick is 10 s away, as it always was.
+    _armReconnectTimer(_reconnectCap);
     if (!_reconnectAllowed) {
       // Reported as disconnected rather than connecting: the Connect button
       // only enables on a disconnected bike, and this bike is now waiting for
@@ -236,6 +281,7 @@ class ConnectionHandler extends _$ConnectionHandler {
         'Connection state: $dstate (${_device.remoteId})');
     if (!ref.mounted) return;
     if (dstate == BluetoothConnectionState.connected) {
+      _linkWasUp = true;
       // Not "connected" for our purposes yet: services and notifications have
       // to be set up first, otherwise writes are silently dropped.
       _becomeReady();
@@ -244,7 +290,16 @@ class ConnectionHandler extends _$ConnectionHandler {
       // reconnect itself is the rider's choice.
       _cancelNotifications();
       state = SDBluetoothConnectionState.disconnected;
-      if (_shouldAttemptConnect) connect();
+      final wasUp = _linkWasUp;
+      _linkWasUp = false;
+      // One attempt straight away, with the short probe timeout: a bike that
+      // is still there answers it inside three seconds. Only for a link that
+      // was really up — the same event follows a failed attempt, and the
+      // ladder owns everything after the first failure.
+      if (wasUp && _shouldAttemptConnect) connect(timeout: _probeTimeout);
+      // A timer left over from the connected bike can be a full 10 s away, and
+      // the ladder has to have its first rung 2 s from the drop.
+      _armReconnectTimer(_nextDelay());
     }
   }
 
@@ -268,6 +323,38 @@ class ConnectionHandler extends _$ConnectionHandler {
     }
   }
 
+  /// The wait before the next tick. A bike that is connected, or one the gates
+  /// keep the app away from, has nothing to retry, so it waits the cap: a 2 s
+  /// wakeup that can never do anything only costs battery.
+  Duration _nextDelay() =>
+      state == SDBluetoothConnectionState.connected || !_shouldAttemptConnect
+          ? _reconnectCap
+          : rungFor(_reconnectAttempt);
+
+  void _armReconnectTimer(Duration delay) {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(delay, _onReconnectTick);
+  }
+
+  /// One rung of the ladder. Self-rescheduling rather than periodic, so each
+  /// wait can differ, and re-armed only after the attempt has finished: a rung
+  /// is the gap between two attempts and can never overlap the one before it.
+  Future<void> _onReconnectTick() async {
+    if (!ref.mounted) return;
+    if (state != SDBluetoothConnectionState.connected &&
+        _shouldAttemptConnect &&
+        // An attempt is still running. It would be dropped by the guard in
+        // connect(), and a dropped attempt must not cost a rung.
+        !_connecting) {
+      // Counted before the attempt: a successful one resets the count itself,
+      // and counting afterwards would undo that reset.
+      _reconnectAttempt++;
+      await connect(timeout: _retryTimeout);
+      if (!ref.mounted) return;
+    }
+    _armReconnectTimer(_nextDelay());
+  }
+
   void _dispose() {
     log.d(SDLogger.bluetooth, "DISPOSE ConnectionHandler");
     _deviceSub?.cancel();
@@ -277,7 +364,13 @@ class ConnectionHandler extends _$ConnectionHandler {
     _speedController.close();
   }
 
-  Future<void> connect() async {
+  /// Connects, waiting at most [timeout] for the bike to answer.
+  ///
+  /// The default serves the attempts a rider is waiting on — the Connect
+  /// button, the first connect of a bike page, the one after the radio comes
+  /// back. The drop probe asks for less ([_probeTimeout]) because the ladder
+  /// takes over from it within two seconds.
+  Future<void> connect({Duration timeout = _retryTimeout}) async {
     if (isFakeBike(deviceId)) {
       state = SDBluetoothConnectionState.connected;
       return;
@@ -295,10 +388,17 @@ class ConnectionHandler extends _$ConnectionHandler {
       }
 
       state = SDBluetoothConnectionState.connecting;
-      await _device.connect(mtu: null, license: License.free);
+      await _device.connect(mtu: null, license: License.free, timeout: timeout);
       if (!ref.mounted) return;
+      // Bounded as well: connect() returns without waiting when the platform
+      // reports that its request changed nothing, and this wait then has
+      // nothing to complete it. Unbounded, it holds _connecting for ever and
+      // every later attempt is dropped at the guard. The timeout goes on the
+      // stream and not on the future, because that one also drops the
+      // subscription instead of leaving one behind per failed attempt.
       await _device.connectionState
           .where((val) => val == BluetoothConnectionState.connected)
+          .timeout(timeout)
           .first;
       if (!ref.mounted) return;
       log.i(SDLogger.bluetooth, 'Connected to ${_device.remoteId.str}');
@@ -349,6 +449,10 @@ class ConnectionHandler extends _$ConnectionHandler {
       await _subscribeNotifications();
       if (!ref.mounted) return;
       state = SDBluetoothConnectionState.connected;
+      // Reset here and not on the raw connected event: a link that comes up and
+      // drops again during discovery has not given the app a usable bike, and
+      // it has to keep backing off.
+      _reconnectAttempt = 0;
       await requestRideData();
     } catch (e) {
       log.e(SDLogger.bluetooth, 'Error preparing ${_device.remoteId}', e);
