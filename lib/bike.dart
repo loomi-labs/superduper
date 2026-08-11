@@ -733,6 +733,10 @@ class Bike extends _$Bike {
   /// what the app wanted: a write lost to a disconnect makes intent differ
   /// from reality with no power cycle involved, and the 2026-08-07 ride log
   /// has nine of those in one ride without a single power cycle.
+  ///
+  /// A calibrated bike is answered by its own measurement — see
+  /// [_matchesBootSignature]. Everything below it is the heuristic that serves
+  /// a bike the guide never measured.
   bool _isPowerCycle(LastSeen seen) {
     final before = state.lastSeen;
     if (before == null) {
@@ -741,6 +745,16 @@ class Bike extends _$Bike {
       // we know nothing about.
       return true;
     }
+    final signature = state.bootSignature;
+    final measured = signature == null
+        ? null
+        : _matchesBootSignature(signature, before: before, seen: seen);
+    if (measured != null) {
+      return measured;
+    }
+    // No signature, or one with no usable byte: the bike was never calibrated,
+    // the rider skipped the guide, or the firmware keeps every byte. The old
+    // heuristic below is all there is, and every migrated bike rides on it.
     if (before.assist != seen.assist || before.light != seen.light) {
       return true;
     }
@@ -753,6 +767,49 @@ class Bike extends _$Bike {
     final selected = state.selectedMode;
     return !assertsWire(selected, before.wire, region: state.region) ||
         !assertsWire(selected, seen.wire, region: state.region);
+  }
+
+  /// Whether [seen] is the boot this bike was measured to produce, or null when
+  /// [signature] has no usable byte at all — then the caller falls back.
+  ///
+  /// The rule, on the bytes the calibration classified as resetting: the bike
+  /// reports exactly what it boots with, AND no longer what it reported before
+  /// the outage. Both halves are necessary. The first alone would call a rider
+  /// who selects the boot mode a power cycle; the second alone is the old
+  /// heuristic, which any handlebar change satisfies.
+  bool? _matchesBootSignature(BootSignature signature,
+      {required LastSeen before, required LastSeen seen}) {
+    var usable = false;
+    final bootWire = signature.bootWire;
+    if (bootWire != null) {
+      // The raw byte, never normalised through [assertsWire]: the wire a bike
+      // boots on is frequently one half of the selected mode's own pair — a
+      // 25 km/h custom mode caps on the EU boot wire — and forgiving it there
+      // is the defect this rule removes. Five boots on 2026-08-11 applied no
+      // pin because of it. The absorption belongs to the heal verdict, which
+      // asks a different question: which mode the bike is riding.
+      if (seen.wire != bootWire) {
+        return false;
+      }
+      if (before.wire == bootWire) {
+        // The bike already sat on its boot wire before the outage, so a boot
+        // and a dropout report the same byte. Accepted and deliberate: with no
+        // change to see there is no evidence, and a wrong pin write costs the
+        // rider the mode they were riding. Detection stays conservative.
+        return false;
+      }
+      usable = true;
+    }
+    final bootAssist = signature.bootAssist;
+    if (bootAssist != null) {
+      if (seen.assist != bootAssist || before.assist == bootAssist) {
+        return false;
+      }
+      usable = true;
+    }
+    // The light is not part of the signature: it has a boot transient and the
+    // register value for it is untrustworthy. See [BootSignature].
+    return usable ? true : null;
   }
 
   /// [bike] with the value of every padlock that is on [PinState.startup], or

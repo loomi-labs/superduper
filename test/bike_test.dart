@@ -958,6 +958,119 @@ void main() {
       expect(bikeLight(container), 1,
           reason: 'a locked padlock holds its value as it always did');
     });
+
+    /// Gives the bike the signature the calibration guide leaves behind on the
+    /// 2026-08-11 hardware: the wire byte resets to [bootWire], and the assist
+    /// byte comes back exactly as it was staged, so it is unusable.
+    Future<void> calibrate(Bike bike,
+        {required int preOffWire, required int bootWire}) async {
+      bike.saveBootSignature(
+          preOff: (assist: 2, wire: preOffWire),
+          settled: (assist: 2, wire: bootWire));
+      await settle();
+    }
+
+    test('a boot to the measured wire applies the pins inside the mode pair',
+        () async {
+      final container = makeContainer();
+      // The seeded CH mode rides [chWireLow] below 25 km/h and [chWireHigh]
+      // above it — and [chWireHigh] is the wire this bike boots on. The old
+      // verdict forgave the boot wire because the mode asserts it, so five real
+      // boots on 2026-08-11 applied no pin at all.
+      final bike = await openBike(container, region: BikeRegion.ch);
+      await bike.updateStateDataNow();
+      await settle();
+      expect(container.read(bikeProvider(id)).lastSeen?.wire, chWireLow,
+          reason: 'the bike rides the base of its own pair');
+      await calibrate(bike, preOffWire: chWireLow, bootWire: chWireHigh);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(chWireOffroad), assist: 4);
+
+      setBikeRegister(container, light: false, assist: 0, wire: chWireHigh);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(chWireOffroad),
+          reason: 'the bike came up on the wire it was measured to boot on');
+      expect(bikeWire(container), chWireOffroad);
+      expect(bikeAssist(container), 4);
+    });
+
+    test('an uncalibrated bike keeps the forgiving verdict', () async {
+      final container = makeContainer();
+      final bike = await openBike(container, region: BikeRegion.ch);
+      await bike.updateStateDataNow();
+      await settle();
+      expect(container.read(bikeProvider(id)).bootSignature, isNull,
+          reason: 'the rider never ran the guide, as every migrated bike');
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(chWireOffroad), assist: 4);
+
+      // The same boot as the test above, with nothing measured to compare it
+      // against: the app has to stay on the old verdict, which reads both
+      // wires of the pair as the mode the bike kept.
+      setBikeRegister(container, light: false, assist: 0, wire: chWireHigh);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), seededChModeId,
+          reason: 'an uncalibrated bike must behave exactly as before');
+      expect(bikeAssist(container), isNot(4));
+    });
+
+    test('a dropout on the boot wire applies nothing', () async {
+      final container = makeContainer();
+      final bike = await openBike(container, region: BikeRegion.ch);
+      final store = container.read(fakeBikeStoreProvider);
+      // Over the limit, so the mode caps itself on [chWireHigh] — the wire this
+      // bike also boots on. The accepted blind spot: the bike sat on its boot
+      // wire before the outage, so a boot and a dropout report the same bytes.
+      store.setSpeed(id, 30);
+      await settle();
+      expect(bikeWire(container), chWireHigh);
+      await bike.updateStateDataNow();
+      await settle();
+      expect(container.read(bikeProvider(id)).lastSeen?.wire, chWireHigh);
+      await calibrate(bike, preOffWire: chWireLow, bootWire: chWireHigh);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(chWireOffroad), assist: 4);
+
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), seededChModeId,
+          reason: 'nothing changed, so nothing proves the bike lost power');
+      expect(bikeAssist(container), isNot(4));
+    });
+
+    test('a boot off the off-road wire is detected', () async {
+      final container = makeContainer();
+      // An unlimited native mode, far from the boot wire: the measured rule has
+      // to hold for every selection, not only for the custom mode whose pair
+      // contains the boot wire.
+      final bike = await openBike(container,
+          region: BikeRegion.ch,
+          modeId: nativeModeId(chWireOffroad),
+          customModes: const [seededChMode]);
+      await bike.updateStateDataNow();
+      await settle();
+      expect(container.read(bikeProvider(id)).lastSeen?.wire, chWireOffroad);
+      await calibrate(bike, preOffWire: chWireLow, bootWire: chWireHigh);
+      await armStartupPins(container, bike,
+          modeId: seededChModeId, assist: 4);
+
+      setBikeRegister(container, light: false, assist: 0, wire: chWireHigh);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), seededChModeId,
+          reason: 'the ride starts on the pinned mode');
+      expect(bikeAssist(container), 4);
+    });
   });
 
   group('mode selection', () {
