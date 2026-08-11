@@ -331,11 +331,22 @@ void main() {
     final warning = find.byKey(const ValueKey('autoReconnectWarning'));
     expect(warning, findsNothing,
         reason: 'nothing to warn about while the setting is still on');
+    // The caption says what the setting costs the rider, and nothing else.
+    expect(
+        find.text('The app runs in the background and connects to the bike '
+            'whenever possible. This can use more battery.'),
+        findsOneWidget);
 
     await tapAutoReconnect(tester);
     expect(renderedAutoReconnect(tester), isFalse);
     expect(warning, findsOneWidget,
         reason: 'the rider has to be told the setting does not fully apply');
+    final warningText = tester.widget<Text>(
+        find.descendant(of: warning, matching: find.byType(Text)));
+    expect(
+        warningText.data,
+        'A dynamic mode is selected, so the app still reconnects for it '
+        'after a drop.');
 
     // The box and the note are one thing, not two that can drift apart: a
     // second tap puts the setting back and takes the note with it.

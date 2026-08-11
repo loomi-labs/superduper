@@ -547,12 +547,8 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                 Padding(
                   padding: const EdgeInsets.only(left: 4, right: 4),
                   child: Text(
-                    'Reconnect automatically whenever the bike is in range. '
-                    'Turn this off to power-cycle the bike back to its own '
-                    'defaults without this app re-applying its settings. The '
-                    'Connect button always works. While a dynamic custom mode '
-                    'is selected, reconnect stays active regardless — the '
-                    'speed limiter must be able to recover.',
+                    'The app runs in the background and connects to the bike '
+                    'whenever possible. This can use more battery.',
                     style: Theme.of(context).textTheme.bodySmall!.copyWith(
                           color: Colors.grey,
                           fontSize: 12,
@@ -565,9 +561,8 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                     key: const ValueKey('autoReconnectWarning'),
                     padding: const EdgeInsets.only(left: 4, right: 4, top: 8),
                     child: Text(
-                      'A dynamic mode is selected, so auto-reconnect remains '
-                      'active for it. Select OFFROAD or an exact-match mode '
-                      'for this setting to take full effect.',
+                      'A dynamic mode is selected, so the app still reconnects '
+                      'for it after a drop.',
                       style: Theme.of(context).textTheme.bodySmall!.copyWith(
                             color: Colors.orange,
                             fontSize: 12,

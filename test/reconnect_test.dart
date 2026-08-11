@@ -323,7 +323,7 @@ void main() {
     }
 
     testWidgets('works while the startup scan is still running', (tester) async {
-      // The sheet's own caption promises it: "The Connect button always works."
+      // The Connect button is the rider's manual way in, so it always works.
       // With auto-reconnect off, the select page's 100 s scan is exactly the
       // window a rider who just power-cycled the bike reaches for it in.
       final (container, repository) = await pumpButton(tester, scanning: true);
