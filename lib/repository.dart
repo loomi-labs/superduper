@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+// widgets.dart, not the foundation.dart this file used to be happy with: the
+// app coming back to the foreground is reported by AppLifecycleListener, which
+// lives there. No widget is built here.
+import 'package:flutter/widgets.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:superduper/db.dart';
@@ -19,19 +22,40 @@ enum SDBluetoothConnectionState {
   disconnecting,
 }
 
-/// Whether the app may connect to a bike on its own — on the disconnect event,
-/// from the retry timer, and when a handler is first built.
+/// Whether the app may connect to a bike on its own right now — on the
+/// disconnect event, from the retry timer, and when a handler is first built.
 ///
 /// Turning auto-reconnect off is how a rider gets the bike back to its own
 /// defaults: power-cycle it and this app stays away instead of writing its
-/// settings back. A mode that switches profiles by speed cannot honour that —
-/// it is only a limiter while the app can reach the bike, so it keeps
-/// reconnecting either way. The manual Connect button never consults this.
-bool shouldAutoReconnect({
+/// settings back. A mode that switches profiles by speed cannot honour that
+/// fully — it is only a limiter while the app can reach the bike — so it forces
+/// attempts too, but only until the ladder is spent ([reconnectLadderSpent]).
+/// The manual Connect button never consults this.
+bool mayAttemptReconnect({
   required bool autoReconnect,
   required bool needsSpeedSwitching,
+  required bool ladderSpent,
 }) =>
-    autoReconnect || needsSpeedSwitching;
+    autoReconnect || (needsSpeedSwitching && !ladderSpent);
+
+/// Whether those attempts may go on without an end. Only the rider's own
+/// setting grants that.
+///
+/// SAFETY: with the setting off, a break longer than about 40 seconds in the
+/// middle of a ride no longer brings the limiter back on its own. The rider
+/// asked the app to stay away, so a bike whose base profile has no limit keeps
+/// no limit until a re-arm puts the ladder back on its first rung: the bike page
+/// opens, the app comes back to the foreground, the radio comes back on, the
+/// Connect button, or a connect that succeeds. With the setting on, the recovery
+/// has no end, exactly as before.
+bool reconnectsForEver({required bool autoReconnect}) => autoReconnect;
+
+/// Whether a ladder that has made [attempt] attempts has used every rung it
+/// gets. A forced run gets the rungs of [_reconnectRungs] one time each; past
+/// the end of them the only rung left is one more copy of the cap, and that is
+/// the endless retry a rider with the setting off did not ask for.
+bool reconnectLadderSpent({required int attempt, required bool forEver}) =>
+    !forEver && attempt >= _reconnectRungs.length;
 
 /// Whether an automatic connect can do anything at all right now: the rider's
 /// setting and the state of the radio are two separate questions, and both have
@@ -65,8 +89,10 @@ const _reconnectRungs = <Duration>[
   _reconnectCap,
 ];
 
-/// The last rung, which the ladder then keeps for ever: there is no give-up
-/// state while auto-reconnect is on. Also the idle cadence, see [_nextDelay].
+/// The last rung, which the ladder then keeps for ever while auto-reconnect is
+/// on: there is no give-up state there. A run that only a switching mode forces
+/// stops after this rung instead, see [reconnectLadderSpent]. Also the idle
+/// cadence, see [_nextDelay].
 const _reconnectCap = Duration(seconds: 10);
 
 /// The rung for [attempt], counted from 0 for the first attempt after a reset.
@@ -133,12 +159,23 @@ class ConnectionHandler extends _$ConnectionHandler {
 
   Timer? _reconnectTimer;
 
-  /// Attempts made since the last successful connect, the ladder's position.
+  /// Attempts made since the last re-arm, the ladder's position.
   int _reconnectAttempt = 0;
+
+  /// Whether the ladder gave up: set when a forced run used its last rung, and
+  /// cleared by every re-arm ([_rearmReconnect]). While it is set, the gates
+  /// below read like auto-reconnect that is simply off, so the tick keeps
+  /// waking at the idle cadence and starts nothing.
+  bool _ladderSpent = false;
+
   late BluetoothDevice _device;
   StreamSubscription<BluetoothConnectionState>? _deviceSub;
   StreamSubscription<List<int>>? _notifySub;
   StreamSubscription<BluetoothAdapterState>? _adapterSub;
+
+  /// Watches for the app coming back to the foreground, a re-arm of its own:
+  /// the rider who put the phone away is looking at the bike again.
+  AppLifecycleListener? _lifecycleListener;
 
   /// State of the phone's radio, as last reported. Seeded permissively, see
   /// [shouldAttemptConnect].
@@ -168,9 +205,10 @@ class ConnectionHandler extends _$ConnectionHandler {
   bool _needsSpeedSwitching = false;
 
   /// Whether the automatic connect paths may run right now.
-  bool get _reconnectAllowed => shouldAutoReconnect(
+  bool get _reconnectAllowed => mayAttemptReconnect(
       autoReconnect: _autoReconnect,
-      needsSpeedSwitching: _needsSpeedSwitching);
+      needsSpeedSwitching: _needsSpeedSwitching,
+      ladderSpent: _ladderSpent);
 
   @visibleForTesting
   bool get debugAutoReconnect => _autoReconnect;
@@ -187,6 +225,52 @@ class ConnectionHandler extends _$ConnectionHandler {
 
   @visibleForTesting
   bool get debugShouldAttemptConnect => _shouldAttemptConnect;
+
+  @visibleForTesting
+  bool get debugLadderSpent => _ladderSpent;
+
+  @visibleForTesting
+  int get debugReconnectAttempt => _reconnectAttempt;
+
+  /// The accounting of one attempt of the ladder. A test has no other way in:
+  /// a fake bike is connected from the first moment, so its tick never attempts.
+  @visibleForTesting
+  void debugNoteAttempt() => _noteAttempt();
+
+  /// The app coming back to the foreground, as [_lifecycleListener] reports it.
+  @visibleForTesting
+  void debugAppResumed() => _onAppResumed();
+
+  /// A radio event, as [_adapterSub] reports it. That subscription is never made
+  /// for a fake bike, so this is the only way a test can deliver one.
+  @visibleForTesting
+  void debugAdapterState(BluetoothAdapterState adapterState) =>
+      _onAdapterState(adapterState);
+
+  /// Counts one attempt, and gives up when a forced run has no rung left.
+  ///
+  /// The setting is read here, at the attempt, and not held from the start of
+  /// the run: a rider who turns auto-reconnect off in the middle of an outage
+  /// asked the app to stop, so the run stops at its next attempt.
+  void _noteAttempt() {
+    _reconnectAttempt++;
+    _ladderSpent = reconnectLadderSpent(
+        attempt: _reconnectAttempt,
+        forEver: reconnectsForEver(autoReconnect: _autoReconnect));
+  }
+
+  /// Puts the ladder back on its first rung, and takes back a give-up.
+  ///
+  /// Called by every re-arm: the handler being built for a bike page that opens,
+  /// the app coming back to the foreground, the radio coming back on, the
+  /// Connect button, and a connect that succeeds. The running timer is left
+  /// alone on purpose — it waits the idle cadence while the ladder is spent, so
+  /// the first attempt of the new run is at most a cap away, and the paths that
+  /// want one sooner make it themselves.
+  void _rearmReconnect() {
+    _reconnectAttempt = 0;
+    _ladderSpent = false;
+  }
 
   /// Speed reported by the bike, in km/h. Broadcast: the control loop and the
   /// UI can both listen.
@@ -218,6 +302,10 @@ class ConnectionHandler extends _$ConnectionHandler {
     // mounted at all.
     _adapterState = FlutterBluePlus.adapterStateNow;
     _adapterSub = FlutterBluePlus.adapterState.listen(_onAdapterState);
+    // Kept here, next to the radio subscription, and not in a widget: a handler
+    // works with no UI mounted at all, and the ladder it re-arms is this
+    // handler's own. Disposed with it.
+    _lifecycleListener = AppLifecycleListener(onResume: _onAppResumed);
     // Retries anything that is not fully ready, not just disconnects, so a
     // failed readiness pass cannot strand the bike. It carries the whole retry
     // ladder: the attempt on the drop itself comes from
@@ -228,6 +316,8 @@ class ConnectionHandler extends _$ConnectionHandler {
     // re-arming to get wrong. The tick idles the same way while the adapter is
     // off — there is nothing to retry against a radio that is not there — and
     // _onAdapterState makes the resume immediate rather than up to 10 s late.
+    // A ladder that gave up idles here too: the tick keeps its wakeup but
+    // starts no attempt, so a re-arm needs nothing but _rearmReconnect().
     //
     // Armed with the cap and not with _nextDelay(): `state` cannot be read
     // before build returns. The first tick is 10 s away, as it always was.
@@ -296,7 +386,9 @@ class ConnectionHandler extends _$ConnectionHandler {
       // is still there answers it inside three seconds. Only for a link that
       // was really up — the same event follows a failed attempt, and the
       // ladder owns everything after the first failure.
-      if (wasUp && _shouldAttemptConnect) connect(timeout: _probeTimeout);
+      // _connect and not connect(): the probe belongs to the ladder's own run,
+      // so it must not re-arm one that a rider let expire.
+      if (wasUp && _shouldAttemptConnect) _connect(timeout: _probeTimeout);
       // A timer left over from the connected bike can be a full 10 s away, and
       // the ladder has to have its first rung 2 s from the drop.
       _armReconnectTimer(_nextDelay());
@@ -312,20 +404,37 @@ class ConnectionHandler extends _$ConnectionHandler {
     // event usually says nothing new.
     if (adapterState == _adapterState) return;
     _adapterState = adapterState;
-    log.i(SDLogger.bluetooth,
-        'Bluetooth adapter $adapterState (${_device.remoteId})');
+    log.i(SDLogger.bluetooth, 'Bluetooth adapter $adapterState ($deviceId)');
+    if (adapterState == BluetoothAdapterState.on) {
+      // A radio that comes back is a re-arm: a forced run that gave up while
+      // there was no radio to give it a chance gets that chance now. Before the
+      // gate below, which a spent ladder would fail.
+      _rearmReconnect();
+    }
     if (_shouldAttemptConnect &&
         state != SDBluetoothConnectionState.connected) {
       // Brings the bike back the moment the radio is usable again instead of up
       // to 10 s later; an attempt the timer starts at the same time is absorbed
       // by the _connecting guard.
-      connect();
+      _connect();
     }
   }
 
-  /// The wait before the next tick. A bike that is connected, or one the gates
-  /// keep the app away from, has nothing to retry, so it waits the cap: a 2 s
-  /// wakeup that can never do anything only costs battery.
+  /// The app coming back to the foreground. A rider who opens the app is asking
+  /// for the bike, so a ladder that gave up gets a new run — with the setting
+  /// off this is the re-arm that a rider takes most often.
+  void _onAppResumed() {
+    if (!ref.mounted) return;
+    _rearmReconnect();
+    if (_shouldAttemptConnect &&
+        state != SDBluetoothConnectionState.connected) {
+      _connect();
+    }
+  }
+
+  /// The wait before the next tick. A bike that is connected, one the gates keep
+  /// the app away from, or one whose ladder gave up has nothing to retry, so it
+  /// waits the cap: a 2 s wakeup that can never do anything only costs battery.
   Duration _nextDelay() =>
       state == SDBluetoothConnectionState.connected || !_shouldAttemptConnect
           ? _reconnectCap
@@ -344,12 +453,13 @@ class ConnectionHandler extends _$ConnectionHandler {
     if (state != SDBluetoothConnectionState.connected &&
         _shouldAttemptConnect &&
         // An attempt is still running. It would be dropped by the guard in
-        // connect(), and a dropped attempt must not cost a rung.
+        // _connect(), and a dropped attempt must not cost a rung.
         !_connecting) {
-      // Counted before the attempt: a successful one resets the count itself,
-      // and counting afterwards would undo that reset.
-      _reconnectAttempt++;
-      await connect(timeout: _retryTimeout);
+      // Counted before the attempt: a successful one re-arms the ladder itself,
+      // and counting afterwards would undo that. The count is what gives up the
+      // run of a forced ladder, so this is where the give-up happens too.
+      _noteAttempt();
+      await _connect(timeout: _retryTimeout);
       if (!ref.mounted) return;
     }
     _armReconnectTimer(_nextDelay());
@@ -359,9 +469,22 @@ class ConnectionHandler extends _$ConnectionHandler {
     log.d(SDLogger.bluetooth, "DISPOSE ConnectionHandler");
     _deviceSub?.cancel();
     _adapterSub?.cancel();
+    _lifecycleListener?.dispose();
     _reconnectTimer?.cancel();
     _cancelNotifications();
     _speedController.close();
+  }
+
+  /// Connects for a caller outside the ladder — the Connect button, the bike
+  /// page that opens — and re-arms the ladder for it.
+  ///
+  /// Every such caller is a re-arm: the rider is at the bike, so a forced run
+  /// that gave up gets another one whether this attempt succeeds or not. The
+  /// ladder's own attempts go to [_connect] instead: this method would reset the
+  /// count the tick raised one line before it.
+  Future<void> connect({Duration timeout = _retryTimeout}) {
+    _rearmReconnect();
+    return _connect(timeout: timeout);
   }
 
   /// Connects, waiting at most [timeout] for the bike to answer.
@@ -370,7 +493,7 @@ class ConnectionHandler extends _$ConnectionHandler {
   /// button, the first connect of a bike page, the one after the radio comes
   /// back. The drop probe asks for less ([_probeTimeout]) because the ladder
   /// takes over from it within two seconds.
-  Future<void> connect({Duration timeout = _retryTimeout}) async {
+  Future<void> _connect({Duration timeout = _retryTimeout}) async {
     if (isFakeBike(deviceId)) {
       state = SDBluetoothConnectionState.connected;
       return;
@@ -449,10 +572,10 @@ class ConnectionHandler extends _$ConnectionHandler {
       await _subscribeNotifications();
       if (!ref.mounted) return;
       state = SDBluetoothConnectionState.connected;
-      // Reset here and not on the raw connected event: a link that comes up and
-      // drops again during discovery has not given the app a usable bike, and
-      // it has to keep backing off.
-      _reconnectAttempt = 0;
+      // Re-armed here and not on the raw connected event: a link that comes up
+      // and drops again during discovery has not given the app a usable bike,
+      // and it has to keep backing off.
+      _rearmReconnect();
       await requestRideData();
     } catch (e) {
       log.e(SDLogger.bluetooth, 'Error preparing ${_device.remoteId}', e);

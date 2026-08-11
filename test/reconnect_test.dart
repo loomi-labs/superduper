@@ -24,7 +24,15 @@ import 'package:superduper/repository.dart';
 /// The adapter half has the same limit and one more: an adapter event has no
 /// fake input path at all, because the subscription is on `FlutterBluePlus`
 /// itself and is deliberately never made for a fake bike. So what is tested is
-/// the decision function plus the composition it reads.
+/// the decision function plus the composition it reads, through a debug entry
+/// into the same handler method the subscription calls.
+///
+/// The ladder has the same limit again: a fake bike is connected from the first
+/// moment, so the retry tick never makes an attempt and the reset a successful
+/// connect does (in `_prepareConnection`, behind service discovery) is out of
+/// reach. Tested here is the accounting of one attempt, which the tick and the
+/// debug entry share, and every re-arm path that a handler with no radio can
+/// take.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -76,25 +84,100 @@ void main() {
     return container.read(connectionHandlerProvider(id).notifier);
   }
 
-  group('shouldAutoReconnect', () {
+  group('mayAttemptReconnect', () {
     test('follows the setting for a static mode', () {
       expect(
-          shouldAutoReconnect(
-              autoReconnect: true, needsSpeedSwitching: false), isTrue);
+          mayAttemptReconnect(
+              autoReconnect: true,
+              needsSpeedSwitching: false,
+              ladderSpent: false),
+          isTrue);
       expect(
-          shouldAutoReconnect(
-              autoReconnect: false, needsSpeedSwitching: false), isFalse,
+          mayAttemptReconnect(
+              autoReconnect: false,
+              needsSpeedSwitching: false,
+              ladderSpent: false),
+          isFalse,
           reason: 'the whole point of the setting: stay away from the bike');
     });
 
-    test('a speed-switching mode reconnects whatever the setting says', () {
+    test('a speed-switching mode gets one run of the ladder', () {
       expect(
-          shouldAutoReconnect(
-              autoReconnect: true, needsSpeedSwitching: true), isTrue);
+          mayAttemptReconnect(
+              autoReconnect: false,
+              needsSpeedSwitching: true,
+              ladderSpent: false),
+          isTrue,
+          reason: 'the app is the speed limiter, so it gets a chance to come '
+              'back even with the setting off');
       expect(
-          shouldAutoReconnect(
-              autoReconnect: false, needsSpeedSwitching: true), isTrue,
-          reason: 'the app is the speed limiter; it has to be able to recover');
+          mayAttemptReconnect(
+              autoReconnect: false,
+              needsSpeedSwitching: true,
+              ladderSpent: true),
+          isFalse,
+          reason: 'and then it stops: endless attempts against a bike that is '
+              'off are what the setting exists to prevent');
+    });
+
+    test('the setting outlives a spent ladder', () {
+      expect(
+          mayAttemptReconnect(
+              autoReconnect: true,
+              needsSpeedSwitching: true,
+              ladderSpent: true),
+          isTrue,
+          reason: 'with the setting on the app never gives up');
+      expect(
+          mayAttemptReconnect(
+              autoReconnect: true,
+              needsSpeedSwitching: false,
+              ladderSpent: true),
+          isTrue);
+    });
+  });
+
+  group('reconnectsForEver', () {
+    test('only the rider setting grants attempts without an end', () {
+      expect(reconnectsForEver(autoReconnect: true), isTrue);
+      expect(reconnectsForEver(autoReconnect: false), isFalse,
+          reason: 'a mode that switches by speed forces a run of the ladder, '
+              'not a run without an end');
+    });
+  });
+
+  group('reconnectLadderSpent', () {
+    test('a forced ladder is spent after the last rung', () {
+      for (final attempt in [1, 2, 3, 4]) {
+        expect(reconnectLadderSpent(attempt: attempt, forEver: false), isFalse,
+            reason: 'attempt $attempt still has a rung of its own');
+      }
+      expect(reconnectLadderSpent(attempt: 5, forEver: false), isTrue,
+          reason: 'the ladder has five rungs — 2, 2, 5, 5, 10 s — and the '
+              'attempt after the 10 s rung is the last one');
+      expect(reconnectLadderSpent(attempt: 6, forEver: false), isTrue,
+          reason: 'and it stays spent');
+    });
+
+    test('the last rung of a forced run is the 10 s one', () {
+      expect(rungFor(4), const Duration(seconds: 10),
+          reason: 'the wait before the fifth attempt, which is the last');
+      expect(reconnectLadderSpent(attempt: 4, forEver: false), isFalse);
+      expect(reconnectLadderSpent(attempt: 5, forEver: false), isTrue);
+    });
+
+    test('a ladder that may run for ever is never spent', () {
+      for (final attempt in [5, 6, 20, 1000]) {
+        expect(reconnectLadderSpent(attempt: attempt, forEver: true), isFalse,
+            reason: 'with auto-reconnect on, attempt $attempt still has to '
+                'have a rung');
+      }
+    });
+
+    test('a ladder that made no attempt yet is not spent', () {
+      expect(reconnectLadderSpent(attempt: 0, forEver: false), isFalse,
+          reason: 'a re-arm puts the count back to 0, and the run starts '
+              'again from there');
     });
   });
 
@@ -280,6 +363,149 @@ void main() {
 
       // Let the fire-and-forget file IO settle before tearDown removes the dir.
       await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+  });
+
+  group('the ladder gives up, and what re-arms it', () {
+    /// Runs the accounting of one whole forced ladder — the five attempts the
+    /// timer makes on its rungs. A fake bike is always connected, so the tick
+    /// itself never runs; this drives the same accounting the tick does.
+    void runTheLadder(ConnectionHandler handler) {
+      for (var attempt = 0; attempt < 5; attempt++) {
+        handler.debugNoteAttempt();
+      }
+    }
+
+    /// A handler on a switching bike with the setting off: the only case that
+    /// has a forced ladder to spend.
+    ConnectionHandler forcedHandler(ProviderContainer container) {
+      container
+          .read(bikesDBProvider.notifier)
+          .saveBike(switchingBike(autoReconnect: false));
+      return openHandler(container);
+    }
+
+    test('a forced ladder stops the handler after its last rung', () {
+      final container = makeContainer();
+      final handler = forcedHandler(container);
+      expect(handler.debugReconnectAllowed, isTrue);
+
+      for (var attempt = 0; attempt < 4; attempt++) {
+        handler.debugNoteAttempt();
+        expect(handler.debugLadderSpent, isFalse);
+        expect(handler.debugReconnectAllowed, isTrue,
+            reason: 'the run is not over after ${attempt + 1} attempts');
+      }
+
+      handler.debugNoteAttempt();
+      expect(handler.debugLadderSpent, isTrue);
+      expect(handler.debugReconnectAllowed, isFalse,
+          reason: 'the fifth attempt is the one after the 10 s rung, and the '
+              'forced run gets no more');
+      expect(handler.debugShouldAttemptConnect, isFalse,
+          reason: 'the gate every automatic path reads has to carry it too');
+    });
+
+    test('the setting on keeps the handler attempting for ever', () {
+      final container = makeContainer();
+      container
+          .read(bikesDBProvider.notifier)
+          .saveBike(switchingBike(autoReconnect: true));
+      final handler = openHandler(container);
+
+      for (var attempt = 0; attempt < 20; attempt++) {
+        handler.debugNoteAttempt();
+      }
+
+      expect(handler.debugLadderSpent, isFalse);
+      expect(handler.debugReconnectAllowed, isTrue,
+          reason: 'the rider asked the app to keep the bike, so it keeps '
+              'trying for as long as the radio is on');
+    });
+
+    test('a static bike with the setting off makes no attempt at all', () {
+      final container = makeContainer();
+      container
+          .read(bikesDBProvider.notifier)
+          .saveBike(staticBike(autoReconnect: false));
+      final handler = openHandler(container);
+
+      expect(handler.debugReconnectAllowed, isFalse);
+      expect(handler.debugLadderSpent, isFalse,
+          reason: 'there is no ladder to spend: nothing forces a run');
+      expect(handler.debugReconnectAttempt, 0);
+    });
+
+    test('a bike page that opens finds a ladder on its first rung', () {
+      // The page open is the handler being built: it starts the ladder from
+      // nothing and connects at the end of build.
+      final container = makeContainer();
+      final handler = forcedHandler(container);
+
+      expect(handler.debugReconnectAttempt, 0);
+      expect(handler.debugLadderSpent, isFalse);
+      expect(handler.debugReconnectAllowed, isTrue);
+    });
+
+    test('the Connect button re-arms a ladder that gave up', () async {
+      final container = makeContainer();
+      final handler = forcedHandler(container);
+      runTheLadder(handler);
+      expect(handler.debugLadderSpent, isTrue);
+
+      // The exact call the button makes (EnhancedConnectionWidget).
+      await handler.connect();
+
+      expect(handler.debugLadderSpent, isFalse);
+      expect(handler.debugReconnectAttempt, 0);
+      expect(handler.debugReconnectAllowed, isTrue,
+          reason: 'a rider who asks for the bike asks for the ladder as well');
+    });
+
+    test('the app coming back to the foreground re-arms it', () {
+      final container = makeContainer();
+      final handler = forcedHandler(container);
+      runTheLadder(handler);
+
+      handler.debugAppResumed();
+
+      expect(handler.debugLadderSpent, isFalse);
+      expect(handler.debugReconnectAttempt, 0);
+      expect(handler.debugReconnectAllowed, isTrue,
+          reason: 'the rider is looking at the app again, so the app looks '
+              'for the bike again');
+    });
+
+    test('the radio coming back on re-arms it', () {
+      final container = makeContainer();
+      final handler = forcedHandler(container);
+      runTheLadder(handler);
+
+      handler.debugAdapterState(BluetoothAdapterState.off);
+      expect(handler.debugLadderSpent, isTrue,
+          reason: 'a radio that goes off is no reason to try again');
+
+      handler.debugAdapterState(BluetoothAdapterState.on);
+
+      expect(handler.debugLadderSpent, isFalse);
+      expect(handler.debugReconnectAttempt, 0);
+      expect(handler.debugReconnectAllowed, isTrue);
+    });
+
+    test('an attempt after a re-arm starts the run again', () {
+      final container = makeContainer();
+      final handler = forcedHandler(container);
+      runTheLadder(handler);
+      handler.debugAppResumed();
+
+      for (var attempt = 0; attempt < 4; attempt++) {
+        handler.debugNoteAttempt();
+        expect(handler.debugLadderSpent, isFalse,
+            reason: 'the second run gets the same five rungs as the first');
+      }
+      handler.debugNoteAttempt();
+      expect(handler.debugLadderSpent, isTrue,
+          reason: 'and it gives up again at the end of them');
     });
   });
 
