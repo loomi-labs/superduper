@@ -12,6 +12,7 @@ import 'package:superduper/db.dart';
 import 'package:superduper/edit_bike.dart' as edit;
 import 'package:superduper/models.dart';
 import 'package:superduper/repository.dart';
+import 'package:superduper/services.dart';
 import 'package:superduper/theme.dart';
 import 'package:superduper/utils/logger.dart';
 import 'package:superduper/widgets.dart';
@@ -223,6 +224,19 @@ class Bike extends _$Bike {
   /// says nothing the verdict may act on.
   int _pendingWrites = 0;
 
+  /// Whether a calibration recording window is open.
+  ///
+  /// While it is, every path that puts a settings packet on the bike is
+  /// suppressed: the app writes about 200 ms after the first read of a
+  /// reconnect, and that write overwrites exactly the bytes the calibration
+  /// exists to measure. A suppressed write is dropped and logged, never queued —
+  /// replaying it when the window closes would put the pre-outage state back on
+  /// a bike the rider is still measuring.
+  bool _calibrating = false;
+
+  @visibleForTesting
+  bool get debugCalibrating => _calibrating;
+
   /// Whether the next settings read still has to answer whether the bike was
   /// power-cycled.
   ///
@@ -241,6 +255,12 @@ class Bike extends _$Bike {
   void _logW(String message) => log.w(SDLogger.bike, '[$id] $message');
   void _logE(String message, [Object? error, StackTrace? stackTrace]) =>
       log.e(SDLogger.bike, '[$id] $message', error, stackTrace);
+
+  /// A calibration line, at info level and with its own prefix inside the bike
+  /// tag: the recording window is evidence a rider shares, and the whole window
+  /// has to be one greppable block in a release log too.
+  void _logCalibration(String message) =>
+      log.i(SDLogger.bike, '[$id] [Calibration] $message');
 
   @override
   BikeState build(String id) {
@@ -349,6 +369,12 @@ class Bike extends _$Bike {
     if (!ref.mounted || !_isConnected) {
       return;
     }
+    // Checked after the settle as well as inside [writeStateData]: the window
+    // can open while this waits, and the read this would take is noise in it.
+    if (_calibrating) {
+      _logCalibration('Suppressed the reconnect re-assert');
+      return;
+    }
     // A mode with an unlimited base may not come back on that base: no speed
     // has arrived on this connection yet, so nothing says the app can see the
     // bike. Re-entered on its cap, exactly as selecting it enters it.
@@ -382,6 +408,15 @@ class Bike extends _$Bike {
     var newWire = dynamicWireFor(selected.mode, speedKmh, _assertedWire,
         region: state.region);
     if (newWire == _assertedWire) {
+      return;
+    }
+    // Before [_assertedWire] moves: a wire the app records as asserted but never
+    // wrote would make every later heal judge against a bike state that does not
+    // exist. A speed sample can arrive before the first read of a reconnect, so
+    // this is one of the two write-before-read paths the window has to close.
+    if (_calibrating) {
+      _logCalibration(
+          'Suppressed a speed switch: wire $_assertedWire -> $newWire');
       return;
     }
     _logD(
@@ -425,6 +460,14 @@ class Bike extends _$Bike {
   void _capUnwatchedMode() {
     final wire = unwatchedWireFor(state.selectedMode, state.region);
     if (wire == null || wire == _assertedWire) {
+      return;
+    }
+    // The watchdog fires from its own timer, so it can land inside the connect
+    // settle — the second write-before-read path. Suppressed before
+    // [_assertedWire] moves, for the reason [_onSpeedSample] gives.
+    if (_calibrating) {
+      _logCalibration('Suppressed the cap of ${state.selectedMode.name}: '
+          'wire $_assertedWire -> $wire');
       return;
     }
     _logW('No speed samples, capping ${state.selectedMode.name}: '
@@ -584,8 +627,17 @@ class Bike extends _$Bike {
     // with, and answering the question with it would consume the power cycle
     // signature and lose the pins for this outage.
     final seen = LastSeen(assist: data[2], light: data[4] == 1, wire: data[5]);
-    final powerCycled = _powerCycleCheckDue && _isPowerCycle(seen);
-    _powerCycleCheckDue = false;
+    var powerCycled = false;
+    if (_calibrating) {
+      // The pins stay armed rather than being answered and suppressed: the boot
+      // the rider caused to measure the bike is not the moment to apply them,
+      // and consuming the check here would lose them for the ride that follows
+      // the calibration.
+      _logCalibration('Suppressed the startup pins, the check stays due');
+    } else {
+      powerCycled = _powerCycleCheckDue && _isPowerCycle(seen);
+      _powerCycleCheckDue = false;
+    }
     if (seen != state.lastSeen) {
       // Saved on its own, because an unchanged poll returns below without ever
       // reaching a write — and the record has to survive an app restart: the
@@ -705,6 +757,123 @@ class Bike extends _$Bike {
     return any ? next : null;
   }
 
+  /// When the recording window reads the settings register, counted from the
+  /// moment [recordBootWindow] starts.
+  ///
+  /// Spread out rather than dense: the 2026-08-11 logs show the bike answers the
+  /// first read within a second of the link coming up, and the light transient
+  /// of the boot lasts about two seconds — a value that still moves at the end
+  /// of the window is not the one the calibration may classify.
+  static const bootWindowSchedule = <Duration>[
+    Duration.zero,
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 3),
+    Duration(seconds: 5),
+    Duration(seconds: 8),
+  ];
+
+  /// Registers the window probes once each, for the log only.
+  static const _odometerId = [2, 2];
+  static const _batteryId = [4, 1];
+
+  /// How many of the frames the app normally drops the window records. A few
+  /// are the firmware probe; a transcript of the ride is not.
+  static const _maxProbeFrames = 5;
+
+  /// Reads the settings register through the boot window and returns the pair
+  /// the bike settled on, or null when no valid read came back.
+  ///
+  /// Nothing is written for the whole window — the caller holds
+  /// [setCalibrating] open around it — and nothing is stored: the caller
+  /// classifies the settled pair against the values it staged before the
+  /// outage. The odometer, the battery and the frames the app normally drops are
+  /// logged as a firmware probe. A cleaner power-on tell (a trip reset, an
+  /// uptime) may be in them, and only a real bike can show that; the model
+  /// deliberately holds none of it yet.
+  Future<({int assist, int wire})?> recordBootWindow({
+    List<Duration> schedule = bootWindowSchedule,
+  }) async {
+    if (!_calibrating) {
+      // Not refused: the window still records. But every write inside it
+      // corrupts what it records, so the evidence has to say the guard was off.
+      _logCalibration('Recording without the write suppression');
+    }
+    final handler = ref.read(connectionHandlerProvider(id).notifier);
+    var frames = 0;
+    handler.onRawNotification = (data) {
+      // Only what the app drops: the speed frames are already in the ride
+      // trace, and they arrive about once a second.
+      if (frames >= _maxProbeFrames || parseSpeedNotification(data) != null) {
+        return;
+      }
+      frames++;
+      _logCalibration('Notification frame: $data');
+    };
+    final started = DateTime.now();
+    ({int assist, int wire})? settled;
+    try {
+      for (final at in schedule) {
+        final wait = at - DateTime.now().difference(started);
+        if (wait > Duration.zero) {
+          await Future<void>.delayed(wait);
+        }
+        if (!ref.mounted || _deleted) {
+          return settled;
+        }
+        final ms = DateTime.now().difference(started).inMilliseconds;
+        if (!_isConnected) {
+          // A gap, not an end: the bike can drop once more while it boots, and
+          // a later read of the same window still answers the question.
+          _logCalibration('t=$ms ms: not connected, no read');
+          continue;
+        }
+        final data = await _withRegister(() => handler.read());
+        _logCalibration('t=$ms ms: settings register $data');
+        if (data != null && isSettingsPacket(data)) {
+          settled = (assist: data[2], wire: data[5]);
+        }
+      }
+      // After the window, never inside it: both select another register, and a
+      // settings read that follows one of them too closely comes back with the
+      // wrong register's bytes.
+      await _probeRegister('Odometer', _odometerId);
+      await _probeRegister('Battery', _batteryId);
+    } finally {
+      handler.onRawNotification = null;
+    }
+    _logCalibration(settled == null
+        ? 'No valid read in the window'
+        : 'Settled on assist ${settled.assist}, wire ${settled.wire}');
+    return settled;
+  }
+
+  /// Logs one read of [registerId]. The value is evidence for a later task, so
+  /// nothing here parses it.
+  Future<void> _probeRegister(String name, List<int> registerId) async {
+    if (!ref.mounted || _deleted || !_isConnected) {
+      return;
+    }
+    final data = await _withRegister(() => ref
+        .read(connectionHandlerProvider(id).notifier)
+        .read(registerId: registerId));
+    _logCalibration('$name register $registerId: $data');
+  }
+
+  /// Opens or closes the write-suppression window. See [_calibrating].
+  ///
+  /// The guide holds it open from the moment it asks the rider to switch the
+  /// bike off until the signature is classified, so nothing between the two
+  /// touches the bike. Its own staging write goes on the bike before this
+  /// opens.
+  void setCalibrating(bool value) {
+    if (_calibrating == value) {
+      return;
+    }
+    _calibrating = value;
+    _logCalibration(value ? 'Writes suppressed' : 'Writes allowed again');
+  }
+
   /// Whether [field] has to come off the bike rather than out of the app: the
   /// caller did not set it, and no lock pins the app's value over bike truth.
   bool _needsBikeTruth(
@@ -750,6 +919,16 @@ class Bike extends _$Bike {
       }}) async {
     if (_deleted) {
       // The record is gone; saving would put it back into bikes.json.
+      return;
+    }
+    // The one gate every settings packet passes: the poll's adoption, the heal,
+    // the startup pins, the speed switch, the watchdog cap and the rider's own
+    // taps all end here, so a path added later cannot escape the window by
+    // being missed. App-only writes (a padlock, a saved mode) go through, they
+    // touch no byte of the bike.
+    if (saveToBike == true && _calibrating) {
+      _logCalibration('Suppressed a write of ${newState.selectedMode.name}, '
+          'assist ${newState.assist}, light ${newState.light}');
       return;
     }
     // A machine write carries a snapshot of the state it was composed from. If

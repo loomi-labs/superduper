@@ -78,6 +78,21 @@ class _CountingWriteStore extends FakeBikeStore {
   }
 }
 
+/// A bike whose register changes from read to read: every read takes the next
+/// staged answer and the last one stays. Stands in for a controller that boots
+/// on one value and settles on another during the recording window.
+class _BootWindowStore extends FakeBikeStore {
+  final registers = <List<int>>[];
+
+  @override
+  List<int> read(String deviceId) {
+    if (registers.isEmpty) {
+      return super.read(deviceId);
+    }
+    return registers.length == 1 ? registers.first : registers.removeAt(0);
+  }
+}
+
 /// A switching custom mode: base wire 1 (32 km/h + throttle), cap wire 4
 /// (EPAC 25). Switches up above 30 km/h, back down below 28.
 const tour30 =
@@ -135,6 +150,20 @@ void main() {
   /// restored the way an app restart restores it.
   void seedBikesFile(List<BikeState> bikes) {
     File('${tempDir.path}/bikes.json').writeAsStringSync(jsonEncode(bikes));
+  }
+
+  /// Attaches the rotating file sink for this test and returns a reader of
+  /// what has reached the disk.
+  Future<Future<String> Function()> attachRideLog() async {
+    final directory = '${tempDir.path}/logs';
+    await log.attachFileSink(directory: directory);
+    // Before the tearDown that removes tempDir: the file handle has to go
+    // first.
+    addTearDown(log.detachFileSink);
+    return () async {
+      await log.flushFileSink();
+      return File('$directory/${SDLogger.logFileName}').readAsStringSync();
+    };
   }
 
   /// Waits out the asynchronous bikes.json load of [BikesDB].
@@ -1868,20 +1897,6 @@ void main() {
   });
 
   group('the ride log', () {
-    /// Attaches the rotating file sink for this test and returns a reader of
-    /// what has reached the disk.
-    Future<Future<String> Function()> attachRideLog() async {
-      final directory = '${tempDir.path}/logs';
-      await log.attachFileSink(directory: directory);
-      // Before the tearDown that removes tempDir: the file handle has to go
-      // first.
-      addTearDown(log.detachFileSink);
-      return () async {
-        await log.flushFileSink();
-        return File('$directory/${SDLogger.logFileName}').readAsStringSync();
-      };
-    }
-
     test('a poll tick traces the speed with the bike id and the wire',
         () async {
       final container = makeContainer();
@@ -1936,6 +1951,143 @@ void main() {
 
       expect(identical(bike.debugTraceTimer, before), isTrue,
           reason: 'the trace timer must run steady through writes');
+    });
+  });
+
+  group('the calibration window', () {
+    /// Drops the link and brings it back, then waits out the connect settle the
+    /// re-assert holds. Real time, exactly as the reconnect tests above: still
+    /// short of the 2 s debounce and the 5 s poll, so every write a test sees
+    /// after this is the reconnect's own.
+    Future<void> reconnect(ProviderContainer container) async {
+      for (var next in [
+        SDBluetoothConnectionState.disconnected,
+        SDBluetoothConnectionState.connected,
+      ]) {
+        // ignore: invalid_use_of_protected_member
+        container.read(connectionHandlerProvider(id).notifier).state = next;
+        await settle();
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      await settle();
+    }
+
+    /// A bike on native mode 5 (EU off-road), which the re-assert puts back on
+    /// wire 5 whenever the bike comes up on something else.
+    Future<(Bike, _CountingWriteStore, ProviderContainer)> openCounted() async {
+      final store = _CountingWriteStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu,
+          modeId: nativeModeId(5),
+          customModes: const []);
+      return (bike, store, container);
+    }
+
+    test('a reconnect writes nothing while calibrating', () async {
+      final (bike, store, container) = await openCounted();
+      bike.setCalibrating(true);
+      // The bike came back on another wire — what the re-assert exists to
+      // correct, and exactly the evidence the calibration has to read.
+      setBikeWire(container, 1);
+      store.writes.clear();
+
+      await reconnect(container);
+
+      expect(bike.debugCalibrating, isTrue);
+      expect(store.writes, isEmpty,
+          reason: 'a settings write inside the recording window overwrites the '
+              'bytes the calibration is there to measure');
+      expect(bikeWire(container), 1,
+          reason: 'the bike keeps what it booted with');
+    });
+
+    test('a user tap writes nothing while calibrating', () async {
+      final (bike, store, container) = await openCounted();
+      bike.setCalibrating(true);
+      store.writes.clear();
+
+      bike.setAssist(3);
+      bike.toggleLight();
+      bike.selectMode(nativeModeId(1));
+      await settle();
+
+      expect(store.writes, isEmpty,
+          reason: 'every write path is suppressed, the rider\'s included');
+      expect(container.read(bikeProvider(id)).assist, 0,
+          reason: 'a suppressed write is dropped, not queued for later');
+    });
+
+    test('the released guard restores the re-assert', () async {
+      final (bike, store, container) = await openCounted();
+      bike.setCalibrating(true);
+      bike.setCalibrating(false);
+      setBikeWire(container, 1);
+      store.writes.clear();
+
+      await reconnect(container);
+
+      expect(bike.debugCalibrating, isFalse);
+      expect(store.writes.where((w) => w[0] == 0 && w[1] == 209), isNotEmpty,
+          reason: 'the window is over, so the app enforces its mode again');
+      expect(bikeWire(container), 5);
+    });
+
+    test('the window returns the bytes the bike settled on', () async {
+      final store = _BootWindowStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu,
+          modeId: nativeModeId(5),
+          customModes: const []);
+      bike.setCalibrating(true);
+      // Boots on assist 0 and the EU boot wire, then settles on the values the
+      // register really holds.
+      store.registers.addAll(const [
+        [3, 0, 0, 0, 0, 4, 0, 0, 0, 0],
+        [3, 0, 0, 0, 0, 4, 0, 0, 0, 0],
+        [3, 0, 2, 0, 1, 7, 0, 0, 0, 0],
+      ]);
+
+      final settled = await bike.recordBootWindow(schedule: const [
+        Duration.zero,
+        Duration(milliseconds: 10),
+        Duration(milliseconds: 20),
+      ]);
+
+      expect(settled, isNotNull);
+      expect(settled!.assist, 2, reason: 'the last read is the settled one');
+      expect(settled.wire, 7);
+    });
+
+    test('the window logs every read it took', () async {
+      final readLog = await attachRideLog();
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu,
+          modeId: nativeModeId(5),
+          customModes: const []);
+      bike.setCalibrating(true);
+
+      await bike.recordBootWindow(
+          schedule: const [Duration.zero, Duration(milliseconds: 10)]);
+
+      final lines = await readLog();
+      expect(lines, contains('[Bike] [$id] [Calibration]'),
+          reason: 'the whole window has to be greppable in a shared log');
+      expect(lines, contains('Odometer'));
+      expect(lines, contains('Battery'));
+    });
+
+    test('the window reads through the first eight seconds', () {
+      expect(Bike.bootWindowSchedule.map((d) => d.inSeconds).toList(),
+          [0, 1, 2, 3, 5, 8]);
     });
   });
 }

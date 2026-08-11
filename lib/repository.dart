@@ -507,7 +507,18 @@ class ConnectionHandler extends _$ConnectionHandler {
     return null;
   }
 
+  /// A tap on the raw notification frames, or null in normal operation.
+  ///
+  /// The bike sends more frame types than the speed one, and everything that is
+  /// not speed is dropped below without a trace. The boot calibration has to see
+  /// those raw bytes: a cleaner power-on tell than the settings register may
+  /// live in them, and only a real ride can show whether one is there.
+  void Function(List<int> data)? onRawNotification;
+
   void _onNotification(List<int> data) {
+    // Before the parse and before every drop, so the tap sees exactly what the
+    // bike sent. What is dropped, and when, is unchanged.
+    onRawNotification?.call(data);
     var speed = parseSpeedNotification(data);
     if (speed == null) return;
     if (_speedController.isClosed) return;
@@ -561,14 +572,18 @@ class ConnectionHandler extends _$ConnectionHandler {
     );
   }
 
-  Future<List<int>?> read() async {
+  /// Reads a register: the settings register by default, or the one
+  /// [registerId] selects — the boot calibration probes the odometer and the
+  /// battery through the same path.
+  Future<List<int>?> read({List<int>? registerId}) async {
     if (isFakeBike(deviceId)) {
+      // A fake bike holds one register only, so it answers every id with it.
       return ref.read(fakeBikeStoreProvider).read(deviceId);
     }
     var bt = ref.read(bluetoothRepositoryProvider);
     await bt.write(
       _device,
-      data: bt.currentStateId,
+      data: registerId ?? bt.currentStateId,
       serviceId: UUID_METRICS_SERVICE,
       characteristicId: UUID_CHARACTERISTIC_REGISTER_ID,
     );
