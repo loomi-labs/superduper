@@ -261,12 +261,14 @@ class ConnectionHandler extends _$ConnectionHandler {
 
   /// Puts the ladder back on its first rung, and takes back a give-up.
   ///
-  /// Called by every re-arm: the handler being built for a bike page that opens,
-  /// the app coming back to the foreground, the radio coming back on, the
-  /// Connect button, and a connect that succeeds. The running timer is left
-  /// alone on purpose — it waits the idle cadence while the ladder is spent, so
-  /// the first attempt of the new run is at most a cap away, and the paths that
-  /// want one sooner make it themselves.
+  /// Called by every re-arm: a bike page that opens (through [connect], from
+  /// `BikePageState.initState` — the handler outlives the page it was built
+  /// for, so its own build cannot carry that one), the app coming back to the
+  /// foreground, the radio coming back on, the Connect button, and a connect
+  /// that succeeds. The running timer is left alone on purpose — it waits the
+  /// idle cadence while the ladder is spent, so the first attempt of the new run
+  /// is at most a cap away, and the paths that want one sooner make it
+  /// themselves.
   void _rearmReconnect() {
     _reconnectAttempt = 0;
     _ladderSpent = false;

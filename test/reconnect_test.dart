@@ -436,15 +436,35 @@ void main() {
       expect(handler.debugReconnectAttempt, 0);
     });
 
-    test('a bike page that opens finds a ladder on its first rung', () {
-      // The page open is the handler being built: it starts the ladder from
-      // nothing and connects at the end of build.
-      final container = makeContainer();
+    testWidgets('a bike page that opens re-arms a ladder that gave up',
+        (tester) async {
+      // Not the handler being built: a bike that needs enforcement keeps its
+      // notifier alive with no UI, so the handler of a page that is popped and
+      // opened again is the same one, with the same spent ladder. The page has
+      // to ask for the connect itself.
+      final container = ProviderContainer();
       final handler = forcedHandler(container);
+      runTheLadder(handler);
+      expect(handler.debugLadderSpent, isTrue);
+      // What a spent ladder leaves behind: a bike nothing is trying for.
+      // ignore: invalid_use_of_protected_member
+      handler.state = SDBluetoothConnectionState.disconnected;
 
-      expect(handler.debugReconnectAttempt, 0);
+      await tester.pumpWidget(UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: BikePage(bikeID: id)),
+      ));
+      // Past the settle of the re-assert every reconnect runs, so the page's
+      // own follow-up work leaves no timer of its own behind.
+      await tester.pump(const Duration(seconds: 2));
+
       expect(handler.debugLadderSpent, isFalse);
+      expect(handler.debugReconnectAttempt, 0);
       expect(handler.debugReconnectAllowed, isTrue);
+      expect(container.read(connectionHandlerProvider(id)),
+          SDBluetoothConnectionState.connected,
+          reason: 'the page open asks for the bike, not only for the rungs');
+      container.dispose();
     });
 
     test('the Connect button re-arms a ladder that gave up', () async {

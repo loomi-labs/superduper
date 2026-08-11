@@ -1561,6 +1561,21 @@ class BikePageState extends ConsumerState<BikePage> {
 
       if (connectionState == SDBluetoothConnectionState.connected) {
         bikeControl.updateStateDataNow(force: true);
+      } else {
+        // The page open is one of the re-arms of the reconnect ladder, and this
+        // is where it happens: the handler's own build cannot carry it, because
+        // a bike that needs enforcement keeps its notifier — and with it the
+        // handler — alive with no UI, so a page that is opened again never
+        // builds a second one. A ladder that gave up while the app was away
+        // gets a new run here.
+        //
+        // Unconditional on any other state: connect() re-arms first and
+        // attempts second, and an attempt that is already in flight is dropped
+        // by the guard in the handler, so a bike that is still connecting only
+        // gets the rungs back.
+        unawaited(ref
+            .read(connectionHandlerProvider(widget.bikeID).notifier)
+            .connect());
       }
     });
   }
