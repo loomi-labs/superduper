@@ -195,6 +195,7 @@ class ControlCard extends StatelessWidget {
     this.enabled = true,
     this.onTap,
     this.badge,
+    this.caption,
     this.trailing,
     this.body,
   });
@@ -219,6 +220,12 @@ class ControlCard extends StatelessWidget {
   /// A startup pin's tag, for a section that has no list to mark it in — the
   /// light is on or off, and nothing else.
   final String? badge;
+
+  /// One line under the header, or nothing. Says what the card's taps do while
+  /// they mean something other than the usual — a startup pin turns the card
+  /// into a picker for the value a ride starts on, and a marker cannot say
+  /// that. Dimmed with the [body].
+  final String? caption;
 
   /// The lock button, or nothing for a section that has no lock.
   final Widget? trailing;
@@ -278,12 +285,31 @@ class ControlCard extends StatelessWidget {
                   if (trailing != null) trailing! else const SizedBox(width: 8),
                 ],
               ),
-              if (body != null)
+              // One Opacity for everything under the header, so a card with a
+              // caption fades as one piece rather than in two steps.
+              if (caption != null || body != null)
                 Opacity(
                   opacity: enabled ? 1.0 : 0.5,
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 12, right: 8),
-                    child: body,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (caption != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8, right: 8),
+                          child: Text(
+                            caption!,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(color: SDSurface.muted, fontSize: 12),
+                          ),
+                        ),
+                      if (body != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12, right: 8),
+                          child: body,
+                        ),
+                    ],
                   ),
                 ),
             ],

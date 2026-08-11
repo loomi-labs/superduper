@@ -1,7 +1,12 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:superduper/bike.dart';
 import 'package:superduper/colors.dart';
-import 'package:superduper/models.dart';
+import 'package:superduper/repository.dart';
 import 'package:superduper/theme.dart';
 import 'package:superduper/widgets.dart';
 
@@ -9,6 +14,8 @@ import 'package:superduper/widgets.dart';
 /// colour, and the only place a label sits on a solid accent fill is a
 /// selected segment — where it must be picked for contrast against it.
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   /// The card's own decorated box: the only one it paints with a border.
   /// Matched by that border rather than by position, so a wrapper widget
   /// inserting a box of its own cannot make this pick the wrong one.
@@ -261,5 +268,205 @@ void main() {
     );
     expect(find.byKey(const ValueKey('pinMark:assistChip:2')), findsNothing);
     expect(find.textContaining('Starts at'), findsNothing);
+  });
+
+  /// A card whose pin is on startup selects the value the ride starts on: the
+  /// taps aim the pin instead of the bike, and they work with the bike away,
+  /// because nothing about them needs it.
+  group('start selection', () {
+    const id = 'fa:ke:aa:bb:cc:dd';
+    const modeCaption = 'Tap the mode the bike starts with';
+    const assistCaption = 'Tap the assist level the bike starts with';
+    const lightCaption = 'Tap the card to choose: light on or off at the start';
+
+    late Directory tempDir;
+
+    setUp(() {
+      tempDir = Directory.systemTemp.createTempSync('superduper_start_test');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (call) async => tempDir.path,
+      );
+    });
+
+    tearDown(() {
+      tempDir.deleteSync(recursive: true);
+    });
+
+    /// Lets the write chain run out without advancing the clock, so the poll
+    /// and the debounce never fire. As in test/pickers_test.dart.
+    Future<void> settle(WidgetTester tester) async {
+      for (var i = 0; i < 8; i++) {
+        await tester.pump();
+      }
+    }
+
+    /// Opens a bike, pumps one of its control cards, and puts the connection
+    /// where the test wants it.
+    Future<ProviderContainer> pumpCard(
+      WidgetTester tester, {
+      required BikeState bike,
+      required Widget Function(BikeState) build,
+      required bool connected,
+    }) async {
+      final container = ProviderContainer();
+      container.listen(bikeProvider(id), (previous, next) {});
+      container.read(bikeProvider(id).notifier).writeStateData(bike);
+      await settle(tester);
+
+      await tester.pumpWidget(UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, child) =>
+                  build(ref.watch(bikeProvider(id))),
+            ),
+          ),
+        ),
+      ));
+      if (!connected) {
+        // ignore: invalid_use_of_protected_member
+        container.read(connectionHandlerProvider(id).notifier).state =
+            SDBluetoothConnectionState.disconnected;
+      }
+      await settle(tester);
+      return container;
+    }
+
+    /// A US bike on native mode 0, with two custom modes to aim at.
+    BikeState usBike() => BikeState.defaultState(id)
+        .copyWith(region: BikeRegion.us, customModes: const [])
+        .withSelectedMode(nativeModeId(0));
+
+    /// Moves a padlock [taps] steps, the way a rider does.
+    Future<void> cycle(ProviderContainer container, VoidCallback tap,
+        WidgetTester tester, int taps) async {
+      for (var i = 0; i < taps; i++) {
+        tap();
+        await settle(tester);
+      }
+    }
+
+    for (final connected in [false, true]) {
+      final where = connected ? 'connected' : 'disconnected';
+
+      testWidgets('a mode tap aims the startup pin on a $where bike',
+          (tester) async {
+        final container = await pumpCard(tester,
+            bike: usBike(),
+            build: (b) => EnhancedModeControlWidget(bike: b),
+            connected: connected);
+        final control = container.read(bikeProvider(id).notifier);
+        await cycle(container, control.cycleModePin, tester, 1);
+
+        await tester.tap(find.byKey(ValueKey('modeChip:${nativeModeId(2)}')));
+        await settle(tester);
+
+        final state = container.read(bikeProvider(id));
+        container.dispose();
+        expect(state.pinMode, PinState.startup);
+        expect(state.startupModeId, nativeModeId(2),
+            reason: 'the tap must re-aim the pin');
+        expect(state.selectedMode.id, nativeModeId(0),
+            reason: 'a start selection never changes the mode being ridden');
+      });
+
+      testWidgets('an assist tap aims the startup pin on a $where bike',
+          (tester) async {
+        final container = await pumpCard(tester,
+            bike: usBike().copyWith(assist: 1),
+            build: (b) => EnhancedAssistControlWidget(bike: b),
+            connected: connected);
+        final control = container.read(bikeProvider(id).notifier);
+        await cycle(container, control.cycleAssistPin, tester, 1);
+
+        await tester.tap(find.byKey(const ValueKey('assistChip:4')));
+        await settle(tester);
+
+        final state = container.read(bikeProvider(id));
+        container.dispose();
+        expect(state.pinAssist, PinState.startup);
+        expect(state.startupAssist, 4);
+        expect(state.assist, 1,
+            reason: 'a start selection never changes the level being ridden');
+      });
+
+      testWidgets('a light tap aims the startup pin on a $where bike',
+          (tester) async {
+        final container = await pumpCard(tester,
+            bike: usBike().copyWith(light: false),
+            build: (b) => EnhancedLightControlWidget(bike: b),
+            connected: connected);
+        final control = container.read(bikeProvider(id).notifier);
+        await cycle(container, control.cycleLightPin, tester, 1);
+        expect(container.read(bikeProvider(id)).startupLight, isFalse,
+            reason: 'arming captures the value that is on now');
+
+        await tester.tap(find.text('Light'));
+        await settle(tester);
+
+        final state = container.read(bikeProvider(id));
+        container.dispose();
+        expect(state.pinLight, PinState.startup);
+        expect(state.startupLight, isTrue, reason: 'the tap flips the target');
+        expect(state.light, isFalse,
+            reason: 'a start selection never switches the light itself');
+      });
+    }
+
+    testWidgets('the caption appears only while the pin is on startup',
+        (tester) async {
+      for (final (build, caption) in [
+        ((BikeState b) => EnhancedModeControlWidget(bike: b), modeCaption),
+        ((BikeState b) => EnhancedAssistControlWidget(bike: b), assistCaption),
+        ((BikeState b) => EnhancedLightControlWidget(bike: b), lightCaption),
+      ]) {
+        final container = await pumpCard(tester,
+            bike: usBike(), build: build, connected: true);
+        final control = container.read(bikeProvider(id).notifier);
+        void cycleAll() {
+          control.cycleModePin();
+          control.cycleAssistPin();
+          control.cycleLightPin();
+        }
+
+        expect(find.text(caption), findsNothing, reason: 'open shows nothing');
+
+        await cycle(container, cycleAll, tester, 1);
+        expect(find.text(caption), findsOneWidget);
+
+        await cycle(container, cycleAll, tester, 1);
+        expect(find.text(caption), findsNothing,
+            reason: 'a locked pin holds a value, it does not select one');
+
+        await cycle(container, cycleAll, tester, 1);
+        expect(find.text(caption), findsNothing, reason: 'back to open');
+        container.dispose();
+      }
+    });
+
+    testWidgets('locking the pin ends the selection state', (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike(),
+          build: (b) => EnhancedModeControlWidget(bike: b),
+          connected: false);
+      final control = container.read(bikeProvider(id).notifier);
+      // Startup, then locked: the second tap is the rider's way out.
+      await cycle(container, control.cycleModePin, tester, 2);
+      expect(container.read(bikeProvider(id)).pinMode, PinState.locked);
+      expect(find.text(modeCaption), findsNothing);
+
+      await tester.tap(find.byKey(ValueKey('modeChip:${nativeModeId(3)}')));
+      await settle(tester);
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.startupModeId, nativeModeId(0),
+          reason: 'a locked pin no longer takes aim from a tap');
+      expect(state.selectedMode.id, nativeModeId(0),
+          reason: 'and a disconnected bike still ignores the tap');
+    });
   });
 }

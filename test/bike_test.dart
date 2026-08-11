@@ -1785,6 +1785,40 @@ void main() {
       expect(state.pinMode, PinState.startup);
       expect(state.startupModeId, nativeModeId(1));
     });
+
+    test('re-aiming a startup pin puts nothing on the wire', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.us,
+          modeId: nativeModeId(2),
+          customModes: const []);
+      bike.setAssist(3);
+      await settle();
+      bike.cycleModePin();
+      bike.cycleAssistPin();
+      bike.cycleLightPin();
+      await settle();
+      final wire = bikeWire(container);
+      final light = container.read(bikeProvider(id)).light;
+
+      // The rider aims each pin somewhere else than the value being ridden.
+      bike.setStartupMode(nativeModeId(1));
+      bike.setStartupAssist(0);
+      bike.setStartupLight(!light);
+      await settle();
+
+      final state = container.read(bikeProvider(id));
+      expect(state.startupModeId, nativeModeId(1));
+      expect(state.startupAssist, 0);
+      expect(state.startupLight, !light);
+      // A start selection is app state: the bike keeps riding what it rides.
+      expect(state.selectedMode.id, nativeModeId(2));
+      expect(state.assist, 3);
+      expect(state.light, light);
+      expect(bikeWire(container), wire);
+      expect(bikeAssist(container), 3);
+      expect(bikeLight(container), light ? 1 : 0);
+    });
   });
 
   group('background enforcement', () {

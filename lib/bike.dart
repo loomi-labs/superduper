@@ -1397,6 +1397,40 @@ class Bike extends _$Bike {
     writeStateData(updated, saveToBike: false);
   }
 
+  /// Aims the light padlock at the value a ride should start on.
+  ///
+  /// The counterpart of the capture in [cycleLightPin]: arming takes the value
+  /// that is on now, and this re-aims it afterwards — the card is a picker
+  /// while its pin is on [PinState.startup]. App state only, like the padlock
+  /// itself, so the choice can be made with the bike out of range and never
+  /// touches the light the bike is riding.
+  void setStartupLight(bool on) {
+    if (state.startupLight == on) {
+      return;
+    }
+    _logD('Startup light: $on');
+    writeStateData(state.copyWith(startupLight: on), saveToBike: false);
+  }
+
+  /// Aims the mode padlock. See [setStartupLight].
+  void setStartupMode(String modeId) {
+    if (state.startupModeId == modeId) {
+      return;
+    }
+    _logD('Startup mode: $modeId');
+    writeStateData(state.copyWith(startupModeId: modeId), saveToBike: false);
+  }
+
+  /// Aims the assist padlock. See [setStartupLight].
+  void setStartupAssist(int level) {
+    assert(level >= 0 && level <= 4, 'assist level out of range: $level');
+    if (state.startupAssist == level) {
+      return;
+    }
+    _logD('Startup assist: $level');
+    writeStateData(state.copyWith(startupAssist: level), saveToBike: false);
+  }
+
   /// Deletes the bike and tears this notifier down with it.
   ///
   /// Removing the record is not enough: a switching mode and a locked padlock
@@ -1800,13 +1834,23 @@ class EnhancedLightControlWidget extends ConsumerWidget {
     // the Connect chip.
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
+    // A pin on startup turns the card into a picker for the value the ride
+    // starts on. That choice is app state, so it needs no bike: the connection
+    // gate is bypassed for it, and only for it.
+    final selecting = bike.pinLight == PinState.startup;
+    final startupLight = bike.startupLight ?? bike.light;
     return ControlCard(
       colorIndex: bike.color,
       title: "Light",
       titleIcon: bike.light ? Icons.lightbulb : Icons.lightbulb_outline,
       active: bike.light,
-      enabled: connected,
-      onTap: connected ? bikeControl.toggleLight : null,
+      enabled: connected || selecting,
+      caption: selecting
+          ? 'Tap the card to choose: light on or off at the start'
+          : null,
+      onTap: selecting
+          ? () => bikeControl.setStartupLight(!startupLight)
+          : (connected ? bikeControl.toggleLight : null),
       // The light has no list, so its startup pin is a tag in the header.
       badge: bike.pinLight == PinState.startup && bike.startupLight != null
           ? (bike.startupLight! ? 'STARTS ON' : 'STARTS OFF')
@@ -1839,6 +1883,10 @@ class EnhancedModeControlWidget extends ConsumerWidget {
     // [EnhancedLightControlWidget].
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
+    // The card picks the mode a ride starts on while its pin is on startup —
+    // app state, so it works with the bike away. See
+    // [EnhancedLightControlWidget].
+    final selecting = bike.pinMode == PinState.startup;
 
     return Column(
       children: [
@@ -1847,7 +1895,8 @@ class EnhancedModeControlWidget extends ConsumerWidget {
           title: "Mode",
           titleIcon: Icons.electric_bike,
           showSwitch: false,
-          enabled: connected,
+          enabled: connected || selecting,
+          caption: selecting ? 'Tap the mode the bike starts with' : null,
           trailing: EnhancedLockWidget(
             pin: bike.pinMode,
             degraded: _pinDegradedNow(ref, bike.pinMode),
@@ -1866,10 +1915,12 @@ class EnhancedModeControlWidget extends ConsumerWidget {
                   selected: mode.id == selectedModeId,
                   // The captured value, not the live one: the pin marks the
                   // mode a ride starts on, which is not always the one on now.
-                  pinned: bike.pinMode == PinState.startup &&
-                      mode.id == bike.startupModeId,
-                  onTap:
-                      connected ? () => bikeControl.selectMode(mode.id) : null,
+                  pinned: selecting && mode.id == bike.startupModeId,
+                  onTap: selecting
+                      ? () => bikeControl.setStartupMode(mode.id)
+                      : (connected
+                          ? () => bikeControl.selectMode(mode.id)
+                          : null),
                 ),
             ],
           ),
@@ -2056,16 +2107,21 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
     // drops it silently. See [EnhancedLightControlWidget].
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
+    // The card picks the level a ride starts on while its pin is on startup —
+    // app state, so it works with the bike away. See
+    // [EnhancedLightControlWidget].
+    final selecting = bike.pinAssist == PinState.startup;
     // The level a ride starts on, or null while nothing pins one.
-    final startupAssist =
-        bike.pinAssist == PinState.startup ? bike.startupAssist : null;
+    final startupAssist = selecting ? bike.startupAssist : null;
 
     return ControlCard(
       colorIndex: bike.color,
       title: "Assist",
       titleIcon: Icons.autorenew,
       showSwitch: false,
-      enabled: connected,
+      enabled: connected || selecting,
+      caption:
+          selecting ? 'Tap the assist level the bike starts with' : null,
       trailing: EnhancedLockWidget(
         pin: bike.pinAssist,
         degraded: _pinDegradedNow(ref, bike.pinAssist),
@@ -2085,7 +2141,9 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
               tooltip: 'Select assist $level',
               selected: bike.assist == level,
               pinned: level == startupAssist,
-              onTap: connected ? () => bikeControl.setAssist(level) : null,
+              onTap: selecting
+                  ? () => bikeControl.setStartupAssist(level)
+                  : (connected ? () => bikeControl.setAssist(level) : null),
             ),
         ],
       ),
