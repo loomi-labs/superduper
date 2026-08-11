@@ -3,6 +3,7 @@ import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:form_builder_validators/form_builder_validators.dart';
 import 'package:superduper/bike.dart';
+import 'package:superduper/calibration_page.dart';
 import 'package:superduper/colors.dart';
 
 /// Applies the Edit sheet's fields to [live] — the bike as the app has it *at
@@ -425,6 +426,16 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
     );
   }
 
+  /// What the calibration row says under its title: a bike is measured or it
+  /// is not, and a measured one names the day, so a rider can tell an old
+  /// measurement from today's.
+  String get _calibrationSubtitle {
+    final signature = widget.bike.bootSignature;
+    return signature == null
+        ? 'Not measured yet'
+        : 'Measured ${calibrationDate(signature.measuredAt)}';
+  }
+
   /// The notifier, taken at the moment a button is pressed rather than in
   /// [build]. Watching it there would *create* the provider for a bike the
   /// sheet has only been opened on: the notifier connects, polls, and saves
@@ -563,6 +574,42 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                           ),
                     ),
                   ),
+
+                const SizedBox(height: 8),
+
+                // The boot calibration, for a re-run. Here and not only on the
+                // page: the page offers it once, and a firmware update or a
+                // measurement the rider doubts needs a way back to it.
+                Material(
+                  type: MaterialType.transparency,
+                  child: ListTile(
+                    key: const ValueKey('calibrateRow'),
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      'Calibrate power-cycle detection',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    subtitle: Text(
+                      _calibrationSubtitle,
+                      style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
+                    ),
+                    trailing: const Icon(Icons.chevron_right,
+                        size: 20, color: Colors.grey),
+                    onTap: () {
+                      // The navigator of the page under the sheet: the sheet
+                      // itself is popped first, so the guide does not sit on
+                      // top of a modal route the rider can drag away.
+                      final navigator = Navigator.of(context);
+                      navigator.pop();
+                      navigator.push(MaterialPageRoute<void>(
+                          builder: (_) =>
+                              CalibrationPage(bikeID: widget.bike.id)));
+                    },
+                  ),
+                ),
 
                 const SizedBox(height: 32),
 

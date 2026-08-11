@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show KeepAliveLink;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:superduper/calibration_page.dart';
 import 'package:superduper/colors.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/edit_bike.dart' as edit;
@@ -119,6 +120,27 @@ String? backgroundStatusText(BackgroundStatus status, BikeState bike,
           'Turn notifications on to keep it active.',
   };
 }
+
+/// What a measured boot says about this bike, against the values the guide
+/// staged before the outage.
+///
+/// A byte that comes back exactly as it was staged is persisted: the firmware
+/// carried it through the power cycle, so it holds no boot news and detection
+/// has to ignore it. Null is that answer — "unusable", never "unknown". The
+/// staged pair is kept whole, so a later audit can read what the measurement
+/// compared against.
+BootSignature classifyBootSignature({
+  required ({int assist, int wire}) preOff,
+  required ({int assist, int wire}) settled,
+  required DateTime measuredAt,
+}) =>
+    BootSignature(
+      measuredAt: measuredAt,
+      bootWire: settled.wire == preOff.wire ? null : settled.wire,
+      bootAssist: settled.assist == preOff.assist ? null : settled.assist,
+      preOffWire: preOff.wire,
+      preOffAssist: preOff.assist,
+    );
 
 /// Whether this platform can hold the app awake with no UI.
 bool get _hasBackgroundService => Platform.isAndroid;
@@ -860,6 +882,89 @@ class Bike extends _$Bike {
     _logCalibration('$name register $registerId: $data');
   }
 
+  /// The assist level the guide puts on the bike before the rider switches it
+  /// off.
+  ///
+  /// Deliberately not 0: the 2026-08-11 logs show the bike boots with assist 0,
+  /// and a pre-off state equal to the boot state cannot be classified at all —
+  /// every byte would come back "unchanged" and be excluded.
+  static const calibrationStageAssist = 2;
+
+  /// Whether the bike stands still, as far as the app can tell.
+  ///
+  /// A bike that never streamed, or stopped streaming, is standing: the bike
+  /// itself stops sending ride data at a standstill. Asked before the staging
+  /// write, which changes the assist level — not something to do under a rider.
+  bool get _isStopped {
+    final at = _lastSpeedAt;
+    final speed = _lastSpeedKmh;
+    if (at == null || speed == null) {
+      return true;
+    }
+    return DateTime.now().difference(at) > _speedTimeout || speed <= 0;
+  }
+
+  /// Puts a known, non-boot state on the bike and confirms it with a read of
+  /// the register. Returns the pair the bike reports back — the guide's
+  /// `preOff` values — or null when nothing could be staged.
+  ///
+  /// Runs BEFORE the recording window opens: [writeStateData] suppresses every
+  /// settings write while [_calibrating] is set, and this one is a settings
+  /// write like any other.
+  Future<({int assist, int wire})?> stageForCalibration() async {
+    if (_calibrating) {
+      _logCalibration('Refused to stage inside the recording window');
+      return null;
+    }
+    if (!_isConnected || !_isStopped) {
+      _logCalibration('Refused to stage: connected $_isConnected, '
+          'standing $_isStopped');
+      return null;
+    }
+    // Through the normal write path, so the record, [_assertedWire] and the
+    // bike hold the same state afterwards. The wire is the selection's own:
+    // the guide must never put a profile on the bike the app would not.
+    writeStateData(state.copyWith(assist: calibrationStageAssist),
+        authoritative: const {PacketField.assist});
+    // Queued behind the write above by [_withRegister], so this read really is
+    // its echo and not the state from before it.
+    final data = await _withRegister(
+        () => ref.read(connectionHandlerProvider(id).notifier).read());
+    if (!ref.mounted || _deleted) {
+      return null;
+    }
+    if (data == null || !isSettingsPacket(data)) {
+      _logCalibration('Staging read came back as $data');
+      return null;
+    }
+    final staged = (assist: data[2], wire: data[5]);
+    if (staged.assist != calibrationStageAssist) {
+      // The write was lost. Measuring against a pre-off state the bike does not
+      // hold would classify every byte wrong.
+      _logCalibration('Staging did not land: assist ${staged.assist}');
+      return null;
+    }
+    _logCalibration('Staged assist ${staged.assist}, wire ${staged.wire}');
+    return staged;
+  }
+
+  /// Classifies [settled] against the staged [preOff] pair and saves the
+  /// signature on this bike's record.
+  ///
+  /// App data, not bike data: it goes out through the same `saveToBike: false`
+  /// path a padlock takes, so nothing here reaches the bike.
+  BootSignature saveBootSignature(
+      {required ({int assist, int wire}) preOff,
+      required ({int assist, int wire}) settled}) {
+    final signature = classifyBootSignature(
+        preOff: preOff, settled: settled, measuredAt: DateTime.now());
+    _logCalibration('Signature: boot wire ${signature.bootWire}, boot assist '
+        '${signature.bootAssist} (staged wire ${preOff.wire}, assist '
+        '${preOff.assist})');
+    writeStateData(state.copyWith(bootSignature: signature), saveToBike: false);
+    return signature;
+  }
+
   /// Opens or closes the write-suppression window. See [_calibrating].
   ///
   /// The guide holds it open from the moment it asks the rider to switch the
@@ -1484,6 +1589,13 @@ class BikePageState extends ConsumerState<BikePage> {
                 padding: const EdgeInsets.fromLTRB(16, 24, 16, 0),
                 sliver: SliverList(
                   delegate: SliverChildListDelegate([
+                    // The one-time offer of the boot calibration, above the
+                    // controls: it asks for an answer, and a rider who never
+                    // scrolls this page would never see it at the foot. It
+                    // takes itself away once the bike is measured, or for this
+                    // visit once the rider says Later.
+                    CalibrationPromptWidget(bike: bike),
+
                     // Light Control
                     EnhancedLightControlWidget(bike: bike),
                     const SizedBox(height: 16),
@@ -1737,6 +1849,95 @@ class EnhancedModeControlWidget extends ConsumerWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// The one-time offer of the boot calibration, on the page of a bike whose
+/// [BikeState.bootSignature] is null — which every bike is until it is
+/// measured, this app's own upgrade included.
+///
+/// A card and not a pushed guide: the rider opened the page to ride, and a
+/// flow that asks them to switch the bike off and on has to be asked for. It
+/// is offered only while the bike is connected and standing, because that is
+/// what the first step needs, and "Later" takes it away for this visit. The
+/// bike's settings sheet holds the same entry for a re-run.
+class CalibrationPromptWidget extends ConsumerStatefulWidget {
+  const CalibrationPromptWidget({super.key, required this.bike});
+  final BikeState bike;
+
+  @override
+  ConsumerState<CalibrationPromptWidget> createState() =>
+      _CalibrationPromptWidgetState();
+}
+
+class _CalibrationPromptWidgetState
+    extends ConsumerState<CalibrationPromptWidget> {
+  bool _dismissed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final bike = widget.bike;
+    final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
+        SDBluetoothConnectionState.connected;
+    // The live stream, not the notifier's memory of it: the offer must go away
+    // the moment the rider rides off, and only this card rebuilds for it.
+    final speed = ref.watch(bikeSpeedProvider(bike.id)).value ?? 0;
+    if (_dismissed ||
+        bike.bootSignature != null ||
+        !connected ||
+        speed > 0) {
+      return const SizedBox.shrink();
+    }
+    final theme = Theme.of(context);
+    return Padding(
+      key: const ValueKey('calibrationPrompt'),
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: SDSurface.card,
+          border: Border.all(color: SDSurface.border),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Calibrate power-cycle detection',
+              style: theme.textTheme.titleSmall
+                  ?.copyWith(color: SDSurface.text, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'The app measures your bike one time, so it knows a power cycle '
+              'from a lost connection. You switch the bike off and on again.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: SDSurface.muted, fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  key: const ValueKey('calibrationPromptLater'),
+                  onPressed: () => setState(() => _dismissed = true),
+                  style: TextButton.styleFrom(foregroundColor: SDSurface.muted),
+                  child: const Text('Later'),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  key: const ValueKey('calibrationPromptStart'),
+                  onPressed: () => showCalibration(context, bike.id),
+                  style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xff4A80F0)),
+                  child: const Text('Calibrate'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
