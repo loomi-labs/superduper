@@ -61,28 +61,33 @@ Changes the legal category your bike will operate at. PAS is Pedal Assist System
 which means the motor will only run when you are pedaling.
 Throttle means the motor will run when you press the throttle, regardless of if you are pedaling or not.
 
-Every mode your bike can use is a button of its own, labeled with the mode's name. One tap
-selects it, there is no cycling through the modes you don't want. Which modes are listed
-depends on the bike's region, plus any custom modes you added to that bike.
+Every mode your bike can use is a button of its own, labeled with its speed limit — `20 mph`,
+`25 km/h`, and so on — because that is what you actually need to know before you pick one. The
+firmware's own name for the mode (`ECO`, `EPAC`, ...) shows in the tooltip, not on the button.
+One tap selects it, there is no cycling through the modes you don't want. Which modes are
+listed depends on the bike's region, plus any custom modes you added to that bike.
+
+If your bike's firmware refuses to change one of Mode, Assist or Light, that card shows its
+current value with no button to tap, instead of a picker that would do nothing.
 
 #### US:
 
-| Mode | Name    | Class    | PAS | Throttle | Speed Limit |
-| ---- | ------- | -------- | --- | -------- | ----------- |
-| 1    | ECO     | 1        | Yes | No       | 20 mph      |
-| 2    | TOUR    | 2        | Yes | Yes      | 20 mph      |
-| 3    | SPORT   | 3        | Yes | No       | 28 mph      |
-| 4    | OFFROAD | Off-Road | Yes | Yes      | No Limit    |
+| Mode | Speed Limit         | Firmware Name | Class    | PAS | Throttle |
+| ---- | ------------------- | ------------- | -------- | --- | -------- |
+| 1    | 20 mph              | ECO           | 1        | Yes | No       |
+| 2    | 20 mph + throttle   | TOUR          | 2        | Yes | Yes      |
+| 3    | 28 mph              | SPORT         | 3        | Yes | No       |
+| 4    | OFFROAD             | OFFROAD       | Off-Road | Yes | Yes      |
 
 
 #### EU:
 
-| Mode | Name    | Class    | PAS | Throttle | Speed Limit |
-| ---- | ------- | -------- | --- | -------- | ----------- |
-| 1    | EPAC    | EPAC     | Yes | No       | 25 km/h     |
-| 2    | MODE 2  | 250W     | Yes | No       | 35 km/h     |
-| 3    | MODE 3  | 850W     | Yes | No       | 45 km/h     |
-| 4    | OFFROAD | Off-Road | Yes | Yes      | No Limit    |
+| Mode | Speed Limit | Firmware Name | Class    | PAS | Throttle |
+| ---- | ----------- | -------------- | -------- | --- | -------- |
+| 1    | 25 km/h     | EPAC           | EPAC     | Yes | No       |
+| 2    | 35 km/h     | MODE 2         | 250W     | Yes | No       |
+| 3    | 45 km/h     | MODE 3         | 850W     | Yes | No       |
+| 4    | OFFROAD     | OFFROAD        | Off-Road | Yes | Yes      |
 
 #### CH:
 
@@ -90,10 +95,10 @@ Swiss bikes have no limited mode of their own in the firmware, so the only firmw
 is OFFROAD. Everything below that limit is a [custom mode](#custom-modes), and every CH bike
 starts with one already set up:
 
-| Name    | Kind              | PAS | Throttle | Speed Limit          |
-| ------- | ----------------- | --- | -------- | -------------------- |
-| 25 km/h | Custom (pre-made) | Yes | Yes      | 25 km/h (see below)  |
-| OFFROAD | Firmware          | Yes | Yes      | No Limit             |
+| Speed Limit          | Kind              | PAS | Throttle |
+| --------------------- | ----------------- | --- | -------- |
+| 25 km/h (see below)   | Custom (pre-made) | Yes | Yes      |
+| OFFROAD               | Firmware          | Yes | Yes      |
 
 The pre-made "25 km/h" mode is an ordinary custom mode: you can rename it, change its limit and
 its throttle setting, or add more modes next to it. A CH bike always keeps at least one custom
