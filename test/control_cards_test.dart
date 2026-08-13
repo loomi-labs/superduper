@@ -270,14 +270,13 @@ void main() {
     expect(find.textContaining('Starts at'), findsNothing);
   });
 
-  /// A card whose pin is on startup selects the value the ride starts on: the
-  /// taps aim the pin instead of the bike, and they work with the bike away,
-  /// because nothing about them needs it.
-  group('start selection', () {
+  /// The card's rows/segments always drive the live bike now, whatever the
+  /// pin says. Picking the value a ride starts on happens only in the sheet
+  /// [showPinValueSheet] opens, and only the padlock's own tap opens it — and
+  /// only when that tap is about to arm [PinState.startup].
+  group('startup pin', () {
     const id = 'fa:ke:aa:bb:cc:dd';
-    const modeCaption = 'Tap the mode the bike starts with';
-    const assistCaption = 'Tap the assist level the bike starts with';
-    const lightCaption = 'Tap the card to choose: light on or off at the start';
+    const sheetTitle = 'Start every ride with';
 
     late Directory tempDir;
 
@@ -340,7 +339,9 @@ void main() {
         .copyWith(region: BikeRegion.us, customModes: const [])
         .withSelectedMode(nativeModeId(0));
 
-    /// Moves a padlock [taps] steps, the way a rider does.
+    /// Moves a padlock [taps] steps, the way a rider does — calling the
+    /// notifier directly, exactly as a widget's own [EnhancedLockWidget] tap
+    /// would when it needs no sheet. WP3 leaves these notifier methods alone.
     Future<void> cycle(ProviderContainer container, VoidCallback tap,
         WidgetTester tester, int taps) async {
       for (var i = 0; i < taps; i++) {
@@ -349,79 +350,247 @@ void main() {
       }
     }
 
+    /// Taps from [PinState.open], the state a fresh bike opens on.
+    const tapsTo = {PinState.open: 0, PinState.startup: 1, PinState.locked: 2};
+
+    /// The only IconButton a pumped card ever has: its padlock.
+    final padlock = find.byType(IconButton);
+
+    /// Pumps the frames a real modal route needs to become hit-testable.
+    /// [settle] deliberately never advances the clock (see its own comment),
+    /// so an AnimationController-driven route never leaves its opening frame
+    /// on settle() pumps alone. The explicit duration below finishes the
+    /// entrance transition while staying far short of the 2 s write debounce
+    /// and the 5 s poll, so opening a sheet never trips either.
+    Future<void> openSheet(WidgetTester tester, Finder lock) async {
+      await tester.tap(lock);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+
+    /// Taps a sheet row and lets the pick's write chain run out.
+    Future<void> pickOption(WidgetTester tester, Finder row) async {
+      await tester.tap(row);
+      await tester.pump();
+      await settle(tester);
+    }
+
+    /// Dismisses the sheet by tapping its scrim, well above the sheet's own
+    /// content, which sits at the bottom of the test surface.
+    Future<void> dismissSheet(WidgetTester tester) async {
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pump();
+      await settle(tester);
+    }
+
     for (final connected in [false, true]) {
       final where = connected ? 'connected' : 'disconnected';
 
-      testWidgets('a mode tap aims the startup pin on a $where bike',
-          (tester) async {
-        final container = await pumpCard(tester,
-            bike: usBike(),
-            build: (b) => EnhancedModeControlWidget(bike: b),
-            connected: connected);
-        final control = container.read(bikeProvider(id).notifier);
-        await cycle(container, control.cycleModePin, tester, 1);
+      for (final MapEntry(key: pin, value: taps) in tapsTo.entries) {
+        testWidgets(
+            'a mode tap always drives the live mode ($where, pin ${pin.name})',
+            (tester) async {
+          final container = await pumpCard(tester,
+              bike: usBike(),
+              build: (b) => EnhancedModeControlWidget(bike: b),
+              connected: connected);
+          final control = container.read(bikeProvider(id).notifier);
+          await cycle(container, control.cycleModePin, tester, taps);
 
-        await tester.tap(find.byKey(ValueKey('modeChip:${nativeModeId(2)}')));
-        await settle(tester);
+          await tester
+              .tap(find.byKey(ValueKey('modeChip:${nativeModeId(2)}')));
+          await settle(tester);
 
-        final state = container.read(bikeProvider(id));
-        container.dispose();
-        expect(state.pinMode, PinState.startup);
-        expect(state.startupModeId, nativeModeId(2),
-            reason: 'the tap must re-aim the pin');
-        expect(state.selectedMode.id, nativeModeId(0),
-            reason: 'a start selection never changes the mode being ridden');
-      });
+          final state = container.read(bikeProvider(id));
+          container.dispose();
+          expect(state.pinMode, pin, reason: 'a row tap never moves the pin');
+          expect(state.selectedMode.id,
+              connected ? nativeModeId(2) : nativeModeId(0),
+              reason: connected
+                  ? 'a tap always drives the bike, whatever the pin'
+                  : 'a disconnected bike ignores the tap');
+        });
 
-      testWidgets('an assist tap aims the startup pin on a $where bike',
-          (tester) async {
-        final container = await pumpCard(tester,
-            bike: usBike().copyWith(assist: 1),
-            build: (b) => EnhancedAssistControlWidget(bike: b),
-            connected: connected);
-        final control = container.read(bikeProvider(id).notifier);
-        await cycle(container, control.cycleAssistPin, tester, 1);
+        testWidgets(
+            'an assist tap always drives the live level ($where, pin ${pin.name})',
+            (tester) async {
+          final container = await pumpCard(tester,
+              bike: usBike().copyWith(assist: 1),
+              build: (b) => EnhancedAssistControlWidget(bike: b),
+              connected: connected);
+          final control = container.read(bikeProvider(id).notifier);
+          await cycle(container, control.cycleAssistPin, tester, taps);
 
-        await tester.tap(find.byKey(const ValueKey('assistChip:4')));
-        await settle(tester);
+          await tester.tap(find.byKey(const ValueKey('assistChip:4')));
+          await settle(tester);
 
-        final state = container.read(bikeProvider(id));
-        container.dispose();
-        expect(state.pinAssist, PinState.startup);
-        expect(state.startupAssist, 4);
-        expect(state.assist, 1,
-            reason: 'a start selection never changes the level being ridden');
-      });
+          final state = container.read(bikeProvider(id));
+          container.dispose();
+          expect(state.pinAssist, pin,
+              reason: 'a segment tap never moves the pin');
+          expect(state.assist, connected ? 4 : 1,
+              reason: connected
+                  ? 'a tap always drives the bike, whatever the pin'
+                  : 'a disconnected bike ignores the tap');
+        });
 
-      testWidgets('a light tap aims the startup pin on a $where bike',
-          (tester) async {
-        final container = await pumpCard(tester,
-            bike: usBike().copyWith(light: false),
-            build: (b) => EnhancedLightControlWidget(bike: b),
-            connected: connected);
-        final control = container.read(bikeProvider(id).notifier);
-        await cycle(container, control.cycleLightPin, tester, 1);
-        expect(container.read(bikeProvider(id)).startupLight, isFalse,
-            reason: 'arming captures the value that is on now');
+        testWidgets(
+            'a light tap always drives the live light ($where, pin ${pin.name})',
+            (tester) async {
+          final container = await pumpCard(tester,
+              bike: usBike().copyWith(light: false),
+              build: (b) => EnhancedLightControlWidget(bike: b),
+              connected: connected);
+          final control = container.read(bikeProvider(id).notifier);
+          await cycle(container, control.cycleLightPin, tester, taps);
 
-        await tester.tap(find.text('Light'));
-        await settle(tester);
+          await tester.tap(find.text('Light'));
+          await settle(tester);
 
-        final state = container.read(bikeProvider(id));
-        container.dispose();
-        expect(state.pinLight, PinState.startup);
-        expect(state.startupLight, isTrue, reason: 'the tap flips the target');
-        expect(state.light, isFalse,
-            reason: 'a start selection never switches the light itself');
-      });
+          final state = container.read(bikeProvider(id));
+          container.dispose();
+          expect(state.pinLight, pin, reason: 'a card tap never moves the pin');
+          expect(state.light, connected,
+              reason: connected
+                  ? 'a tap always drives the bike, whatever the pin'
+                  : 'a disconnected bike ignores the tap');
+        });
+      }
     }
+
+    testWidgets('the padlock opens a sheet when it arms startup, mode',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike(),
+          build: (b) => EnhancedModeControlWidget(bike: b),
+          connected: true);
+
+      await openSheet(tester, padlock);
+      expect(find.text(sheetTitle), findsOneWidget);
+      expect(find.byKey(ValueKey('pinSheetOption:${nativeModeId(1)}')),
+          findsOneWidget);
+
+      await pickOption(
+          tester, find.byKey(ValueKey('pinSheetOption:${nativeModeId(1)}')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinMode, PinState.startup);
+      expect(state.startupModeId, nativeModeId(1));
+      expect(state.selectedMode.id, nativeModeId(0),
+          reason: 'picking a startup value never rides it');
+    });
+
+    testWidgets('the padlock opens a sheet when it arms startup, assist',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike().copyWith(assist: 1),
+          build: (b) => EnhancedAssistControlWidget(bike: b),
+          connected: true);
+
+      await openSheet(tester, padlock);
+      expect(find.text(sheetTitle), findsOneWidget);
+      expect(find.byKey(const ValueKey('pinSheetOption:4')), findsOneWidget);
+
+      await pickOption(tester, find.byKey(const ValueKey('pinSheetOption:4')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinAssist, PinState.startup);
+      expect(state.startupAssist, 4);
+      expect(state.assist, 1, reason: 'picking a startup value never rides it');
+    });
+
+    testWidgets('the padlock opens a sheet when it arms startup, light',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike().copyWith(light: false),
+          build: (b) => EnhancedLightControlWidget(bike: b),
+          connected: true);
+
+      await openSheet(tester, padlock);
+      expect(find.text(sheetTitle), findsOneWidget);
+      expect(
+          find.byKey(const ValueKey('pinSheetOption:true')), findsOneWidget);
+      expect(
+          find.byKey(const ValueKey('pinSheetOption:false')), findsOneWidget);
+
+      await pickOption(
+          tester, find.byKey(const ValueKey('pinSheetOption:true')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinLight, PinState.startup);
+      expect(state.startupLight, isTrue);
+      expect(state.light, isFalse,
+          reason: 'picking a startup value never rides it');
+    });
+
+    testWidgets('dismissing the sheet leaves the pin exactly where it was',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike(),
+          build: (b) => EnhancedModeControlWidget(bike: b),
+          connected: true);
+
+      await openSheet(tester, padlock);
+      expect(find.text(sheetTitle), findsOneWidget);
+
+      await dismissSheet(tester);
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinMode, PinState.open);
+      expect(state.startupModeId, isNull,
+          reason: 'a dismissed sheet touches no startup field');
+    });
+
+    testWidgets('the sheet opens and saves a pick while disconnected, mode',
+        (tester) async {
+      // The point of the whole feature: a pin is app state, so it must work
+      // with the bike out of range.
+      final container = await pumpCard(tester,
+          bike: usBike(),
+          build: (b) => EnhancedModeControlWidget(bike: b),
+          connected: false);
+
+      await openSheet(tester, padlock);
+      expect(find.text(sheetTitle), findsOneWidget);
+
+      await pickOption(
+          tester, find.byKey(ValueKey('pinSheetOption:${nativeModeId(2)}')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinMode, PinState.startup);
+      expect(state.startupModeId, nativeModeId(2));
+    });
+
+    testWidgets('the sheet opens and saves a pick while disconnected, light',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike().copyWith(light: false),
+          build: (b) => EnhancedLightControlWidget(bike: b),
+          connected: false);
+
+      await openSheet(tester, padlock);
+      expect(find.text(sheetTitle), findsOneWidget);
+
+      await pickOption(
+          tester, find.byKey(const ValueKey('pinSheetOption:true')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinLight, PinState.startup);
+      expect(state.startupLight, isTrue);
+    });
 
     testWidgets('the caption appears only while the pin is on startup',
         (tester) async {
-      for (final (build, caption) in [
-        ((BikeState b) => EnhancedModeControlWidget(bike: b), modeCaption),
-        ((BikeState b) => EnhancedAssistControlWidget(bike: b), assistCaption),
-        ((BikeState b) => EnhancedLightControlWidget(bike: b), lightCaption),
+      for (final (build, captionPrefix) in [
+        ((BikeState b) => EnhancedModeControlWidget(bike: b), 'Starts with'),
+        ((BikeState b) => EnhancedAssistControlWidget(bike: b), 'Starts with'),
+        ((BikeState b) => EnhancedLightControlWidget(bike: b), 'Starts'),
       ]) {
         final container = await pumpCard(tester,
             bike: usBike(), build: build, connected: true);
@@ -432,41 +601,123 @@ void main() {
           control.cycleLightPin();
         }
 
-        expect(find.text(caption), findsNothing, reason: 'open shows nothing');
+        expect(find.textContaining(captionPrefix), findsNothing,
+            reason: 'open shows nothing');
 
         await cycle(container, cycleAll, tester, 1);
-        expect(find.text(caption), findsOneWidget);
+        expect(find.textContaining(captionPrefix), findsOneWidget);
 
         await cycle(container, cycleAll, tester, 1);
-        expect(find.text(caption), findsNothing,
-            reason: 'a locked pin holds a value, it does not select one');
+        expect(find.textContaining(captionPrefix), findsNothing,
+            reason: 'a locked pin holds a value, it shows no caption');
 
         await cycle(container, cycleAll, tester, 1);
-        expect(find.text(caption), findsNothing, reason: 'back to open');
+        expect(find.textContaining(captionPrefix), findsNothing,
+            reason: 'back to open');
         container.dispose();
       }
     });
 
-    testWidgets('locking the pin ends the selection state', (tester) async {
+    testWidgets('the mode caption re-opens the sheet without re-arming the pin',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike(),
+          build: (b) => EnhancedModeControlWidget(bike: b),
+          connected: true);
+      final control = container.read(bikeProvider(id).notifier);
+      // Arms startup: startupModeId captures the live mode, wire 0, "20 mph".
+      await cycle(container, control.cycleModePin, tester, 1);
+
+      await tester.tap(find.text('Starts with 20 mph · Change'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text(sheetTitle), findsOneWidget);
+      final markedIcon = tester.widget<Icon>(find.descendant(
+          of: find.byKey(ValueKey('pinSheetOption:${nativeModeId(0)}')),
+          matching: find.byType(Icon)));
+      expect(markedIcon.icon, Icons.radio_button_checked,
+          reason: 'the sheet premarks the current startup value');
+
+      await pickOption(
+          tester, find.byKey(ValueKey('pinSheetOption:${nativeModeId(3)}')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinMode, PinState.startup,
+          reason: 'the caption re-aims, it does not re-arm');
+      expect(state.startupModeId, nativeModeId(3));
+    });
+
+    testWidgets(
+        'the assist caption re-opens the sheet without re-arming the pin',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike().copyWith(assist: 1),
+          build: (b) => EnhancedAssistControlWidget(bike: b),
+          connected: true);
+      final control = container.read(bikeProvider(id).notifier);
+      await cycle(container, control.cycleAssistPin, tester, 1);
+
+      await tester.tap(find.text('Starts with 1 · Change'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text(sheetTitle), findsOneWidget);
+
+      await pickOption(tester, find.byKey(const ValueKey('pinSheetOption:3')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinAssist, PinState.startup,
+          reason: 'the caption re-aims, it does not re-arm');
+      expect(state.startupAssist, 3);
+    });
+
+    testWidgets('the light caption re-opens the sheet without re-arming the pin',
+        (tester) async {
+      final container = await pumpCard(tester,
+          bike: usBike().copyWith(light: false),
+          build: (b) => EnhancedLightControlWidget(bike: b),
+          connected: true);
+      final control = container.read(bikeProvider(id).notifier);
+      await cycle(container, control.cycleLightPin, tester, 1);
+
+      await tester.tap(find.text('Starts off · Change'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text(sheetTitle), findsOneWidget);
+
+      await pickOption(
+          tester, find.byKey(const ValueKey('pinSheetOption:true')));
+
+      final state = container.read(bikeProvider(id));
+      container.dispose();
+      expect(state.pinLight, PinState.startup,
+          reason: 'the caption re-aims, it does not re-arm');
+      expect(state.startupLight, isTrue);
+    });
+
+    testWidgets('a locked padlock needs no sheet', (tester) async {
       final container = await pumpCard(tester,
           bike: usBike(),
           build: (b) => EnhancedModeControlWidget(bike: b),
           connected: false);
       final control = container.read(bikeProvider(id).notifier);
-      // Startup, then locked: the second tap is the rider's way out.
+      // Startup, then locked: the second tap is the rider's way in, the third
+      // is their way out, and neither needs a sheet once locked.
       await cycle(container, control.cycleModePin, tester, 2);
       expect(container.read(bikeProvider(id)).pinMode, PinState.locked);
-      expect(find.text(modeCaption), findsNothing);
+      expect(find.textContaining('Starts with'), findsNothing);
 
-      await tester.tap(find.byKey(ValueKey('modeChip:${nativeModeId(3)}')));
-      await settle(tester);
+      await tester.tap(padlock);
+      await tester.pump();
+      expect(find.text(sheetTitle), findsNothing,
+          reason: 'a locked padlock cycles straight through, no sheet');
 
       final state = container.read(bikeProvider(id));
       container.dispose();
+      expect(state.pinMode, PinState.open);
       expect(state.startupModeId, nativeModeId(0),
-          reason: 'a locked pin no longer takes aim from a tap');
-      expect(state.selectedMode.id, nativeModeId(0),
-          reason: 'and a disconnected bike still ignores the tap');
+          reason: 'cycling past locked touches no startup field');
     });
   });
 }

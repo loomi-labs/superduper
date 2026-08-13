@@ -12,6 +12,7 @@ import 'package:superduper/colors.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/edit_bike.dart' as edit;
 import 'package:superduper/models.dart';
+import 'package:superduper/pin_sheet.dart';
 import 'package:superduper/repository.dart';
 import 'package:superduper/services.dart';
 import 'package:superduper/theme.dart';
@@ -1836,9 +1837,82 @@ bool _pinDegradedNow(WidgetRef ref, PinState pin) => pinDegraded(pin,
     hasService: _hasBackgroundService,
     notificationsBlocked: ref.watch(notificationsBlockedProvider));
 
+/// The line under a card whose pin is armed for startup: names the value the
+/// ride will start on, and reopens [showPinValueSheet] to change it.
+///
+/// A widget of its own, not [ControlCard.caption] (a plain `String`): the
+/// caption needs a tap target that the card's own `onTap` does not carry, and
+/// a `String` cannot hold one. Styled to match [ControlCard]'s own caption
+/// exactly — same padding, same `bodySmall`/[SDSurface.muted] — so the two
+/// cannot be told apart.
+class _StartupCaption extends StatelessWidget {
+  const _StartupCaption({required this.text, required this.onTap});
+
+  final String text;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, right: 8),
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Text(
+          text,
+          style: Theme.of(context)
+              .textTheme
+              .bodySmall
+              ?.copyWith(color: SDSurface.muted, fontSize: 12),
+        ),
+      ),
+    );
+  }
+}
+
 class EnhancedLightControlWidget extends ConsumerWidget {
   const EnhancedLightControlWidget({super.key, required this.bike});
   final BikeState bike;
+
+  static const _options = [
+    PinSheetOption<bool>(true, 'Light on'),
+    PinSheetOption<bool>(false, 'Light off'),
+  ];
+
+  /// The padlock's tap. A tap that is about to arm [PinState.startup] opens
+  /// the sheet first; any other tap (startup -> locked, locked -> open) needs
+  /// no sheet and cycles straight through.
+  Future<void> _tapPadlock(BuildContext context, Bike control) async {
+    if (nextPin(bike.pinLight) != PinState.startup) {
+      control.cycleLightPin();
+      return;
+    }
+    final picked = await showPinValueSheet<bool>(
+      context,
+      title: 'Start every ride with',
+      options: _options,
+      current: bike.light,
+    );
+    if (picked == null) {
+      return; // Dismissed: the pin stays exactly where it was.
+    }
+    control.cycleLightPin(); // Arms startup, captures the live value...
+    control.setStartupLight(picked); // ...then this overwrites it.
+  }
+
+  /// The caption's own tap: re-aims a pin that is already on startup, without
+  /// moving it.
+  Future<void> _tapCaption(BuildContext context, Bike control) async {
+    final picked = await showPinValueSheet<bool>(
+      context,
+      title: 'Start every ride with',
+      options: _options,
+      current: bike.startupLight ?? bike.light,
+    );
+    if (picked != null) {
+      control.setStartupLight(picked);
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1849,31 +1923,30 @@ class EnhancedLightControlWidget extends ConsumerWidget {
     // the Connect chip.
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
-    // A pin on startup turns the card into a picker for the value the ride
-    // starts on. That choice is app state, so it needs no bike: the connection
-    // gate is bypassed for it, and only for it.
-    final selecting = bike.pinLight == PinState.startup;
-    final startupLight = bike.startupLight ?? bike.light;
+    final startupPinned = bike.pinLight == PinState.startup;
     return ControlCard(
       colorIndex: bike.color,
       title: "Light",
       titleIcon: bike.light ? Icons.lightbulb : Icons.lightbulb_outline,
       active: bike.light,
-      enabled: connected || selecting,
-      caption: selecting
-          ? 'Tap the card to choose: light on or off at the start'
-          : null,
-      onTap: selecting
-          ? () => bikeControl.setStartupLight(!startupLight)
-          : (connected ? bikeControl.toggleLight : null),
+      enabled: connected,
+      onTap: connected ? bikeControl.toggleLight : null,
       // The light has no list, so its startup pin is a tag in the header.
-      badge: bike.pinLight == PinState.startup && bike.startupLight != null
+      badge: startupPinned && bike.startupLight != null
           ? (bike.startupLight! ? 'STARTS ON' : 'STARTS OFF')
+          : null,
+      body: startupPinned
+          ? _StartupCaption(
+              text: (bike.startupLight ?? bike.light)
+                  ? 'Starts on · Change'
+                  : 'Starts off · Change',
+              onTap: () => _tapCaption(context, bikeControl),
+            )
           : null,
       trailing: EnhancedLockWidget(
         pin: bike.pinLight,
         degraded: _pinDegradedNow(ref, bike.pinLight),
-        onTap: bikeControl.cycleLightPin,
+        onTap: () => _tapPadlock(context, bikeControl),
         tooltip: pinTooltip(bike.pinLight, 'light'),
       ),
     );
@@ -1883,6 +1956,57 @@ class EnhancedLightControlWidget extends ConsumerWidget {
 class EnhancedModeControlWidget extends ConsumerWidget {
   const EnhancedModeControlWidget({super.key, required this.bike});
   final BikeState bike;
+
+  List<PinSheetOption<String>> get _options => [
+        for (final mode in bike.selectableModes)
+          PinSheetOption(mode.id, mode.label(bike.region)),
+      ];
+
+  /// The mode [bike.startupModeId] resolves to, or null when it resolves to
+  /// none of [BikeState.selectableModes] — a custom mode pinned as startup,
+  /// later deleted. Null hides the caption rather than guessing another mode,
+  /// the same rule [EnhancedLightControlWidget]'s badge follows for a null
+  /// [BikeState.startupLight].
+  SelectedMode? get _startupMode {
+    for (final mode in bike.selectableModes) {
+      if (mode.id == bike.startupModeId) {
+        return mode;
+      }
+    }
+    return null;
+  }
+
+  /// The padlock's tap. See [EnhancedLightControlWidget._tapPadlock].
+  Future<void> _tapPadlock(BuildContext context, Bike control) async {
+    if (nextPin(bike.pinMode) != PinState.startup) {
+      control.cycleModePin();
+      return;
+    }
+    final picked = await showPinValueSheet<String>(
+      context,
+      title: 'Start every ride with',
+      options: _options,
+      current: bike.selectedMode.id,
+    );
+    if (picked == null) {
+      return;
+    }
+    control.cycleModePin();
+    control.setStartupMode(picked);
+  }
+
+  /// The caption's own tap. See [EnhancedLightControlWidget._tapCaption].
+  Future<void> _tapCaption(BuildContext context, Bike control) async {
+    final picked = await showPinValueSheet<String>(
+      context,
+      title: 'Start every ride with',
+      options: _options,
+      current: bike.startupModeId,
+    );
+    if (picked != null) {
+      control.setStartupMode(picked);
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1898,10 +2022,8 @@ class EnhancedModeControlWidget extends ConsumerWidget {
     // [EnhancedLightControlWidget].
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
-    // The card picks the mode a ride starts on while its pin is on startup —
-    // app state, so it works with the bike away. See
-    // [EnhancedLightControlWidget].
-    final selecting = bike.pinMode == PinState.startup;
+    final startupPinned = bike.pinMode == PinState.startup;
+    final startupMode = startupPinned ? _startupMode : null;
 
     return Column(
       children: [
@@ -1910,34 +2032,44 @@ class EnhancedModeControlWidget extends ConsumerWidget {
           title: "Mode",
           titleIcon: Icons.electric_bike,
           showSwitch: false,
-          enabled: connected || selecting,
-          caption: selecting ? 'Tap the mode the bike starts with' : null,
+          enabled: connected,
           trailing: EnhancedLockWidget(
             pin: bike.pinMode,
             degraded: _pinDegradedNow(ref, bike.pinMode),
-            onTap: bikeControl.cycleModePin,
+            onTap: () => _tapPadlock(context, bikeControl),
             tooltip: pinTooltip(bike.pinMode, 'mode'),
           ),
-          body: SelectorBody(
-            colorIndex: bike.color,
-            layout: SelectorLayout.rows,
-            items: [
-              for (final mode in bike.selectableModes)
-                SelectorItem(
-                  keyValue: 'modeChip:${mode.id}',
-                  label: mode.label(bike.region),
-                  tooltip: mode.note == null
-                      ? 'Select mode ${mode.name}'
-                      : '${mode.name} · ${mode.note}',
-                  selected: mode.id == selectedModeId,
-                  // The captured value, not the live one: the pin marks the
-                  // mode a ride starts on, which is not always the one on now.
-                  pinned: selecting && mode.id == bike.startupModeId,
-                  onTap: selecting
-                      ? () => bikeControl.setStartupMode(mode.id)
-                      : (connected
+          body: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectorBody(
+                colorIndex: bike.color,
+                layout: SelectorLayout.rows,
+                items: [
+                  for (final mode in bike.selectableModes)
+                    SelectorItem(
+                      keyValue: 'modeChip:${mode.id}',
+                      label: mode.label(bike.region),
+                      tooltip: mode.note == null
+                          ? 'Select mode ${mode.name}'
+                          : '${mode.name} · ${mode.note}',
+                      selected: mode.id == selectedModeId,
+                      // The captured value, not the live one: the pin marks
+                      // the mode a ride starts on, which is not always the
+                      // one on now.
+                      pinned:
+                          startupPinned && mode.id == bike.startupModeId,
+                      onTap: connected
                           ? () => bikeControl.selectMode(mode.id)
-                          : null),
+                          : null,
+                    ),
+                ],
+              ),
+              if (startupMode != null)
+                _StartupCaption(
+                  text:
+                      'Starts with ${startupMode.label(bike.region)} · Change',
+                  onTap: () => _tapCaption(context, bikeControl),
                 ),
             ],
           ),
@@ -2117,6 +2249,42 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
   const EnhancedAssistControlWidget({super.key, required this.bike});
   final BikeState bike;
 
+  static final _options = [
+    for (var level = 0; level <= 4; level++) PinSheetOption(level, '$level'),
+  ];
+
+  /// The padlock's tap. See [EnhancedLightControlWidget._tapPadlock].
+  Future<void> _tapPadlock(BuildContext context, Bike control) async {
+    if (nextPin(bike.pinAssist) != PinState.startup) {
+      control.cycleAssistPin();
+      return;
+    }
+    final picked = await showPinValueSheet<int>(
+      context,
+      title: 'Start every ride with',
+      options: _options,
+      current: bike.assist,
+    );
+    if (picked == null) {
+      return;
+    }
+    control.cycleAssistPin();
+    control.setStartupAssist(picked);
+  }
+
+  /// The caption's own tap. See [EnhancedLightControlWidget._tapCaption].
+  Future<void> _tapCaption(BuildContext context, Bike control) async {
+    final picked = await showPinValueSheet<int>(
+      context,
+      title: 'Start every ride with',
+      options: _options,
+      current: bike.startupAssist ?? bike.assist,
+    );
+    if (picked != null) {
+      control.setStartupAssist(picked);
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     var bikeControl = ref.watch(bikeProvider(bike.id).notifier);
@@ -2124,43 +2292,45 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
     // drops it silently. See [EnhancedLightControlWidget].
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
-    // The card picks the level a ride starts on while its pin is on startup —
-    // app state, so it works with the bike away. See
-    // [EnhancedLightControlWidget].
-    final selecting = bike.pinAssist == PinState.startup;
+    final startupPinned = bike.pinAssist == PinState.startup;
     // The level a ride starts on, or null while nothing pins one.
-    final startupAssist = selecting ? bike.startupAssist : null;
+    final startupAssist = startupPinned ? bike.startupAssist : null;
 
     return ControlCard(
       colorIndex: bike.color,
       title: "Assist",
       titleIcon: Icons.autorenew,
       showSwitch: false,
-      enabled: connected || selecting,
-      caption:
-          selecting ? 'Tap the assist level the bike starts with' : null,
+      enabled: connected,
       trailing: EnhancedLockWidget(
         pin: bike.pinAssist,
         degraded: _pinDegradedNow(ref, bike.pinAssist),
-        onTap: bikeControl.cycleAssistPin,
+        onTap: () => _tapPadlock(context, bikeControl),
         tooltip: pinTooltip(bike.pinAssist, 'assist'),
       ),
-      body: SelectorBody(
-        colorIndex: bike.color,
-        layout: SelectorLayout.segments,
-        // The underline alone is too small to say what it means.
-        caption: startupAssist == null ? null : 'Starts at $startupAssist',
-        items: [
-          for (var level = 0; level <= 4; level++)
-            SelectorItem(
-              keyValue: 'assistChip:$level',
-              label: '$level',
-              tooltip: 'Select assist $level',
-              selected: bike.assist == level,
-              pinned: level == startupAssist,
-              onTap: selecting
-                  ? () => bikeControl.setStartupAssist(level)
-                  : (connected ? () => bikeControl.setAssist(level) : null),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SelectorBody(
+            colorIndex: bike.color,
+            layout: SelectorLayout.segments,
+            items: [
+              for (var level = 0; level <= 4; level++)
+                SelectorItem(
+                  keyValue: 'assistChip:$level',
+                  label: '$level',
+                  tooltip: 'Select assist $level',
+                  selected: bike.assist == level,
+                  pinned: level == startupAssist,
+                  onTap:
+                      connected ? () => bikeControl.setAssist(level) : null,
+                ),
+            ],
+          ),
+          if (startupAssist != null)
+            _StartupCaption(
+              text: 'Starts with $startupAssist · Change',
+              onTap: () => _tapCaption(context, bikeControl),
             ),
         ],
       ),
