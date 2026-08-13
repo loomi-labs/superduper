@@ -44,27 +44,62 @@ bool isSettingsPacket(List<int> data) =>
 /// A firmware profile of the bike, addressed by the raw wire byte the settings
 /// packet carries. Wires 0-7 are contiguous, so the wire is the table index.
 class FirmwareProfile {
-  const FirmwareProfile(this.wire, this.name, this.capKmh,
+  const FirmwareProfile(this.wire, this.name, this.capKmh, this.capMph,
+      this.note,
       {required this.throttle});
   final int wire;
   final String name;
 
   /// null = no limiter (off-road).
   final int? capKmh;
+
+  /// The legal class limit in mph, written out per wire rather than
+  /// converted from [capKmh]: a US class limit is defined in mph, and 32
+  /// km/h is 19.88 mph, not the 20 mph the class actually allows. Null
+  /// exactly where [capKmh] is null.
+  final int? capMph;
+
+  /// The tooltip tail shown beside [label], e.g. `'US Class 1, pedal assist
+  /// only'`.
+  final String note;
   final bool throttle;
 
   bool get unlimited => capKmh == null;
+
+  /// The row/chip label a rider sees: the speed limit in [region]'s unit,
+  /// not the firmware name — a firmware name like `MODE 2` says nothing
+  /// about what the mode does. The one exception is an unlimited profile,
+  /// which has no speed to print and keeps the firmware name `OFFROAD`,
+  /// matching the bike's own display.
+  String label(BikeRegion? region) {
+    if (capKmh == null) {
+      return 'OFFROAD';
+    }
+    final useMph = region == BikeRegion.us || region == null;
+    final cap = useMph ? capMph : capKmh;
+    final unit = useMph ? 'mph' : 'km/h';
+    final base = '$cap $unit';
+    return throttle ? '$base + throttle' : base;
+  }
 }
 
 const firmwareProfiles = <FirmwareProfile>[
-  FirmwareProfile(0, 'ECO', 32, throttle: false), // US Class 1
-  FirmwareProfile(1, 'TOUR', 32, throttle: true), // US Class 2
-  FirmwareProfile(2, 'SPORT', 45, throttle: false), // US Class 3
-  FirmwareProfile(3, 'OFFROAD', null, throttle: true), // US off-road
-  FirmwareProfile(4, 'EPAC', 25, throttle: false),
-  FirmwareProfile(5, 'MODE 2', 35, throttle: false),
-  FirmwareProfile(6, 'MODE 3', 45, throttle: false),
-  FirmwareProfile(7, 'OFFROAD', null, throttle: true), // EU off-road
+  FirmwareProfile(0, 'ECO', 32, 20, 'US Class 1, pedal assist only',
+      throttle: false), // US Class 1
+  FirmwareProfile(1, 'TOUR', 32, 20, 'US Class 2, throttle',
+      throttle: true), // US Class 2
+  FirmwareProfile(2, 'SPORT', 45, 28, 'US Class 3, pedal assist only',
+      throttle: false), // US Class 3
+  FirmwareProfile(3, 'OFFROAD', null, null, 'US off-road · no limit, throttle',
+      throttle: true), // US off-road
+  FirmwareProfile(4, 'EPAC', 25, 16, 'EU, pedal assist only',
+      throttle: false),
+  FirmwareProfile(5, 'MODE 2', 35, 22, 'EU, pedal assist only',
+      throttle: false),
+  FirmwareProfile(6, 'MODE 3', 45, 28, 'EU, pedal assist only',
+      throttle: false),
+  FirmwareProfile(7, 'OFFROAD', null, null, 'EU off-road · no limit, throttle',
+      throttle: true), // EU off-road
 ];
 
 FirmwareProfile profileByWire(int wire) => firmwareProfiles[wire];
@@ -284,6 +319,14 @@ int? nativeWireOf(String modeId) => modeId.startsWith(_nativePrefix)
 sealed class SelectedMode {
   String get id;
   String get name;
+
+  /// The row/chip label: the speed limit for a native mode, the rider's own
+  /// name for a custom one. See [FirmwareProfile.label].
+  String label(BikeRegion? region);
+
+  /// The tooltip tail for a native mode's [FirmwareProfile.note], null for a
+  /// custom mode — it has no firmware profile to look up.
+  String? get note;
 }
 
 // Both are values, not identities: [BikeState.selectableModes] allocates a
@@ -297,6 +340,12 @@ class NativeSelection implements SelectedMode {
 
   @override
   String get name => profile.name;
+
+  @override
+  String label(BikeRegion? region) => profile.label(region);
+
+  @override
+  String? get note => profile.note;
 
   @override
   bool operator ==(Object other) =>
@@ -315,6 +364,15 @@ class CustomSelection implements SelectedMode {
 
   @override
   String get name => mode.name;
+
+  // The rider already named this mode; region carries no firmware profile to
+  // look a speed up in, so the custom name is the whole label. mph display
+  // for a custom mode on a US bike is a separate change (see PLAN2).
+  @override
+  String label(BikeRegion? region) => mode.name;
+
+  @override
+  String? get note => null;
 
   @override
   bool operator ==(Object other) =>

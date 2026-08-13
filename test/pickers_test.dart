@@ -119,9 +119,15 @@ void main() {
 
     // US: four native modes, then the bike's own two.
     expect(find.byType(SelectorChip), findsNWidgets(6));
-    expect(chipLabel(tester, 'modeChip:${nativeModeId(0)}'), 'ECO');
+    // The chip shows the speed limit, not the firmware name: ECO says
+    // nothing to a rider, 20 mph does. The firmware name moves into the
+    // tooltip instead, next to its note.
+    expect(chipLabel(tester, 'modeChip:${nativeModeId(0)}'), '20 mph');
     expect(chipLabel(tester, 'modeChip:${tour30.id}'), 'Tour 30');
     expect(chipLabel(tester, 'modeChip:${sport45.id}'), 'Sport 45');
+    final eco = chips(tester)
+        .firstWhere((c) => c.item.keyValue == 'modeChip:${nativeModeId(0)}');
+    expect(eco.item.tooltip, 'ECO · US Class 1, pedal assist only');
 
     final selected = chips(tester).where((c) => c.item.selected).toList();
     // Before the expects: the notifier's poll timer has to be cancelled while

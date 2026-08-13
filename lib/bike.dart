@@ -1925,8 +1925,10 @@ class EnhancedModeControlWidget extends ConsumerWidget {
               for (final mode in bike.selectableModes)
                 SelectorItem(
                   keyValue: 'modeChip:${mode.id}',
-                  label: mode.name,
-                  tooltip: 'Select mode ${mode.name}',
+                  label: mode.label(bike.region),
+                  tooltip: mode.note == null
+                      ? 'Select mode ${mode.name}'
+                      : '${mode.name} · ${mode.note}',
                   selected: mode.id == selectedModeId,
                   // The captured value, not the live one: the pin marks the
                   // mode a ride starts on, which is not always the one on now.

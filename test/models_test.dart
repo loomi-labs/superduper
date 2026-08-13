@@ -788,6 +788,24 @@ void main() {
               .name,
           'MODE 2');
     });
+
+    test('label() renders the speed, not the firmware name', () {
+      expect(
+          bike(region: BikeRegion.eu).withSelectedMode('native:5').selectedMode
+              .label(BikeRegion.eu),
+          '35 km/h');
+    });
+
+    test('a custom selection labels itself with its own name, region unused',
+        () {
+      final selected =
+          bike(region: BikeRegion.us, customModes: [tour30])
+              .withSelectedMode(tour30.id)
+              .selectedMode;
+      expect(selected.label(BikeRegion.us), 'Tour 30');
+      expect(selected.label(BikeRegion.eu), 'Tour 30');
+      expect(selected.label(null), 'Tour 30');
+    });
   });
 
   group('firmware profiles', () {
@@ -804,6 +822,37 @@ void main() {
       expect(profileByWire(chWireHigh).throttle, isFalse);
       expect(profileByWire(chWireOffroad).unlimited, isTrue);
       expect(profileByWire(chWireUsOffroad).unlimited, isTrue);
+    });
+  });
+
+  group('FirmwareProfile.label', () {
+    test('EU natives read their km/h cap', () {
+      expect(profileByWire(4).label(BikeRegion.eu), '25 km/h'); // EPAC
+      expect(profileByWire(5).label(BikeRegion.eu), '35 km/h'); // MODE 2
+      expect(profileByWire(6).label(BikeRegion.eu), '45 km/h'); // MODE 3
+    });
+
+    test('the EU off-road wire reads OFFROAD, not a speed', () {
+      expect(profileByWire(7).label(BikeRegion.eu), 'OFFROAD');
+    });
+
+    test('US natives read their mph class limit, not a km/h conversion', () {
+      expect(profileByWire(0).label(BikeRegion.us), '20 mph'); // ECO
+      expect(profileByWire(1).label(BikeRegion.us), '20 mph + throttle'); // TOUR
+      expect(profileByWire(2).label(BikeRegion.us), '28 mph'); // SPORT
+    });
+
+    test('the US off-road wire reads OFFROAD too', () {
+      expect(profileByWire(3).label(BikeRegion.us), 'OFFROAD');
+    });
+
+    test('CH reads the EU bank in km/h', () {
+      expect(profileByWire(4).label(BikeRegion.ch), '25 km/h');
+      expect(profileByWire(7).label(BikeRegion.ch), 'OFFROAD');
+    });
+
+    test('a null region defaults to mph, matching selectableModes', () {
+      expect(profileByWire(0).label(null), '20 mph');
     });
   });
 
