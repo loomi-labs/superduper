@@ -657,49 +657,62 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
 
                 const SizedBox(height: 32),
 
-                // Custom modes section
-                Text(
-                  'Custom Modes',
-                  style: Theme.of(context).textTheme.titleSmall!.copyWith(
-                        color: Colors.grey[400],
-                      ),
-                ),
-
-                // The tiles render ListTiles, whose ink needs a Material the
-                // sheet's own coloured container does not provide.
-                Material(
-                  type: MaterialType.transparency,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      for (final mode in _draftModes)
-                        _CustomModeTile(
-                          key: ValueKey('customModeTile:${mode.id}'),
-                          mode: mode,
-                          region: _draftBike.region,
-                          onTap: () => _editCustomMode(mode),
-                          onDelete: () => _deleteCustomMode(mode),
+                // Custom modes section — a custom mode is a mode write by
+                // another name, so a bike that has proven it refuses the mode
+                // gets no entry point for one, only the reason why.
+                if (widget.bike.capabilities?.modeWritable ?? true) ...[
+                  Text(
+                    'Custom Modes',
+                    style: Theme.of(context).textTheme.titleSmall!.copyWith(
+                          color: Colors.grey[400],
                         ),
-                    ],
                   ),
-                ),
 
-                const SizedBox(height: 8),
-
-                OutlinedButton.icon(
-                  key: const ValueKey('addCustomModeButton'),
-                  onPressed: _addCustomMode,
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('Add custom mode'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    side: BorderSide(color: Colors.grey[700]!),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
+                  // The tiles render ListTiles, whose ink needs a Material the
+                  // sheet's own coloured container does not provide.
+                  Material(
+                    type: MaterialType.transparency,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        for (final mode in _draftModes)
+                          _CustomModeTile(
+                            key: ValueKey('customModeTile:${mode.id}'),
+                            mode: mode,
+                            region: _draftBike.region,
+                            onTap: () => _editCustomMode(mode),
+                            onDelete: () => _deleteCustomMode(mode),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
+
+                  const SizedBox(height: 8),
+
+                  OutlinedButton.icon(
+                    key: const ValueKey('addCustomModeButton'),
+                    onPressed: _addCustomMode,
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('Add custom mode'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: BorderSide(color: Colors.grey[700]!),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ] else
+                  Text(
+                    'This bike does not let the app change the mode, so '
+                    'custom modes have no effect here.',
+                    key: const ValueKey('customModesDisabledNote'),
+                    style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
+                  ),
               ],
             ),
           ),

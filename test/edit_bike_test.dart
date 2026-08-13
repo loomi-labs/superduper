@@ -500,13 +500,20 @@ void main() {
     /// A CH bike carrying [modes], selected on [modeId]. [region], when given,
     /// overrides the default CH region — the US/EU cases share this helper
     /// rather than a second one, so both paths build the bike the same way.
+    /// [capabilities], when given, overrides the fake bike's seeded (fully
+    /// writable) measurement — WP7's gate needs a bike proven to refuse a
+    /// mode write.
     Future<ProviderContainer> openWith(WidgetTester tester,
-        List<CustomMode> modes, String modeId, {BikeRegion? region}) async {
+        List<CustomMode> modes, String modeId,
+        {BikeRegion? region, BikeCapabilities? capabilities}) async {
       final container = ProviderContainer();
       container.listen(bikeProvider(id), (previous, next) {});
       var bike = BikeState.defaultState(id).copyWith(customModes: modes);
       if (region != null) {
         bike = bike.copyWith(region: region);
+      }
+      if (capabilities != null) {
+        bike = bike.copyWith(capabilities: capabilities);
       }
       container.read(bikeProvider(id).notifier).writeStateData(
           bike.withSelectedMode(modeId), saveToBike: false);
@@ -1202,6 +1209,55 @@ void main() {
         final subtitle = find.text('40 km/h');
         container.dispose();
         expect(subtitle, findsOneWidget);
+      });
+    });
+
+    group('capability gating', () {
+      BikeCapabilities caps({List<int> acceptedWires = const [
+        0, 1, 2, 3, 4, 5, 6, 7
+      ]}) =>
+          BikeCapabilities(
+            measuredAt: DateTime(2024),
+            acceptedWires: acceptedWires,
+            acceptedAssist: const [0, 1, 2, 3, 4],
+            lightWritable: true,
+          );
+
+      testWidgets(
+          'a bike that refuses the mode hides the custom-mode section and '
+          'says why', (tester) async {
+        final container = await openWith(
+            tester, const [seededChMode], seededChModeId,
+            capabilities: caps(acceptedWires: const [4]));
+
+        container.dispose();
+        expect(find.text('Custom Modes'), findsNothing);
+        expect(find.byKey(const ValueKey('addCustomModeButton')), findsNothing);
+        expect(find.byKey(ValueKey('customModeTile:$seededChModeId')),
+            findsNothing);
+        expect(
+            find.byKey(const ValueKey('customModesDisabledNote')),
+            findsOneWidget);
+        expect(
+            find.text('This bike does not let the app change the mode, so '
+                'custom modes have no effect here.'),
+            findsOneWidget);
+      });
+
+      testWidgets('a bike that accepts the mode shows the section as always',
+          (tester) async {
+        final container = await openWith(
+            tester, const [seededChMode], seededChModeId,
+            capabilities: caps());
+
+        container.dispose();
+        expect(find.text('Custom Modes'), findsOneWidget);
+        expect(
+            find.byKey(const ValueKey('addCustomModeButton')), findsOneWidget);
+        expect(find.byKey(ValueKey('customModeTile:$seededChModeId')),
+            findsOneWidget);
+        expect(find.byKey(const ValueKey('customModesDisabledNote')),
+            findsNothing);
       });
     });
   });

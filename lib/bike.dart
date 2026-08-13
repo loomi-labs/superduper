@@ -2025,7 +2025,23 @@ class EnhancedLightControlWidget extends ConsumerWidget {
     // the Connect chip.
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
-    final startupPinned = bike.pinLight == PinState.startup;
+    // Defaults to writable: WP5's gate means capabilities is never actually
+    // null here, but a widget that could trivially default around a stray
+    // null should not crash on it instead.
+    final lightWritable = bike.capabilities?.lightWritable ?? true;
+    final startupPinned = lightWritable && bike.pinLight == PinState.startup;
+    if (!lightWritable) {
+      return ControlCard(
+        colorIndex: bike.color,
+        title: "Light",
+        titleIcon: bike.light ? Icons.lightbulb : Icons.lightbulb_outline,
+        active: bike.light,
+        showSwitch: false,
+        enabled: connected,
+        valueText: bike.light ? 'On' : 'Off',
+        caption: 'This bike does not let the app change the light.',
+      );
+    }
     return ControlCard(
       colorIndex: bike.color,
       title: "Light",
@@ -2124,58 +2140,73 @@ class EnhancedModeControlWidget extends ConsumerWidget {
     // [EnhancedLightControlWidget].
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
-    final startupPinned = bike.pinMode == PinState.startup;
+    // Defaults to writable: WP5's gate means capabilities is never actually
+    // null here, but a widget that could trivially default around a stray
+    // null should not crash on it instead.
+    final modeWritable = bike.capabilities?.modeWritable ?? true;
+    final startupPinned = modeWritable && bike.pinMode == PinState.startup;
     final startupMode = startupPinned ? _startupMode : null;
 
     return Column(
       children: [
-        ControlCard(
-          colorIndex: bike.color,
-          title: "Mode",
-          titleIcon: Icons.electric_bike,
-          showSwitch: false,
-          enabled: connected,
-          trailing: EnhancedLockWidget(
-            pin: bike.pinMode,
-            degraded: _pinDegradedNow(ref, bike.pinMode),
-            onTap: () => _tapPadlock(context, bikeControl),
-            tooltip: pinTooltip(bike.pinMode, 'mode'),
-          ),
-          body: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SelectorBody(
-                colorIndex: bike.color,
-                layout: SelectorLayout.rows,
-                items: [
-                  for (final mode in bike.selectableModes)
-                    SelectorItem(
-                      keyValue: 'modeChip:${mode.id}',
-                      label: mode.label(bike.region),
-                      tooltip: mode.note == null
-                          ? 'Select mode ${mode.name}'
-                          : '${mode.name} · ${mode.note}',
-                      selected: mode.id == selectedModeId,
-                      // The captured value, not the live one: the pin marks
-                      // the mode a ride starts on, which is not always the
-                      // one on now.
-                      pinned:
-                          startupPinned && mode.id == bike.startupModeId,
-                      onTap: connected
-                          ? () => bikeControl.selectMode(mode.id)
-                          : null,
-                    ),
-                ],
-              ),
-              if (startupMode != null)
-                _StartupCaption(
-                  text:
-                      'Starts with ${startupMode.label(bike.region)} · Change',
-                  onTap: () => _tapCaption(context, bikeControl),
+        if (!modeWritable)
+          ControlCard(
+            colorIndex: bike.color,
+            title: "Mode",
+            titleIcon: Icons.electric_bike,
+            showSwitch: false,
+            enabled: connected,
+            valueText: bike.selectedMode.label(bike.region),
+            caption: 'This bike does not let the app change the mode.',
+          )
+        else
+          ControlCard(
+            colorIndex: bike.color,
+            title: "Mode",
+            titleIcon: Icons.electric_bike,
+            showSwitch: false,
+            enabled: connected,
+            trailing: EnhancedLockWidget(
+              pin: bike.pinMode,
+              degraded: _pinDegradedNow(ref, bike.pinMode),
+              onTap: () => _tapPadlock(context, bikeControl),
+              tooltip: pinTooltip(bike.pinMode, 'mode'),
+            ),
+            body: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SelectorBody(
+                  colorIndex: bike.color,
+                  layout: SelectorLayout.rows,
+                  items: [
+                    for (final mode in bike.selectableModes)
+                      SelectorItem(
+                        keyValue: 'modeChip:${mode.id}',
+                        label: mode.label(bike.region),
+                        tooltip: mode.note == null
+                            ? 'Select mode ${mode.name}'
+                            : '${mode.name} · ${mode.note}',
+                        selected: mode.id == selectedModeId,
+                        // The captured value, not the live one: the pin marks
+                        // the mode a ride starts on, which is not always the
+                        // one on now.
+                        pinned:
+                            startupPinned && mode.id == bike.startupModeId,
+                        onTap: connected
+                            ? () => bikeControl.selectMode(mode.id)
+                            : null,
+                      ),
+                  ],
                 ),
-            ],
+                if (startupMode != null)
+                  _StartupCaption(
+                    text:
+                        'Starts with ${startupMode.label(bike.region)} · Change',
+                    onTap: () => _tapCaption(context, bikeControl),
+                  ),
+              ],
+            ),
           ),
-        ),
         // iOS has no background service, so a custom mode's speed switching
         // only runs while the app is in the foreground.
         if (Platform.isIOS && bike.needsSpeedSwitching)
@@ -2359,9 +2390,25 @@ class EnhancedAssistControlWidget extends ConsumerWidget {
     // drops it silently. See [EnhancedLightControlWidget].
     final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
         SDBluetoothConnectionState.connected;
-    final startupPinned = bike.pinAssist == PinState.startup;
+    // Defaults to writable: WP5's gate means capabilities is never actually
+    // null here, but a widget that could trivially default around a stray
+    // null should not crash on it instead.
+    final assistWritable = bike.capabilities?.assistWritable ?? true;
+    final startupPinned = assistWritable && bike.pinAssist == PinState.startup;
     // The level a ride starts on, or null while nothing pins one.
     final startupAssist = startupPinned ? bike.startupAssist : null;
+
+    if (!assistWritable) {
+      return ControlCard(
+        colorIndex: bike.color,
+        title: "Assist",
+        titleIcon: Icons.autorenew,
+        showSwitch: false,
+        enabled: connected,
+        valueText: '${bike.assist}',
+        caption: 'This bike does not let the app change the assist level.',
+      );
+    }
 
     return ControlCard(
       colorIndex: bike.color,

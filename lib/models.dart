@@ -899,11 +899,20 @@ abstract class BikeState with _$BikeState {
   /// Whether this bike needs the speed stream: only a custom mode whose base
   /// and cap profiles differ has anything to switch. An exact-match custom mode
   /// is as static as a native one — no stream, no keepAlive, no auto lock.
-  bool get needsSpeedSwitching => switch (selectedMode) {
-        CustomSelection(:final mode) =>
-          !isStaticCustomMode(mode, region: region),
-        NativeSelection() => false,
-      };
+  ///
+  /// A bike proven to refuse a mode write has nothing to switch either: the
+  /// app would only be pretending to hold a limit the firmware ignores.
+  /// [capabilities] left unmeasured (`null`) leaves this unchanged — only a
+  /// measured refusal short-circuits it.
+  bool get needsSpeedSwitching {
+    if (capabilities?.modeWritable == false) {
+      return false;
+    }
+    return switch (selectedMode) {
+      CustomSelection(:final mode) => !isStaticCustomMode(mode, region: region),
+      NativeSelection() => false,
+    };
+  }
 
   /// The settings write packet, `[0, 209, light, assist, wire, 0...]`.
   ///

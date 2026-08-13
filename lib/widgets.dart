@@ -197,6 +197,7 @@ class ControlCard extends StatelessWidget {
     this.enabled = true,
     this.onTap,
     this.badge,
+    this.valueText,
     this.caption,
     this.trailing,
     this.body,
@@ -222,6 +223,12 @@ class ControlCard extends StatelessWidget {
   /// A startup pin's tag, for a section that has no list to mark it in — the
   /// light is on or off, and nothing else.
   final String? badge;
+
+  /// Plain text in the header, right of the title — the bike's own value for
+  /// a control the app cannot change, e.g. `'25 km/h'`. Unlike [badge] this is
+  /// not a filled pill: a pill says "this is pinned", and a value the app
+  /// cannot write is not a pin, just a fact.
+  final String? valueText;
 
   /// One line under the header, or nothing. Says what the card's taps do while
   /// they mean something other than the usual — a startup pin turns the card
@@ -256,6 +263,16 @@ class ControlCard extends StatelessWidget {
         ),
         if (badge != null) ...[
           _PinBadge(text: badge!, accent: accent, onAccent: range.onAccent()),
+          const SizedBox(width: 10),
+        ],
+        if (valueText != null) ...[
+          Text(
+            valueText!,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: SDSurface.muted,
+                  fontWeight: FontWeight.w600,
+                ),
+          ),
           const SizedBox(width: 10),
         ],
         if (showSwitch) ControlSwitch(on: active, accent: accent),

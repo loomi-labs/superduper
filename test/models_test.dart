@@ -1678,6 +1678,26 @@ void main() {
           isFalse,
           reason: 'US falls back to a native mode');
     });
+
+    test('a bike that refuses the mode never switches, measured or not', () {
+      final switching = bike(region: BikeRegion.us, customModes: [tour30])
+          .withSelectedMode(tour30.id);
+      expect(switching.needsSpeedSwitching, isTrue,
+          reason: 'baseline: this mode would switch on its own');
+
+      final refused = switching.copyWith(
+          capabilities: BikeCapabilities(
+              measuredAt: DateTime(2024),
+              acceptedWires: const [0],
+              acceptedAssist: const [0, 1, 2, 3, 4],
+              lightWritable: true));
+      expect(refused.needsSpeedSwitching, isFalse,
+          reason: 'the bike has proven it ignores a mode write');
+
+      final unmeasured = switching.copyWith(capabilities: null);
+      expect(unmeasured.needsSpeedSwitching, isTrue,
+          reason: 'a bike never probed keeps today\'s behaviour');
+    });
   });
 
   group('remapModeForRegion', () {

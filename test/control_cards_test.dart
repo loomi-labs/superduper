@@ -719,5 +719,141 @@ void main() {
       expect(state.startupModeId, nativeModeId(0),
           reason: 'cycling past locked touches no startup field');
     });
+
+    /// WP7: each card gates on its own measured capability. A firmware that
+    /// refuses a write gets no picker for it — the row would do nothing when
+    /// tapped — but the other two controls, if the bike accepts them, keep
+    /// working exactly as before.
+    group('capability gating', () {
+      BikeCapabilities caps({
+        List<int> acceptedWires = const [0, 1, 2, 3, 4, 5, 6, 7],
+        List<int> acceptedAssist = const [0, 1, 2, 3, 4],
+        bool lightWritable = true,
+      }) =>
+          BikeCapabilities(
+            measuredAt: DateTime(2024),
+            acceptedWires: acceptedWires,
+            acceptedAssist: acceptedAssist,
+            lightWritable: lightWritable,
+          );
+
+      testWidgets('a bike that refuses the mode shows its value plainly',
+          (tester) async {
+        final bike =
+            usBike().copyWith(capabilities: caps(acceptedWires: const [0]));
+        final container = await pumpCard(tester,
+            bike: bike,
+            build: (b) => EnhancedModeControlWidget(bike: b),
+            connected: true);
+        container.dispose();
+
+        expect(find.byType(SelectorBody), findsNothing);
+        expect(find.byType(EnhancedLockWidget), findsNothing);
+        expect(find.text(bike.selectedMode.label(bike.region)),
+            findsOneWidget);
+        expect(find.text('This bike does not let the app change the mode.'),
+            findsOneWidget);
+      });
+
+      testWidgets(
+          'a bike that refuses the assist level shows its value plainly',
+          (tester) async {
+        final bike = usBike()
+            .copyWith(assist: 2, capabilities: caps(acceptedAssist: const [2]));
+        final container = await pumpCard(tester,
+            bike: bike,
+            build: (b) => EnhancedAssistControlWidget(bike: b),
+            connected: true);
+        container.dispose();
+
+        expect(find.byType(SelectorBody), findsNothing);
+        expect(find.byType(EnhancedLockWidget), findsNothing);
+        expect(find.text('2'), findsOneWidget);
+        expect(
+            find.text(
+                'This bike does not let the app change the assist level.'),
+            findsOneWidget);
+      });
+
+      testWidgets('a bike that refuses the light shows its value plainly',
+          (tester) async {
+        final bike = usBike()
+            .copyWith(light: true, capabilities: caps(lightWritable: false));
+        final container = await pumpCard(tester,
+            bike: bike,
+            build: (b) => EnhancedLightControlWidget(bike: b),
+            connected: true);
+
+        expect(find.byType(EnhancedLockWidget), findsNothing);
+        expect(find.text('On'), findsOneWidget);
+        expect(find.text('This bike does not let the app change the light.'),
+            findsOneWidget);
+
+        await tester.tap(find.text('Light'));
+        await settle(tester);
+        final state = container.read(bikeProvider(id));
+        container.dispose();
+        expect(state.light, isTrue, reason: 'a locked light ignores the tap');
+      });
+
+      testWidgets(
+          'each card gates on its own capability, not a combined flag',
+          (tester) async {
+        final onlyModeLocked = caps(acceptedWires: const [0]);
+
+        var container = await pumpCard(tester,
+            bike: usBike().copyWith(capabilities: onlyModeLocked),
+            build: (b) => EnhancedModeControlWidget(bike: b),
+            connected: true);
+        expect(find.byType(EnhancedLockWidget), findsNothing,
+            reason: 'mode is the one capability this bike refuses');
+        container.dispose();
+
+        container = await pumpCard(tester,
+            bike: usBike().copyWith(assist: 1, capabilities: onlyModeLocked),
+            build: (b) => EnhancedAssistControlWidget(bike: b),
+            connected: true);
+        expect(find.byType(EnhancedLockWidget), findsOneWidget,
+            reason: 'assist is still writable even though mode is not');
+        container.dispose();
+
+        container = await pumpCard(tester,
+            bike: usBike().copyWith(light: false, capabilities: onlyModeLocked),
+            build: (b) => EnhancedLightControlWidget(bike: b),
+            connected: true);
+        expect(find.byType(EnhancedLockWidget), findsOneWidget,
+            reason: 'light is still writable even though mode is not');
+        container.dispose();
+      });
+
+      testWidgets(
+          'capabilities == null falls back to fully writable, defensively',
+          (tester) async {
+        final bike = usBike().copyWith(capabilities: null);
+
+        var container = await pumpCard(tester,
+            bike: bike,
+            build: (b) => EnhancedModeControlWidget(bike: b),
+            connected: true);
+        expect(find.byType(SelectorBody), findsOneWidget);
+        expect(find.byType(EnhancedLockWidget), findsOneWidget);
+        container.dispose();
+
+        container = await pumpCard(tester,
+            bike: bike.copyWith(assist: 1),
+            build: (b) => EnhancedAssistControlWidget(bike: b),
+            connected: true);
+        expect(find.byType(SelectorBody), findsOneWidget);
+        expect(find.byType(EnhancedLockWidget), findsOneWidget);
+        container.dispose();
+
+        container = await pumpCard(tester,
+            bike: bike,
+            build: (b) => EnhancedLightControlWidget(bike: b),
+            connected: true);
+        expect(find.byType(EnhancedLockWidget), findsOneWidget);
+        container.dispose();
+      });
+    });
   });
 }
