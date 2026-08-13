@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -136,6 +137,31 @@ class _CountingFlakyStore extends FakeBikeStore {
       throw Exception('BLE write failed');
     }
     super.write(deviceId, data);
+  }
+}
+
+/// Combines [_CountingWriteStore] and [_ReentrantReadStore]: records every
+/// write, and calls [onRead] once from inside the next read after it is set
+/// — the exact seam a test needs to fire the ordinary poll's own read from
+/// between two of [Bike.probeCapabilities]'s write-then-read steps, the way
+/// the register queue actually interleaves them (see the regression test
+/// this exists for).
+class _CountingReentrantStore extends FakeBikeStore {
+  final writes = <List<int>>[];
+  void Function()? onRead;
+
+  @override
+  void write(String deviceId, List<int> data) {
+    writes.add(List.of(data));
+    super.write(deviceId, data);
+  }
+
+  @override
+  List<int> read(String deviceId) {
+    final callback = onRead;
+    onRead = null;
+    callback?.call();
+    return super.read(deviceId);
   }
 }
 
@@ -2528,13 +2554,109 @@ void main() {
           reason: 'the finally block parks on the boot wire it started from');
     });
 
-    test('refuses while a calibration window is open', () async {
+    test('succeeds while a calibration window is open', () async {
+      // The setup wizard holds the window open across the whole probe (see
+      // setup_page.dart's _run): refusing here would just force the caller
+      // to close it at the one moment protection matters most, which is the
+      // bug this contract change fixes. probeCapabilities's own writes go
+      // straight through ConnectionHandler.write, below _calibrating's
+      // suppression, so the window buys the probe nothing either way — it
+      // protects the rest of the app from the probe, not the other way
+      // round.
       final container = makeContainer();
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
       bike.setCalibrating(true);
 
-      expect(await bike.probeCapabilities(bootA), isNull);
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, List.generate(8, (i) => i));
+    });
+
+    test(
+        'an interleaved poll cannot write a startup pin mid-probe on a bike '
+        'with an existing boot signature', () async {
+      // Reproduces the bug the old open/close dance around probeCapabilities
+      // caused on a "set up this bike again" run: the ordinary poll firing
+      // between two of the probe's own write-then-read steps could see the
+      // probe's own transient value, mistake it for the second power cycle,
+      // and write a startup pin over the sweep's own writes. Holding the
+      // window open throughout (the fix) must let the probe still run
+      // cleanly, and must stop the poll's write from ever reaching the bike.
+      final store = _CountingReentrantStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      // The app's last read of this bike, before the probe: wire 5 — the
+      // same wire the selected mode already asserts, so this read settles
+      // with no heal write of its own, and nothing like the boot wire the
+      // signature below is about to name.
+      store.write(id, [0, 209, 0, 2, 5, 0, 0, 0, 0, 0]);
+      await bike.updateStateDataNow();
+      await settle();
+      expect(container.read(bikeProvider(id)).lastSeen,
+          const LastSeen(assist: 2, light: false, wire: 5));
+
+      // A boot signature left by an earlier setup run: this bike resets to
+      // wire 0 on power-on. The probe's own wire sweep tries wire 0 first
+      // (with bootA's own assist/light held, unchanged) — the exact
+      // transient the old bug let the poll misread as a real second power
+      // cycle.
+      final signature = classifyCapabilityBoot(
+          bootA: (light: false, assist: 2, wire: 0),
+          parting: (light: false, assist: 2, wire: 5),
+          bootB: (light: false, assist: 2, wire: 0),
+          measuredAt: DateTime(2026, 8, 11));
+      bike.writeStateData(
+          container.read(bikeProvider(id)).copyWith(
+              bootSignature: signature,
+              pinMode: PinState.startup,
+              startupModeId: nativeModeId(3)),
+          saveToBike: false);
+      await settle();
+
+      // Matches the fixed wizard: the window stays open through the whole
+      // probe, never closed around this call.
+      bike.setCalibrating(true);
+
+      // Everything above this line is setup noise (the seeding writes, the
+      // read that resolved them) — cleared so the count below is only the
+      // probe's own writes, plus whatever the interleaved poll adds.
+      store.writes.clear();
+
+      // Fires once, from inside the very first step's own readback — right
+      // where the register queue actually interleaves a queued action
+      // between two of the probe's steps (see _CountingReentrantStore).
+      store.onRead = () {
+        unawaited(bike.updateStateDataNow());
+      };
+
+      final caps = await bike.probeCapabilities(
+          const LastSeen(assist: 2, light: false, wire: 5));
+      await settle();
+
+      expect(caps, isNotNull,
+          reason: 'the probe must still run to completion under the open '
+              'window');
+      expect(caps!.acceptedWires, List.generate(8, (i) => i),
+          reason: "an interleaved poll read must not corrupt the sweep's "
+              'own readback');
+      expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
+      expect(caps.lightWritable, isTrue);
+      expect(store.writes.length, 15,
+          reason: 'the interleaved poll must add no write of its own: with '
+              "the window still open, writeStateData drops it — 8 wire + 1 "
+              'safe-wire settle + 5 assist + 1 light is the sweep\'s own '
+              'total for a bike that accepts everything, so any extra write '
+              'means the poll leaked one onto the bike');
+      expect(selectedId(container), nativeModeId(5),
+          reason: 'the startup pin must not have fired mid-probe: the bike '
+              'is still on the mode it started the probe with');
     });
 
     test('refuses while the bike is moving', () async {

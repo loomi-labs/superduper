@@ -966,14 +966,25 @@ class Bike extends _$Bike {
   /// Sweeps every wire (0-7), every assist level (0-4) and the light,
   /// writing each raw and reading back what stuck, against [bootA] — the
   /// fresh-boot read the caller took just before calling this. Refuses while
-  /// calibrating or moving.
+  /// moving.
+  ///
+  /// Expected to run WHILE a calibration window is open, not outside one: the
+  /// window is what stops the ordinary poll (see [updateStateDataNow]) from
+  /// interleaving a heal or a startup-pin write with the sweep, which would
+  /// otherwise race this probe's own writes on the same register. This does
+  /// not protect the probe from itself — see the next paragraph — so it is
+  /// still the caller's job to hold the window open across this call.
   ///
   /// Never calls [writeStateData]: none of this is a mode selection the app
   /// should remember mid-sweep, and the production write pipeline's side
   /// effects (a bikes.json save per write, foreground-service sync,
   /// dynamic-mode re-entry) are wrong for a raw firmware probe. Every write
   /// instead goes straight through [ConnectionHandler.write], below the
-  /// notifier's normal abstractions.
+  /// notifier's normal abstractions — and below [_calibrating]'s own
+  /// suppression, which only guards [writeStateData]. A calibration window
+  /// open around this call protects the REST of the app from the sweep; it
+  /// does nothing for the sweep's own writes, which is exactly why refusing
+  /// to run while one is open bought nothing.
   ///
   /// Returns null only when the probe could not run at all — not when it ran
   /// and found nothing writable. A bike that refuses every write is still a
@@ -986,10 +997,6 @@ class Bike extends _$Bike {
   /// omitting it changes nothing about the sweep itself.
   Future<BikeCapabilities?> probeCapabilities(LastSeen bootA,
       {void Function(String phase, int done, int total)? onProgress}) async {
-    if (_calibrating) {
-      _logCalibration('Refused to probe: a calibration window is open');
-      return null;
-    }
     if (!_isConnected || !_isStopped) {
       _logCalibration(
           'Refused to probe: connected $_isConnected, standing $_isStopped');

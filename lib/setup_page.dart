@@ -384,14 +384,13 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       _step = SetupStep.probing;
       _hint = null;
     });
-    // [Bike.probeCapabilities] refuses outright while [_calibrating] is
-    // set — it writes the bus directly, below writeStateData, and does not
-    // expect the write-suppression window to be held around it. The window
-    // is not needed here either: nothing but the probe's own writes touches
-    // the bike until the window reopens below, right after, to protect the
-    // parting read and the second power cycle the same way the first one
-    // was protected.
-    _bike.setCalibrating(false);
+    // The window stays open through the whole probe, on purpose: closing it
+    // here would let the ordinary poll interleave a heal or a startup-pin
+    // write with the sweep, racing the probe's own writes on the same
+    // register. [Bike.probeCapabilities] writes the bus directly, below
+    // writeStateData, so the window does nothing for the probe's own
+    // writes — it protects everything else from the probe, not the other
+    // way round.
     final capabilities = await _bike.probeCapabilities(bootA,
         onProgress: (phase, done, total) {
       if (!mounted) {
@@ -399,7 +398,6 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       }
       setState(() => _progress = (phase: phase, done: done, total: total));
     });
-    _bike.setCalibrating(true);
     if (!_alive) {
       return;
     }
@@ -411,8 +409,8 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     _capabilities = capabilities;
     // The probe's own parting state — what it left on the bus — is not
     // handed back by probeCapabilities itself, so it is captured with one
-    // more plain read, right after: nothing else touches the bike inside the
-    // (now reopened) calibrating window between the two calls.
+    // more plain read, right after: the window never closed between the two
+    // calls, so nothing else touched the bike in between.
     final parting = await _bike.readBikeState();
     if (!_alive) {
       return;
