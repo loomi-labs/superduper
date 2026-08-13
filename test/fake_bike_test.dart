@@ -18,9 +18,13 @@ void main() {
     final store = FakeBikeStore();
     expect(store.read(fakeId), [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     // Light off, assist 0 and a region already set: the read-back leaves a
-    // fresh bike exactly as it is.
-    expect(BikeState.defaultState(fakeId).updateFromData(store.read(fakeId)),
-        BikeState.defaultState(fakeId));
+    // fresh bike exactly as it is. capabilities/bootSignature each carry
+    // their own `measuredAt`, freshly stamped on every defaultState call, so
+    // they are excluded here rather than compared for exact equality.
+    final fresh = BikeState.defaultState(fakeId);
+    final updated = fresh.updateFromData(store.read(fakeId));
+    expect(updated.copyWith(capabilities: null, bootSignature: null),
+        fresh.copyWith(capabilities: null, bootSignature: null));
   });
 
   test('write echoes into the read register', () {

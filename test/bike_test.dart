@@ -139,21 +139,6 @@ class _CountingFlakyStore extends FakeBikeStore {
   }
 }
 
-/// A bike whose register changes from read to read: every read takes the next
-/// staged answer and the last one stays. Stands in for a controller that boots
-/// on one value and settles on another during the recording window.
-class _BootWindowStore extends FakeBikeStore {
-  final registers = <List<int>>[];
-
-  @override
-  List<int> read(String deviceId) {
-    if (registers.isEmpty) {
-      return super.read(deviceId);
-    }
-    return registers.length == 1 ? registers.first : registers.removeAt(0);
-  }
-}
-
 /// A switching custom mode: base wire 1 (32 km/h + throttle), cap wire 4
 /// (EPAC 25). Switches up above 30 km/h, back down below 28.
 const tour30 =
@@ -244,8 +229,17 @@ void main() {
   }) async {
     container.listen(bikeProvider(id), (previous, next) {});
     final bike = container.read(bikeProvider(id).notifier);
+    // capabilities/bootSignature are cleared: [BikeState.defaultState] seeds
+    // both for a fake id so the debug console and test_driver can reach the
+    // controls with no wizard to drive, but every test in this file means an
+    // "uncalibrated, unmeasured" bike by "fresh" — that is the behaviour
+    // being tested here, not the debug console's own convenience seed.
     bike.writeStateData(BikeState.defaultState(id)
-        .copyWith(region: region, customModes: customModes)
+        .copyWith(
+            region: region,
+            customModes: customModes,
+            capabilities: null,
+            bootSignature: null)
         .withSelectedMode(modeId));
     await settle();
     return bike;
@@ -1020,14 +1014,22 @@ void main() {
           reason: 'a locked padlock holds its value as it always did');
     });
 
-    /// Gives the bike the signature the calibration guide leaves behind on the
-    /// 2026-08-11 hardware: the wire byte resets to [bootWire], and the assist
-    /// byte comes back exactly as it was staged, so it is unusable.
-    Future<void> calibrate(Bike bike,
+    /// Gives the bike the signature the setup wizard leaves behind on the
+    /// 2026-08-11 hardware: the wire byte resets to [bootWire] on both boots,
+    /// and the assist byte comes back exactly as the probe's own parting
+    /// value, so it is unusable. Built through [classifyCapabilityBoot]
+    /// rather than a direct [BootSignature], so this stays a faithful stand-in
+    /// for what the real two-boot wizard would save.
+    Future<void> calibrate(Bike bike, ProviderContainer container,
         {required int preOffWire, required int bootWire}) async {
-      bike.saveBootSignature(
-          preOff: (assist: 2, wire: preOffWire),
-          settled: (assist: 2, wire: bootWire));
+      final signature = classifyCapabilityBoot(
+          bootA: (light: false, assist: 2, wire: bootWire),
+          parting: (light: false, assist: 2, wire: preOffWire),
+          bootB: (light: false, assist: 2, wire: bootWire),
+          measuredAt: DateTime(2026, 8, 11));
+      bike.writeStateData(
+          container.read(bikeProvider(id)).copyWith(bootSignature: signature),
+          saveToBike: false);
       await settle();
     }
 
@@ -1043,7 +1045,7 @@ void main() {
       await settle();
       expect(container.read(bikeProvider(id)).lastSeen?.wire, chWireLow,
           reason: 'the bike rides the base of its own pair');
-      await calibrate(bike, preOffWire: chWireLow, bootWire: chWireHigh);
+      await calibrate(bike, container, preOffWire: chWireLow, bootWire: chWireHigh);
       await armStartupPins(container, bike,
           modeId: nativeModeId(chWireOffroad), assist: 4);
 
@@ -1094,7 +1096,7 @@ void main() {
       await bike.updateStateDataNow();
       await settle();
       expect(container.read(bikeProvider(id)).lastSeen?.wire, chWireHigh);
-      await calibrate(bike, preOffWire: chWireLow, bootWire: chWireHigh);
+      await calibrate(bike, container, preOffWire: chWireLow, bootWire: chWireHigh);
       await armStartupPins(container, bike,
           modeId: nativeModeId(chWireOffroad), assist: 4);
 
@@ -1119,7 +1121,7 @@ void main() {
       await bike.updateStateDataNow();
       await settle();
       expect(container.read(bikeProvider(id)).lastSeen?.wire, chWireOffroad);
-      await calibrate(bike, preOffWire: chWireLow, bootWire: chWireHigh);
+      await calibrate(bike, container, preOffWire: chWireLow, bootWire: chWireHigh);
       await armStartupPins(container, bike,
           modeId: seededChModeId, assist: 4);
 
@@ -1131,6 +1133,68 @@ void main() {
       expect(selectedId(container), seededChModeId,
           reason: 'the ride starts on the pinned mode');
       expect(bikeAssist(container), 4);
+    });
+
+    /// [Bike._matchesBootSignature] gained a light comparison alongside its
+    /// existing wire/assist ones — see [classifyCapabilityBoot], the only
+    /// classifier that ever populates [BootSignature.bootLight]. Mirrors the
+    /// wire/assist tests above, on the byte those never covered.
+    test('a boot to the measured light applies the pins, wire and assist '
+        'unusable', () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(3), light: false, assist: 4);
+      bike.writeStateData(
+          container.read(bikeProvider(id)).copyWith(
+              bootSignature: BootSignature(
+                  measuredAt: DateTime(2026, 8, 11),
+                  bootLight: true,
+                  preOffWire: 0,
+                  preOffAssist: 0)),
+          saveToBike: false);
+      await settle();
+
+      // The wire and the assist come back exactly as they were before the
+      // outage — nothing there could ever prove a power cycle. Only the
+      // light differs, and only the light is in the signature.
+      setBikeRegister(container, light: true, assist: 0, wire: 0);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(3),
+          reason: 'the light byte alone proved the power cycle');
+      expect(bikeLight(container), 0, reason: 'the light is pinned off');
+      expect(bikeAssist(container), 4);
+    });
+
+    test('a bike already on its boot light applies nothing', () async {
+      final container = makeContainer();
+      final bike = await readBike(container);
+      await armStartupPins(container, bike,
+          modeId: nativeModeId(3), light: false, assist: 4);
+      // The bike already reported this light value before the outage, so a
+      // boot and a dropout report the same byte — no evidence, same
+      // conservative rule the wire byte follows.
+      bike.writeStateData(
+          container.read(bikeProvider(id)).copyWith(
+              bootSignature: BootSignature(
+                  measuredAt: DateTime(2026, 8, 11),
+                  bootLight: false,
+                  preOffWire: 0,
+                  preOffAssist: 0)),
+          saveToBike: false);
+      await settle();
+
+      setBikeRegister(container, light: false, assist: 0, wire: 0);
+      await cycleConnection(container);
+      await bike.updateStateDataNow();
+      await settle();
+
+      expect(selectedId(container), nativeModeId(0),
+          reason: 'nothing changed, so nothing proves the bike lost power');
+      expect(bikeAssist(container), isNot(4));
     });
   });
 
@@ -2242,100 +2306,6 @@ void main() {
       expect(store.writes.where((w) => w[0] == 0 && w[1] == 209), isNotEmpty,
           reason: 'the window is over, so the app enforces its mode again');
       expect(bikeWire(container), 5);
-    });
-
-    test('the window returns the bytes the bike settled on', () async {
-      final store = _BootWindowStore();
-      final container = ProviderContainer(overrides: [
-        fakeBikeStoreProvider.overrideWithValue(store),
-      ]);
-      addTearDown(container.dispose);
-      final bike = await openBike(container,
-          region: BikeRegion.eu,
-          modeId: nativeModeId(5),
-          customModes: const []);
-      bike.setCalibrating(true);
-      // Boots on assist 0 and the EU boot wire, then settles on the values the
-      // register really holds.
-      store.registers.addAll(const [
-        [3, 0, 0, 0, 0, 4, 0, 0, 0, 0],
-        [3, 0, 0, 0, 0, 4, 0, 0, 0, 0],
-        [3, 0, 2, 0, 1, 7, 0, 0, 0, 0],
-      ]);
-
-      final settled = await bike.recordBootWindow(schedule: const [
-        Duration.zero,
-        Duration(milliseconds: 10),
-        Duration(milliseconds: 20),
-      ]);
-
-      expect(settled, isNotNull);
-      expect(settled!.assist, 2, reason: 'the last read is the settled one');
-      expect(settled.wire, 7);
-    });
-
-    test('the window logs every read it took', () async {
-      final readLog = await attachRideLog();
-      final container = makeContainer();
-      final bike = await openBike(container,
-          region: BikeRegion.eu,
-          modeId: nativeModeId(5),
-          customModes: const []);
-      bike.setCalibrating(true);
-
-      await bike.recordBootWindow(
-          schedule: const [Duration.zero, Duration(milliseconds: 10)]);
-
-      final lines = await readLog();
-      expect(lines, contains('[Bike] [$id] [Calibration]'),
-          reason: 'the whole window has to be greppable in a shared log');
-      expect(lines, contains('Odometer'));
-      expect(lines, contains('Battery'));
-    });
-
-    test('the window reads through the first eight seconds', () {
-      expect(Bike.bootWindowSchedule.map((d) => d.inSeconds).toList(),
-          [0, 1, 2, 3, 5, 8]);
-    });
-  });
-
-  group('classifyBootSignature light parameter', () {
-    final at = DateTime(2026, 8, 11);
-
-    test('omitting the light pair reproduces today\'s signature exactly',
-        () {
-      // Every existing call site — calibration_page.dart's guide included —
-      // omits preOffLight/settledLight. A future edit that changed the
-      // default behaviour would break this before it ever reached a rider.
-      final signature = classifyBootSignature(
-          preOff: (assist: 2, wire: 5),
-          settled: (assist: 0, wire: 4),
-          measuredAt: at);
-      expect(signature.bootLight, isNull);
-      expect(signature.bootWire, 4);
-      expect(signature.bootAssist, 0);
-      expect(signature.preOffWire, 5);
-      expect(signature.preOffAssist, 2);
-    });
-
-    test('a light pair that changed becomes the boot light', () {
-      final signature = classifyBootSignature(
-          preOff: (assist: 2, wire: 5),
-          settled: (assist: 2, wire: 5),
-          measuredAt: at,
-          preOffLight: false,
-          settledLight: true);
-      expect(signature.bootLight, isTrue);
-    });
-
-    test('a light pair that did not change is unusable', () {
-      final signature = classifyBootSignature(
-          preOff: (assist: 2, wire: 5),
-          settled: (assist: 2, wire: 5),
-          measuredAt: at,
-          preOffLight: true,
-          settledLight: true);
-      expect(signature.bootLight, isNull);
     });
   });
 

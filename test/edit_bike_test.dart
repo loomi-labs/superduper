@@ -426,6 +426,58 @@ void main() {
     expect(saved.light, isTrue);
   });
 
+  group('the setup row', () {
+    testWidgets('reads "Not set up yet" for a bike with no capabilities',
+        (tester) async {
+      final container = ProviderContainer();
+      await openFromBikePage(
+          tester, container, BikeState.defaultState(id).copyWith(
+              capabilities: null, bootSignature: null));
+
+      final row = find.byKey(const ValueKey('calibrateRow'));
+      await tester.ensureVisible(row);
+      expect(find.text('Set up this bike again'), findsOneWidget,
+          reason: 'renamed from the old one-boot guide\'s title');
+      expect(find.text('Not set up yet'), findsOneWidget);
+      container.dispose();
+    });
+
+    testWidgets('reads the measured date for a bike with capabilities',
+        (tester) async {
+      final container = ProviderContainer();
+      await openFromBikePage(
+          tester,
+          container,
+          BikeState.defaultState(id).copyWith(
+              capabilities: BikeCapabilities(
+                  measuredAt: DateTime(2026, 8, 13),
+                  acceptedWires: const [4, 5, 6, 7],
+                  acceptedAssist: const [0, 1, 2, 3, 4],
+                  lightWritable: true)));
+
+      final row = find.byKey(const ValueKey('calibrateRow'));
+      await tester.ensureVisible(row);
+      expect(find.text('Set up 2026-08-13'), findsOneWidget,
+          reason: 'reads BikeState.capabilities, not bootSignature');
+      container.dispose();
+    });
+
+    testWidgets('tapping the row pushes the setup wizard', (tester) async {
+      final container = ProviderContainer();
+      await openFromBikePage(tester, container, BikeState.defaultState(id));
+
+      final row = find.byKey(const ValueKey('calibrateRow'));
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.byKey(const ValueKey('setupTitle')), findsOneWidget,
+          reason: 'the row now opens SetupPage, not the old CalibrationPage');
+      container.dispose();
+    });
+  });
+
   group('customModeNameFor', () {
     test('reads mph on a US bike', () {
       // 30 km/h is 18.64 mph, rounded to 19.

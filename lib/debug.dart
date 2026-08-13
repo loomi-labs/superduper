@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/fake_bike.dart';
+import 'package:superduper/repository.dart';
 
 import 'bike.dart';
 import 'edit_bike.dart';
@@ -60,8 +62,11 @@ class DebugPage extends ConsumerWidget {
                 'pressing a button on the bike itself; the mode button '
                 'simulates another app changing the mode (the bike has no mode '
                 'button). The app picks the change up on its next poll. '
-                'The slider simulates the rider speed that dynamic custom '
-                'modes follow; each mode switches at its own limit.',
+                'The power button briefly reports the bike as disconnected '
+                'then connected again, standing in for a real power cycle — '
+                'the setup wizard\'s off/on steps need this to move past '
+                'them. The slider simulates the rider speed that dynamic '
+                'custom modes follow; each mode switches at its own limit.',
               ),
             ),
             for (final bike in fakeBikes)
@@ -100,6 +105,11 @@ class DebugPage extends ConsumerWidget {
                           icon: const Icon(Icons.autorenew),
                           onPressed: () => store.cycleAssist(bike.id),
                         ),
+                        IconButton(
+                          tooltip: 'Simulate a power cycle',
+                          icon: const Icon(Icons.power_settings_new),
+                          onPressed: () => _simulatePowerCycle(ref, bike.id),
+                        ),
                       ],
                     ),
                   ),
@@ -111,6 +121,31 @@ class DebugPage extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Simulates a power cycle for a fake bike: reports it disconnected, then
+/// connected again a short moment later — long enough for the setup
+/// wizard's connection-state listener to observe the drop before it flips
+/// back, short enough not to trip the wizard's ~30 s/45 s hint timers.
+///
+/// A fake bike's [ConnectionHandler] is otherwise hard-coded to always
+/// report connected (`isFakeBike` inside `repository.dart`), so there is
+/// normally no way for one to appear disconnected at all — which the
+/// wizard's off/on steps need. Poking `state` directly is the same
+/// technique the test suite already uses on this same provider (see the
+/// `// ignore: invalid_use_of_protected_member` reads in
+/// `test/bike_test.dart`), and it works here for the same reason: a fake
+/// bike's `build()` runs once and never re-asserts `connected` on a
+/// rebuild, so nothing undoes this until [ConnectionHandler.connect] (called
+/// below) sets it back — which for a fake bike also just sets `state`
+/// straight to connected, with no timers or platform calls involved.
+void _simulatePowerCycle(WidgetRef ref, String deviceId) {
+  final handler = ref.read(connectionHandlerProvider(deviceId).notifier);
+  // ignore: invalid_use_of_visible_for_testing_member, invalid_use_of_protected_member
+  handler.state = SDBluetoothConnectionState.disconnected;
+  Timer(const Duration(milliseconds: 400), () {
+    unawaited(handler.connect());
+  });
 }
 
 /// Feeds a rider speed into one fake bike, standing in for the speed

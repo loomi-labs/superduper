@@ -3,8 +3,8 @@ import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:form_builder_validators/form_builder_validators.dart';
 import 'package:superduper/bike.dart';
-import 'package:superduper/calibration_page.dart';
 import 'package:superduper/colors.dart';
+import 'package:superduper/setup_page.dart';
 
 /// Applies the Edit sheet's fields to [live] — the bike as the app has it *at
 /// Save time*, not the snapshot the sheet was opened on. The sheet can sit open
@@ -426,14 +426,18 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
     );
   }
 
-  /// What the calibration row says under its title: a bike is measured or it
-  /// is not, and a measured one names the day, so a rider can tell an old
-  /// measurement from today's.
+  /// What the setup row says under its title: a bike is measured or it is
+  /// not, and a measured one names the day, so a rider can tell an old
+  /// measurement from today's. Reads [BikeState.capabilities], not
+  /// [BikeState.bootSignature]: capabilities is the setup gate's own field,
+  /// and the more meaningful status to show here — a bike with capabilities
+  /// but an unusable signature (nothing reset across the two boots) is still
+  /// set up, just undetectable.
   String get _calibrationSubtitle {
-    final signature = widget.bike.bootSignature;
-    return signature == null
-        ? 'Not measured yet'
-        : 'Measured ${calibrationDate(signature.measuredAt)}';
+    final capabilities = widget.bike.capabilities;
+    return capabilities == null
+        ? 'Not set up yet'
+        : 'Set up ${calibrationDate(capabilities.measuredAt)}';
   }
 
   /// The notifier, taken at the moment a button is pressed rather than in
@@ -572,8 +576,8 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
 
                 const SizedBox(height: 8),
 
-                // The boot calibration, for a re-run. Here and not only on the
-                // page: the page offers it once, and a firmware update or a
+                // The setup wizard, for a re-run. Here and not only on the
+                // page: the gate offers it once, and a firmware update or a
                 // measurement the rider doubts needs a way back to it.
                 Material(
                   type: MaterialType.transparency,
@@ -581,7 +585,7 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                     key: const ValueKey('calibrateRow'),
                     contentPadding: EdgeInsets.zero,
                     title: Text(
-                      'Calibrate power-cycle detection',
+                      'Set up this bike again',
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                     subtitle: Text(
@@ -595,13 +599,12 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                         size: 20, color: Colors.grey),
                     onTap: () {
                       // The navigator of the page under the sheet: the sheet
-                      // itself is popped first, so the guide does not sit on
+                      // itself is popped first, so the wizard does not sit on
                       // top of a modal route the rider can drag away.
                       final navigator = Navigator.of(context);
                       navigator.pop();
                       navigator.push(MaterialPageRoute<void>(
-                          builder: (_) =>
-                              CalibrationPage(bikeID: widget.bike.id)));
+                          builder: (_) => SetupPage(bikeID: widget.bike.id)));
                     },
                   ),
                 ),

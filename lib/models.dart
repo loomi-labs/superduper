@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:freezed_annotation/freezed_annotation.dart';
+import 'package:superduper/fake_bike.dart';
 import 'package:superduper/names.dart';
 
 part 'models.freezed.dart';
@@ -614,13 +615,13 @@ abstract class LastSeen with _$LastSeen {
 /// values stay so a later audit can tell what the measurement compared
 /// against.
 ///
-/// [bootLight] stays null from the old one-boot guide (`classifyBootSignature`
-/// in `bike.dart`): that flow never moves light on purpose, so a single boot
-/// read of it proves nothing, and its register value is untrustworthy on its
-/// own. The newer two-boot capability probe (`classifyCapabilityBoot`)
-/// deliberately drives light away from its boot value before the second
-/// boot, which makes a real measurement possible — [bootLight] is populated
-/// only by that path.
+/// [bootLight] is populated only by the two-boot setup wizard's own
+/// classifier (`classifyCapabilityBoot` in `bike.dart`), which deliberately
+/// drives light away from its boot value before the second boot, making a
+/// real measurement possible. The old one-boot guide this superseded never
+/// moved light on purpose, so a single boot read of it proved nothing, and
+/// its register value was untrustworthy on its own — [bootLight] simply
+/// stayed null for every bike that flow measured.
 @freezed
 abstract class BootSignature with _$BootSignature {
   const factory BootSignature({
@@ -759,7 +760,33 @@ abstract class BikeState with _$BikeState {
         name: getName(seed: id),
         region: BikeRegion.ch,
         customModes: const [seededChMode],
-        modeId: seededChModeId);
+        modeId: seededChModeId,
+        // A real, freshly-discovered bike also starts from this factory —
+        // see select_page.dart / Bike.build's own fallback — and it must
+        // still gate on the setup wizard like any other unmeasured bike.
+        // Only a debug-console fake bike, whose in-memory store accepts
+        // every write unconditionally, gets seeded past the gate: the debug
+        // page and test_driver both need to reach the controls with no
+        // wizard to drive.
+        capabilities: isFakeBike(id)
+            ? BikeCapabilities(
+                measuredAt: DateTime.now(),
+                acceptedWires: List.generate(firmwareProfiles.length, (i) => i),
+                acceptedAssist: const [0, 1, 2, 3, 4],
+                lightWritable: true,
+              )
+            : null,
+        // Nothing measured yet to compare a fresh read against — the fake
+        // store never power-cycles on its own, so there is no boot to name a
+        // reset byte from. A simulated power cycle (see debug.dart) still
+        // exercises the runtime comparator: [_matchesBootSignature] simply
+        // has no usable byte to check, and the old heuristic in
+        // [Bike._isPowerCycle] answers instead, exactly as it does for any
+        // bike this unmeasured.
+        bootSignature: isFakeBike(id)
+            ? BootSignature(
+                measuredAt: DateTime.now(), preOffWire: 0, preOffAssist: 0)
+            : null);
   }
 
   /// The region's native modes plus this bike's custom ones. CH has no native

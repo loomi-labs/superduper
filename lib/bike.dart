@@ -7,14 +7,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show KeepAliveLink;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
-import 'package:superduper/calibration_page.dart';
 import 'package:superduper/colors.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/edit_bike.dart' as edit;
 import 'package:superduper/models.dart';
 import 'package:superduper/pin_sheet.dart';
 import 'package:superduper/repository.dart';
-import 'package:superduper/services.dart';
+import 'package:superduper/setup_page.dart';
 import 'package:superduper/theme.dart';
 import 'package:superduper/utils/logger.dart';
 import 'package:superduper/widgets.dart';
@@ -122,53 +121,14 @@ String? backgroundStatusText(BackgroundStatus status, BikeState bike,
   };
 }
 
-/// What a measured boot says about this bike, against the values the guide
-/// staged before the outage.
+/// What a two-boot capability probe says a byte does on power-on.
 ///
-/// A byte that comes back exactly as it was staged is persisted: the firmware
-/// carried it through the power cycle, so it holds no boot news and detection
-/// has to ignore it. Null is that answer — "unusable", never "unknown". The
-/// staged pair is kept whole, so a later audit can read what the measurement
-/// compared against.
-///
-/// [preOffLight]/[settledLight] are additive: every existing caller omits
-/// them, and omitting them reproduces exactly today's [BootSignature] with
-/// `bootLight: null`. The one-boot guide never drives light through a change
-/// on purpose, so it has never had a light pair to pass here — see
-/// [BootSignature]'s own doc comment.
-BootSignature classifyBootSignature({
-  required ({int assist, int wire}) preOff,
-  required ({int assist, int wire}) settled,
-  required DateTime measuredAt,
-  bool? preOffLight,
-  bool? settledLight,
-}) =>
-    BootSignature(
-      measuredAt: measuredAt,
-      bootWire: settled.wire == preOff.wire ? null : settled.wire,
-      bootAssist: settled.assist == preOff.assist ? null : settled.assist,
-      bootLight: (preOffLight != null &&
-              settledLight != null &&
-              preOffLight != settledLight)
-          ? settledLight
-          : null,
-      preOffWire: preOff.wire,
-      preOffAssist: preOff.assist,
-    );
-
-/// What a two-boot capability probe says a byte does on power-on — a
-/// different comparison from [classifyBootSignature], not an extension of it.
-///
-/// The old flow has exactly one before/after pair: a value staged before an
-/// outage, a value read after it. Different can only mean one thing —
-/// nothing else touched the byte, so the firmware must have reset it.
-///
-/// The new probe cannot use that shortcut, because it deliberately WRITES a
-/// sweep of test values between the two boots, ending on [parting]. A boot
-/// that disagrees with [bootA] might mean "the firmware reset this byte" or
-/// it might just mean "the probe's own write survived the power cycle" —
-/// telling those apart needs [parting], the third point this function reads
-/// that [classifyBootSignature] never had.
+/// The setup wizard drives three points on each byte: [bootA] (the first
+/// boot read), [parting] (where the probe's own sweep left the byte) and
+/// [bootB] (the second boot read). A boot that disagrees with [bootA] might
+/// mean "the firmware reset this byte" or it might just mean "the probe's
+/// own write survived the power cycle" — telling those apart needs
+/// [parting], which is why this comparison needs three points and not two.
 ///
 /// A byte classifies as follows:
 /// - [bootA] and [bootB] agree, and differ from [parting]: the firmware
@@ -177,10 +137,10 @@ BootSignature classifyBootSignature({
 /// - [bootA], [bootB] and [parting] all agree: ambiguous. Either the byte
 ///   always resets to a value that happens to equal what the probe left
 ///   there, or it never resets at all. Treated as unusable, `null` — the
-///   same conservative reading [classifyBootSignature] gives "unusable,
-///   never unknown". This is also the outcome for a byte the probe never
-///   moved away from [bootA] at all (`parting == bootA`), which is exactly
-///   what "not writable" looks like here.
+///   same conservative reading a one-boot measurement would give
+///   "unusable, never unknown". This is also the outcome for a byte the
+///   probe never moved away from [bootA] at all (`parting == bootA`), which
+///   is exactly what "not writable" looks like here.
 /// - [bootA] and [bootB] disagree: should not happen on real firmware — the
 ///   fixed reset value would have to have changed between the two boots.
 ///   Treated as unusable rather than picking one of the two arbitrarily, and
@@ -188,10 +148,8 @@ BootSignature classifyBootSignature({
 ///
 /// The returned signature's [BootSignature.preOffWire]/
 /// [BootSignature.preOffAssist] name [bootA] — the FIRST boot, not the
-/// probe's parting state — kept for symmetry with [classifyBootSignature]'s
-/// own field names, which name the state the old guide staged before its one
-/// outage. Callers of the two-boot flow should read `preOffWire`/
-/// `preOffAssist` as "what boot A reported", not "what was staged".
+/// probe's parting state. Callers should read `preOffWire`/`preOffAssist`
+/// as "what boot A reported", not "what was staged".
 BootSignature classifyCapabilityBoot({
   required ({bool light, int assist, int wire}) bootA,
   required ({bool light, int assist, int wire}) parting,
@@ -894,8 +852,20 @@ class Bike extends _$Bike {
       }
       usable = true;
     }
-    // The light is not part of the signature: it has a boot transient and the
-    // register value for it is untrustworthy. See [BootSignature].
+    // The light's register value was untrustworthy under the old one-boot
+    // guide — a boot transient, measured against nothing that deliberately
+    // moved it — which is why a one-boot signature never populates
+    // [BootSignature.bootLight]. The two-boot setup wizard deliberately drives
+    // light away from its boot value before the second boot (see
+    // [classifyCapabilityBoot]), which makes a populated bootLight field
+    // exactly as usable as the other two bytes.
+    final bootLight = signature.bootLight;
+    if (bootLight != null) {
+      if (seen.light != bootLight || before.light == bootLight) {
+        return false;
+      }
+      usable = true;
+    }
     return usable ? true : null;
   }
 
@@ -923,117 +893,6 @@ class Bike extends _$Bike {
     return any ? next : null;
   }
 
-  /// When the recording window reads the settings register, counted from the
-  /// moment [recordBootWindow] starts.
-  ///
-  /// Spread out rather than dense: the 2026-08-11 logs show the bike answers the
-  /// first read within a second of the link coming up, and the light transient
-  /// of the boot lasts about two seconds — a value that still moves at the end
-  /// of the window is not the one the calibration may classify.
-  static const bootWindowSchedule = <Duration>[
-    Duration.zero,
-    Duration(seconds: 1),
-    Duration(seconds: 2),
-    Duration(seconds: 3),
-    Duration(seconds: 5),
-    Duration(seconds: 8),
-  ];
-
-  /// Registers the window probes once each, for the log only.
-  static const _odometerId = [2, 2];
-  static const _batteryId = [4, 1];
-
-  /// How many of the frames the app normally drops the window records. A few
-  /// are the firmware probe; a transcript of the ride is not.
-  static const _maxProbeFrames = 5;
-
-  /// Reads the settings register through the boot window and returns the pair
-  /// the bike settled on, or null when no valid read came back.
-  ///
-  /// Nothing is written for the whole window — the caller holds
-  /// [setCalibrating] open around it — and nothing is stored: the caller
-  /// classifies the settled pair against the values it staged before the
-  /// outage. The odometer, the battery and the frames the app normally drops are
-  /// logged as a firmware probe. A cleaner power-on tell (a trip reset, an
-  /// uptime) may be in them, and only a real bike can show that; the model
-  /// deliberately holds none of it yet.
-  Future<({int assist, int wire})?> recordBootWindow({
-    List<Duration> schedule = bootWindowSchedule,
-  }) async {
-    if (!_calibrating) {
-      // Not refused: the window still records. But every write inside it
-      // corrupts what it records, so the evidence has to say the guard was off.
-      _logCalibration('Recording without the write suppression');
-    }
-    final handler = ref.read(connectionHandlerProvider(id).notifier);
-    var frames = 0;
-    handler.onRawNotification = (data) {
-      // Only what the app drops: the speed frames are already in the ride
-      // trace, and they arrive about once a second.
-      if (frames >= _maxProbeFrames || parseSpeedNotification(data) != null) {
-        return;
-      }
-      frames++;
-      _logCalibration('Notification frame: $data');
-    };
-    final started = DateTime.now();
-    ({int assist, int wire})? settled;
-    try {
-      for (final at in schedule) {
-        final wait = at - DateTime.now().difference(started);
-        if (wait > Duration.zero) {
-          await Future<void>.delayed(wait);
-        }
-        if (!ref.mounted || _deleted) {
-          return settled;
-        }
-        final ms = DateTime.now().difference(started).inMilliseconds;
-        if (!_isConnected) {
-          // A gap, not an end: the bike can drop once more while it boots, and
-          // a later read of the same window still answers the question.
-          _logCalibration('t=$ms ms: not connected, no read');
-          continue;
-        }
-        final data = await _withRegister(() => handler.read());
-        _logCalibration('t=$ms ms: settings register $data');
-        if (data != null && isSettingsPacket(data)) {
-          settled = (assist: data[2], wire: data[5]);
-        }
-      }
-      // After the window, never inside it: both select another register, and a
-      // settings read that follows one of them too closely comes back with the
-      // wrong register's bytes.
-      await _probeRegister('Odometer', _odometerId);
-      await _probeRegister('Battery', _batteryId);
-    } finally {
-      handler.onRawNotification = null;
-    }
-    _logCalibration(settled == null
-        ? 'No valid read in the window'
-        : 'Settled on assist ${settled.assist}, wire ${settled.wire}');
-    return settled;
-  }
-
-  /// Logs one read of [registerId]. The value is evidence for a later task, so
-  /// nothing here parses it.
-  Future<void> _probeRegister(String name, List<int> registerId) async {
-    if (!ref.mounted || _deleted || !_isConnected) {
-      return;
-    }
-    final data = await _withRegister(() => ref
-        .read(connectionHandlerProvider(id).notifier)
-        .read(registerId: registerId));
-    _logCalibration('$name register $registerId: $data');
-  }
-
-  /// The assist level the guide puts on the bike before the rider switches it
-  /// off.
-  ///
-  /// Deliberately not 0: the 2026-08-11 logs show the bike boots with assist 0,
-  /// and a pre-off state equal to the boot state cannot be classified at all —
-  /// every byte would come back "unchanged" and be excluded.
-  static const calibrationStageAssist = 2;
-
   /// Whether the bike stands still, as far as the app can tell.
   ///
   /// A bike that never streamed, or stopped streaming, is standing: the bike
@@ -1048,76 +907,9 @@ class Bike extends _$Bike {
     return DateTime.now().difference(at) > _speedTimeout || speed <= 0;
   }
 
-  /// Puts a known, non-boot state on the bike and confirms it with a read of
-  /// the register. Returns the pair the bike reports back — the guide's
-  /// `preOff` values — or null when nothing could be staged.
-  ///
-  /// Runs BEFORE the recording window opens: [writeStateData] suppresses every
-  /// settings write while [_calibrating] is set, and this one is a settings
-  /// write like any other.
-  Future<({int assist, int wire})?> stageForCalibration() async {
-    if (_calibrating) {
-      _logCalibration('Refused to stage inside the recording window');
-      return null;
-    }
-    if (!_isConnected || !_isStopped) {
-      _logCalibration('Refused to stage: connected $_isConnected, '
-          'standing $_isStopped');
-      return null;
-    }
-    // Through the normal write path, so the record, [_assertedWire] and the
-    // bike hold the same state afterwards. The wire is the selection's own:
-    // the guide must never put a profile on the bike the app would not.
-    writeStateData(state.copyWith(assist: calibrationStageAssist),
-        authoritative: const {PacketField.assist});
-    // Queued behind the write above by [_withRegister], so this read really is
-    // its echo and not the state from before it.
-    final data = await _withRegister(
-        () => ref.read(connectionHandlerProvider(id).notifier).read());
-    if (!ref.mounted || _deleted) {
-      return null;
-    }
-    if (data == null || !isSettingsPacket(data)) {
-      _logCalibration('Staging read came back as $data');
-      return null;
-    }
-    final staged = (assist: data[2], wire: data[5]);
-    if (staged.assist != calibrationStageAssist) {
-      // The write was lost. Measuring against a pre-off state the bike does not
-      // hold would classify every byte wrong.
-      _logCalibration('Staging did not land: assist ${staged.assist}');
-      return null;
-    }
-    _logCalibration('Staged assist ${staged.assist}, wire ${staged.wire}');
-    return staged;
-  }
-
-  /// Classifies [settled] against the staged [preOff] pair and saves the
-  /// signature on this bike's record.
-  ///
-  /// App data, not bike data: it goes out through the same `saveToBike: false`
-  /// path a padlock takes, so nothing here reaches the bike.
-  BootSignature saveBootSignature(
-      {required ({int assist, int wire}) preOff,
-      required ({int assist, int wire}) settled,
-      bool? preOffLight,
-      bool? settledLight}) {
-    final signature = classifyBootSignature(
-        preOff: preOff,
-        settled: settled,
-        measuredAt: DateTime.now(),
-        preOffLight: preOffLight,
-        settledLight: settledLight);
-    _logCalibration('Signature: boot wire ${signature.bootWire}, boot assist '
-        '${signature.bootAssist} (staged wire ${preOff.wire}, assist '
-        '${preOff.assist})');
-    writeStateData(state.copyWith(bootSignature: signature), saveToBike: false);
-    return signature;
-  }
-
-  /// One settings read, guarded exactly like the calibration flow's own
-  /// reads. Returns null on a bad/foreign packet or while disconnected — the
-  /// caller has nothing usable to compare against.
+  /// One settings read, guarded exactly like the setup wizard's own reads.
+  /// Returns null on a bad/foreign packet or while disconnected — the caller
+  /// has nothing usable to compare against.
   Future<LastSeen?> readBikeState() async {
     if (!_isConnected) {
       return null;
@@ -1180,14 +972,20 @@ class Bike extends _$Bike {
   /// should remember mid-sweep, and the production write pipeline's side
   /// effects (a bikes.json save per write, foreground-service sync,
   /// dynamic-mode re-entry) are wrong for a raw firmware probe. Every write
-  /// instead goes straight through [ConnectionHandler.write], exactly the
-  /// pattern [stageForCalibration] and [recordBootWindow] already use to talk
-  /// to the bike below the notifier's normal abstractions.
+  /// instead goes straight through [ConnectionHandler.write], below the
+  /// notifier's normal abstractions.
   ///
   /// Returns null only when the probe could not run at all — not when it ran
   /// and found nothing writable. A bike that refuses every write is still a
   /// valid, useful result: see the return below.
-  Future<BikeCapabilities?> probeCapabilities(LastSeen bootA) async {
+  ///
+  /// [onProgress], when given, is called once per wire/assist/light test with
+  /// the phase name, how many tests of that phase are done, and how many
+  /// tests the whole sweep has in total — enough for a caller to show a
+  /// `▓▓▓░░░` bar. Optional and additive: every existing call omits it, and
+  /// omitting it changes nothing about the sweep itself.
+  Future<BikeCapabilities?> probeCapabilities(LastSeen bootA,
+      {void Function(String phase, int done, int total)? onProgress}) async {
     if (_calibrating) {
       _logCalibration('Refused to probe: a calibration window is open');
       return null;
@@ -1198,6 +996,8 @@ class Bike extends _$Bike {
       return null;
     }
     final handler = ref.read(connectionHandlerProvider(id).notifier);
+    // Mode, then assist, then light: the same order [onProgress] reports.
+    final total = firmwareProfiles.length + 5 + 1;
     // Tracks whether the wire the sweep left on the bus is the deliberately
     // chosen safe one. See the `finally` below.
     var wireSettled = false;
@@ -1213,6 +1013,7 @@ class Bike extends _$Bike {
         if (data != null && isSettingsPacket(data) && data[5] == wire) {
           acceptedWires.add(wire);
         }
+        onProgress?.call('mode', wire + 1, total);
       }
       final safeWire = _safeWireAfterSweep(acceptedWires, bootA.wire);
       await _probeWriteRead(handler,
@@ -1233,6 +1034,7 @@ class Bike extends _$Bike {
             acceptedAssist.add(assist);
           }
         }
+        onProgress?.call('assist', firmwareProfiles.length + assist + 1, total);
       }
       if (acceptedAssist.length > 1 && partingAssist == bootA.assist) {
         // The sweep's own last value happened to coincide with the boot
@@ -1253,6 +1055,7 @@ class Bike extends _$Bike {
       final lightWritable = lightData != null &&
           isSettingsPacket(lightData) &&
           (lightData[4] == 1) == !bootA.light;
+      onProgress?.call('light', total, total);
 
       _logCalibration('Probe: wires $acceptedWires, assist $acceptedAssist, '
           'light writable $lightWritable');
@@ -1280,6 +1083,38 @@ class Bike extends _$Bike {
         }
       }
     }
+  }
+
+  /// Classifies [bootA]/[parting]/[bootB] via [classifyCapabilityBoot],
+  /// applies the detected region if there is one, and saves [capabilities]
+  /// and the resulting [BootSignature] on this bike's record in one write —
+  /// never two separate saves, so a rider who quits the app between them
+  /// cannot end up with capabilities recorded but no signature, or the wrong
+  /// region applied without the capabilities that justified it.
+  ///
+  /// App data, not bike data: it goes out through the same `saveToBike:
+  /// false` path a padlock takes, so nothing here reaches the bike.
+  BootSignature saveCapabilities({
+    required BikeCapabilities capabilities,
+    required LastSeen bootA,
+    required LastSeen parting,
+    required LastSeen bootB,
+  }) {
+    final signature = classifyCapabilityBoot(
+      bootA: (light: bootA.light, assist: bootA.assist, wire: bootA.wire),
+      parting: (light: parting.light, assist: parting.assist, wire: parting.wire),
+      bootB: (light: bootB.light, assist: bootB.assist, wire: bootB.wire),
+      measuredAt: DateTime.now(),
+    );
+    final region = capabilities.detectedRegion ?? state.region;
+    _logCalibration('Capabilities: wires ${capabilities.acceptedWires}, '
+        'assist ${capabilities.acceptedAssist}, light writable '
+        '${capabilities.lightWritable}, region $region');
+    writeStateData(
+        state.copyWith(
+            capabilities: capabilities, bootSignature: signature, region: region),
+        saveToBike: false);
+    return signature;
   }
 
   /// Opens or closes the write-suppression window. See [_calibrating].
@@ -1950,61 +1785,62 @@ class BikePageState extends ConsumerState<BikePage> {
                 ),
               ),
 
-              // Controls Section
+              // Controls Section — replaced entirely by the setup gate while
+              // this bike has never been measured. There is no partial view:
+              // a mode/assist/light control that has never been proven to do
+              // anything on this bike must not be offered at all.
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 24, 16, 0),
                 sliver: SliverList(
-                  delegate: SliverChildListDelegate([
-                    // The one-time offer of the boot calibration, above the
-                    // controls: it asks for an answer, and a rider who never
-                    // scrolls this page would never see it at the foot. It
-                    // takes itself away once the bike is measured, or for this
-                    // visit once the rider says Later.
-                    CalibrationPromptWidget(bike: bike),
+                  delegate: SliverChildListDelegate(
+                    bike.capabilities == null
+                        ? [SetupGateCard(bike: bike)]
+                        : [
+                            // Light Control
+                            EnhancedLightControlWidget(bike: bike),
+                            const SizedBox(height: 16),
 
-                    // Light Control
-                    EnhancedLightControlWidget(bike: bike),
-                    const SizedBox(height: 16),
+                            // Mode Control
+                            EnhancedModeControlWidget(bike: bike),
+                            const SizedBox(height: 16),
 
-                    // Mode Control
-                    EnhancedModeControlWidget(bike: bike),
-                    const SizedBox(height: 16),
+                            // Assist Control
+                            EnhancedAssistControlWidget(bike: bike),
 
-                    // Assist Control
-                    EnhancedAssistControlWidget(bike: bike),
+                            // What the app keeps doing with the page closed. A
+                            // status line, not a control: the rider already
+                            // asked for the work by locking a value or picking
+                            // a switching mode.
+                            BackgroundStatusWidget(bike: bike),
 
-                    // What the app keeps doing with the page closed. A status
-                    // line, not a control: the rider already asked for the work
-                    // by locking a value or picking a switching mode.
-                    BackgroundStatusWidget(bike: bike),
-
-                    // Help Section
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 32.0),
-                      child: Center(
-                        // A quiet text button: help is not a control, so it
-                        // must not compete with the cards above it.
-                        child: TextButton.icon(
-                          onPressed: () {
-                            final Uri url = Uri.parse(
-                                'https://github.com/blopker/superduper/?tab=readme-ov-file#getting-started');
-                            launchUrl(url,
-                                mode: LaunchMode.externalApplication);
-                          },
-                          icon: const Icon(Icons.help_outline, size: 18),
-                          label: Text(
-                            "Help & tips",
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                          style: TextButton.styleFrom(
-                            foregroundColor: SDSurface.muted,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 12),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ]),
+                            // Help Section
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 32.0),
+                              child: Center(
+                                // A quiet text button: help is not a control,
+                                // so it must not compete with the cards above.
+                                child: TextButton.icon(
+                                  onPressed: () {
+                                    final Uri url = Uri.parse(
+                                        'https://github.com/blopker/superduper/?tab=readme-ov-file#getting-started');
+                                    launchUrl(url,
+                                        mode: LaunchMode.externalApplication);
+                                  },
+                                  icon: const Icon(Icons.help_outline, size: 18),
+                                  label: Text(
+                                    "Help & tips",
+                                    style: Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: SDSurface.muted,
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 16, vertical: 12),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                  ),
                 ),
               ),
 
@@ -2369,90 +2205,55 @@ class EnhancedModeControlWidget extends ConsumerWidget {
   }
 }
 
-/// The one-time offer of the boot calibration, on the page of a bike whose
-/// [BikeState.bootSignature] is null — which every bike is until it is
-/// measured, this app's own upgrade included.
+/// The setup gate: the full-page-width intro card that stands in for every
+/// mode/assist/light control while [BikeState.capabilities] is null — which
+/// every bike is until the setup wizard measures it, this app's own upgrade
+/// included.
 ///
-/// A card and not a pushed guide: the rider opened the page to ride, and a
-/// flow that asks them to switch the bike off and on has to be asked for. It
-/// is offered only while the bike is connected and standing, because that is
-/// what the first step needs, and "Later" takes it away for this visit. The
-/// bike's settings sheet holds the same entry for a re-run.
-class CalibrationPromptWidget extends ConsumerStatefulWidget {
-  const CalibrationPromptWidget({super.key, required this.bike});
+/// Unlike the old boot-calibration offer this replaces, there is no Later
+/// button: the plan's forced-setup decision means a mode/assist/light control
+/// that has never been proven to do anything on this bike must not be
+/// reachable at all, not even behind a dismiss. The bike's settings sheet
+/// holds a re-run entry for after the first pass.
+class SetupGateCard extends StatelessWidget {
+  const SetupGateCard({super.key, required this.bike});
   final BikeState bike;
 
   @override
-  ConsumerState<CalibrationPromptWidget> createState() =>
-      _CalibrationPromptWidgetState();
-}
-
-class _CalibrationPromptWidgetState
-    extends ConsumerState<CalibrationPromptWidget> {
-  bool _dismissed = false;
-
-  @override
   Widget build(BuildContext context) {
-    final bike = widget.bike;
-    final connected = ref.watch(connectionHandlerProvider(bike.id)) ==
-        SDBluetoothConnectionState.connected;
-    // The live stream, not the notifier's memory of it: the offer must go away
-    // the moment the rider rides off, and only this card rebuilds for it.
-    final speed = ref.watch(bikeSpeedProvider(bike.id)).value ?? 0;
-    if (_dismissed ||
-        bike.bootSignature != null ||
-        !connected ||
-        speed > 0) {
-      return const SizedBox.shrink();
-    }
     final theme = Theme.of(context);
     return Padding(
-      key: const ValueKey('calibrationPrompt'),
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: SDSurface.card,
-          border: Border.all(color: SDSurface.border),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Calibrate power-cycle detection',
-              style: theme.textTheme.titleSmall
-                  ?.copyWith(color: SDSurface.text, fontWeight: FontWeight.bold),
+      key: const ValueKey('setupGate'),
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Set up this bike',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.headlineSmall
+                ?.copyWith(color: SDSurface.text, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            setupIntroBody,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodyMedium?.copyWith(color: SDSurface.label),
+          ),
+          const SizedBox(height: 24),
+          ElevatedButton(
+            key: const ValueKey('setupGateStart'),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                builder: (_) => SetupPage(bikeID: bike.id))),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xff441DFC).withAlpha(51),
+              foregroundColor: const Color(0xff441DFC),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),
-            const SizedBox(height: 6),
-            Text(
-              'The app measures your bike one time, so it knows a power cycle '
-              'from a lost connection. You switch the bike off and on again.',
-              style: theme.textTheme.bodySmall
-                  ?.copyWith(color: SDSurface.muted, fontSize: 12),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                TextButton(
-                  key: const ValueKey('calibrationPromptLater'),
-                  onPressed: () => setState(() => _dismissed = true),
-                  style: TextButton.styleFrom(foregroundColor: SDSurface.muted),
-                  child: const Text('Later'),
-                ),
-                const SizedBox(width: 8),
-                TextButton(
-                  key: const ValueKey('calibrationPromptStart'),
-                  onPressed: () => showCalibration(context, bike.id),
-                  style: TextButton.styleFrom(
-                      foregroundColor: const Color(0xff4A80F0)),
-                  child: const Text('Calibrate'),
-                ),
-              ],
-            ),
-          ],
-        ),
+            child: const Text('Start'),
+          ),
+        ],
       ),
     );
   }
