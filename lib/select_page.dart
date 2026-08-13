@@ -77,6 +77,13 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
       foundBikes.add(BikeState.defaultState(result.device.remoteId.str));
     }
 
+    // Every device id the scan currently answers, saved or not — a saved bike
+    // in here is worth tapping even though nothing has connected it yet.
+    final Set<String> seenIds = {
+      for (final result in scanResults.value ?? const [])
+        result.device.remoteId.str,
+    };
+
     return Scaffold(
       backgroundColor: Colors.black,
       floatingActionButton: FloatingActionButton(
@@ -275,19 +282,27 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
                   padding: const EdgeInsets.symmetric(horizontal: 20.0),
                   sliver: SliverList(
                     delegate: SliverChildBuilderDelegate((context, index) {
+                      final bike = bikeList[index];
+                      final connected = isConnected(connectedDevices, bike.id);
+                      // Connected beats in-range: a bike already linked needs
+                      // no invitation to tap it. Neither gets no pill at all,
+                      // rather than a third, blank one — see
+                      // DiscoverCard.trailing.
+                      final trailing = connected
+                          ? const StatusPill.connected()
+                          : seenIds.contains(bike.id)
+                              ? const StatusPill.inRange()
+                              : null;
                       return Padding(
                         padding: const EdgeInsets.only(top: 16.0),
                         child: DiscoverCard(
-                          selected: isConnected(
-                            connectedDevices,
-                            bikeList[index].id,
-                          ),
-                          onTap: () => selectBike(bikeList[index]),
-                          title: bikeList[index].name,
-                          subtitle: bikeList[index].id,
+                          selected: connected,
+                          onTap: () => selectBike(bike),
+                          title: bike.name,
+                          subtitle: bike.id,
                           titleIcon: Icons.directions_bike,
-                          colorIndex: bikeList[index]
-                              .color, // Vary colors based on index
+                          colorIndex: bike.color, // Vary colors based on index
+                          trailing: trailing,
                         ),
                       );
                     }, childCount: bikeList.length),

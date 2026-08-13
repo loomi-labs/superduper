@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:superduper/colors.dart';
 import 'package:superduper/models.dart';
@@ -554,6 +556,11 @@ class DiscoverCard extends StatelessWidget {
   final bool selected;
   final IconData? titleIcon;
 
+  /// A status chip at the row's trailing edge, e.g. a [StatusPill]. `null`
+  /// draws nothing — not an empty placeholder — so a bike the scan has not
+  /// seen reads as plainly absent rather than as a third, blank pill.
+  final Widget? trailing;
+
   const DiscoverCard(
       {super.key,
       this.title,
@@ -568,7 +575,8 @@ class DiscoverCard extends StatelessWidget {
       this.metric,
       this.colorIndex = 0,
       this.selected = true,
-      this.titleIcon});
+      this.titleIcon,
+      this.trailing});
 
   @override
   Widget build(BuildContext context) {
@@ -637,15 +645,23 @@ class DiscoverCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                metric != null
-                    ? Text(
-                        metric!,
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodyMedium
-                            ?.copyWith(color: SDSurface.label),
-                      )
-                    : Container(),
+                if (metric != null || trailing != null)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      if (metric != null)
+                        Text(
+                          metric!,
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodyMedium
+                              ?.copyWith(color: SDSurface.label),
+                        ),
+                      if (metric != null && trailing != null)
+                        const SizedBox(height: 8),
+                      ?trailing,
+                    ],
+                  ),
               ],
             ),
           ),
@@ -653,4 +669,241 @@ class DiscoverCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The fill and dot colour of [StatusPill.connected], copied from
+/// `EnhancedConnectionWidget`'s "Connected" chip in `bike.dart` rather than
+/// redefined, so the select page and the bike page agree on what "connected"
+/// looks like.
+const _connectedBackground = Color(0xff14351f);
+const _connectedForeground = Color(0xff6fd08c);
+
+/// The outline/arc and label colours of [StatusPill.inRange]. A blue,
+/// deliberately not the app's own indigo accent (`0xff441DFC` /
+/// `0xff4A80F0`, both already meaning "tap this"): this pill invites a tap
+/// too, but it must not be mistaken for a button.
+const _inRangeOutline = Color(0xff5FB2F0);
+const _inRangeLabel = Color(0xff7FC4F5);
+
+/// How long one lap of [StatusPill.inRange]'s arc takes.
+const _inRangePeriod = Duration(milliseconds: 2800);
+
+/// A status chip for a saved bike's row on the select page: says whether it
+/// is already linked, or merely answering the scan and worth a tap. A third
+/// state — seen by neither — has no widget at all; see [DiscoverCard.trailing].
+class StatusPill extends StatelessWidget {
+  /// The bike is already linked: a solid, still pill.
+  const StatusPill.connected({super.key}) : _inRange = false;
+
+  /// The bike answers the scan but nothing has linked it yet: an outlined
+  /// pill with a travelling arc, so it reads as "could connect" rather than
+  /// "connected".
+  const StatusPill.inRange({super.key}) : _inRange = true;
+
+  final bool _inRange;
+
+  @override
+  Widget build(BuildContext context) =>
+      _inRange ? const _InRangePill() : const _ConnectedPill();
+}
+
+/// [StatusPill.connected]'s body: the same chip shape as
+/// `EnhancedConnectionWidget`'s "Connected" state (rounded pill, small dot,
+/// label), but painted with a plain dot rather than a bluetooth icon — this
+/// chip is a status, not a control.
+class _ConnectedPill extends StatelessWidget {
+  const _ConnectedPill();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: _connectedBackground,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: const BoxDecoration(
+              color: _connectedForeground,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            'Connected',
+            style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                  color: _connectedForeground,
+                  fontWeight: FontWeight.w500,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// [StatusPill.inRange]'s body. Stateful only for the [AnimationController]
+/// the moving arc and pulsing dot share — [StatusPill] itself stays a
+/// [StatelessWidget] so a row rebuilding in a scrolled list never has to carry
+/// this controller's lifetime, only this small widget does.
+class _InRangePill extends StatefulWidget {
+  const _InRangePill();
+
+  @override
+  State<_InRangePill> createState() => _InRangePillState();
+}
+
+class _InRangePillState extends State<_InRangePill>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller =
+      AnimationController(vsync: this, duration: _inRangePeriod);
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Read on every dependency change, not just in initState: the rider can
+    // turn reduced motion on or off while this row is on screen, and a
+    // control that only checked once would keep spinning (or stay frozen)
+    // after that.
+    _syncMotion();
+  }
+
+  void _syncMotion() {
+    final reduceMotion = MediaQuery.of(context).disableAnimations;
+    if (reduceMotion) {
+      // Stopped outright, not merely un-painted: a controller left running
+      // keeps scheduling frames for a pill nobody sees moving, which costs
+      // battery for nothing.
+      if (_controller.isAnimating) _controller.stop();
+    } else if (!_controller.isAnimating) {
+      _controller.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final reduceMotion = MediaQuery.of(context).disableAnimations;
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) => CustomPaint(
+        painter: _InRangePainter(
+          // null tells the painter to skip the arc: a plain outline under
+          // reduced motion, not a arc frozen mid-lap.
+          progress: reduceMotion ? null : _controller.value,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _PulsingDot(beat: reduceMotion ? null : _controller.value),
+              const SizedBox(width: 6),
+              Text(
+                'In range',
+                style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                      color: _inRangeLabel,
+                      fontWeight: FontWeight.w500,
+                    ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The leading dot of [StatusPill.inRange], pulsing in scale and opacity on
+/// the arc's own beat. `beat == null` (reduced motion) paints it at rest.
+class _PulsingDot extends StatelessWidget {
+  const _PulsingDot({required this.beat});
+
+  final double? beat;
+
+  @override
+  Widget build(BuildContext context) {
+    // One pulse per lap of the arc, so the dot and the arc read as one signal
+    // rather than two unrelated animations.
+    final wave = beat == null ? 0.0 : (sin(beat! * 2 * pi) + 1) / 2;
+    return Opacity(
+      opacity: beat == null ? 1 : 0.5 + 0.5 * wave,
+      child: Transform.scale(
+        scale: beat == null ? 1 : 0.75 + 0.35 * wave,
+        child: const DecoratedBox(
+          decoration: BoxDecoration(
+            color: _inRangeLabel,
+            shape: BoxShape.circle,
+          ),
+          child: SizedBox(width: 8, height: 8),
+        ),
+      ),
+    );
+  }
+}
+
+/// Paints [StatusPill.inRange]'s border: a faint static outline always, plus
+/// (when [progress] is not null) a short brighter arc chasing around it.
+///
+/// Traces the pill's rounded-rect border with [Path.computeMetrics] rather
+/// than sweeping a gradient across a static shape — the same technique the
+/// plan's own web mockup used (an SVG `stroke-dasharray`/`stroke-dashoffset`
+/// pair), just walked by hand since Flutter has no path-length-normalised
+/// stroke primitive.
+class _InRangePainter extends CustomPainter {
+  const _InRangePainter({required this.progress});
+
+  final double? progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rrect = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      Radius.circular(size.height / 2),
+    );
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
+        ..color = _inRangeOutline.withAlpha(90),
+    );
+
+    final progress = this.progress;
+    if (progress == null) return; // reduced motion: outline only, no arc
+
+    final metric = (Path()..addRRect(rrect)).computeMetrics().first;
+    final length = metric.length;
+    final arcLength = length / 6;
+    final start = progress * length;
+    final end = start + arcLength;
+    final arcPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6
+      ..strokeCap = StrokeCap.round
+      ..color = _inRangeOutline;
+
+    if (end <= length) {
+      canvas.drawPath(metric.extractPath(start, end), arcPaint);
+    } else {
+      // Wraps past the seam: drawn as two segments so the arc never clamps
+      // to a stop at the path's start/end join.
+      canvas.drawPath(metric.extractPath(start, length), arcPaint);
+      canvas.drawPath(metric.extractPath(0, end - length), arcPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _InRangePainter oldDelegate) =>
+      oldDelegate.progress != progress;
 }
