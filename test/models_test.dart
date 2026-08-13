@@ -633,6 +633,100 @@ void main() {
       expect(decoded.bootSignature!.preOffAssist, 3,
           reason: 'the staged value stays for a re-audit');
     });
+
+    test('a bike the app never calibrated has no boot light either', () {
+      final json = legacyJson();
+      expect(json.containsKey('bootLight'), isFalse,
+          reason: 'an old bikes.json has no such key');
+      expect(BikeState.fromJson(json).bootSignature, isNull);
+    });
+
+    test('a measured light byte survives a save', () {
+      final b = saved().copyWith(
+          bootSignature: BootSignature(
+              measuredAt: DateTime.utc(2026, 8, 11, 9, 30, 15),
+              bootWire: 4,
+              bootAssist: 0,
+              bootLight: true,
+              preOffWire: 7,
+              preOffAssist: 3));
+      expect(BikeState.fromJson(b.toJson()), b);
+    });
+
+    test('an old signature with no light key decodes to a null one', () {
+      // A signature saved before bootLight existed: the json has bootWire and
+      // bootAssist but no bootLight key at all.
+      final oldSignature = {
+        'measuredAt': DateTime.utc(2026, 8, 11, 9, 30).toIso8601String(),
+        'bootWire': 4,
+        'bootAssist': 0,
+        'preOffWire': 7,
+        'preOffAssist': 3,
+      };
+      final json = Map<String, Object?>.from(saved().toJson())
+        ..['bootSignature'] = oldSignature;
+      final decoded = BikeState.fromJson(json);
+      expect(decoded.bootSignature!.bootLight, isNull);
+      expect(decoded.bootSignature!.bootWire, 4,
+          reason: 'the other measured bytes are unaffected');
+    });
+  });
+
+  group('BikeCapabilities', () {
+    test('a bike the app never probed has no capabilities', () {
+      final json = legacyJson();
+      expect(json.containsKey('capabilities'), isFalse,
+          reason: 'an old bikes.json has no such key');
+      expect(BikeState.fromJson(json).capabilities, isNull);
+      expect(BikeState.defaultState('id').capabilities, isNull);
+    });
+
+    test('a measured capability set survives a save', () {
+      // withSelectedMode resolves modeId, exactly like the boot-signature
+      // group's own saved() helper above: a failure here has to be about the
+      // capabilities, not about the mode migration.
+      final b = bike(region: BikeRegion.eu).withSelectedMode(nativeModeId(4)).copyWith(
+          capabilities: BikeCapabilities(
+              measuredAt: DateTime.utc(2026, 8, 11, 9, 30),
+              acceptedWires: const [4, 5, 6, 7],
+              acceptedAssist: const [0, 1, 2, 3, 4],
+              lightWritable: true));
+      expect(BikeState.fromJson(b.toJson()), b);
+    });
+
+    test('modeWritable and assistWritable need more than one accepted value',
+        () {
+      final one = BikeCapabilities(
+          measuredAt: DateTime.utc(2026, 8, 11),
+          acceptedWires: const [5],
+          acceptedAssist: const [2],
+          lightWritable: false);
+      expect(one.modeWritable, isFalse);
+      expect(one.assistWritable, isFalse);
+
+      final many = one.copyWith(
+          acceptedWires: const [4, 5], acceptedAssist: const [0, 2]);
+      expect(many.modeWritable, isTrue);
+      expect(many.assistWritable, isTrue);
+    });
+
+    test('detectedRegion reads a clean US or EU set', () {
+      BikeCapabilities caps(List<int> wires) => BikeCapabilities(
+          measuredAt: DateTime.utc(2026, 8, 11),
+          acceptedWires: wires,
+          acceptedAssist: const [],
+          lightWritable: false);
+
+      expect(caps([0, 1, 2, 3]).detectedRegion, BikeRegion.us);
+      expect(caps([4, 5, 6, 7]).detectedRegion, BikeRegion.eu);
+      expect(caps([]).detectedRegion, isNull, reason: 'nothing accepted');
+      expect(caps([0, 1, 4]).detectedRegion, isNull, reason: 'mixed banks');
+      expect(caps([0, 1, 2]).detectedRegion, isNull, reason: 'partial bank');
+      expect(caps([0, 1, 2, 3, 4]).detectedRegion, isNull,
+          reason: 'a full bank plus a stray wire is still not clean');
+      expect(caps([7]).detectedRegion, isNot(BikeRegion.ch),
+          reason: 'CH has no firmware bank of its own');
+    });
   });
 
   group('mode selection', () {

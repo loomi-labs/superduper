@@ -612,20 +612,83 @@ abstract class LastSeen with _$LastSeen {
 /// null byte here is a byte that came back unchanged during calibration —
 /// it carries no boot news, so detection must ignore it. The staged pre-off
 /// values stay so a later audit can tell what the measurement compared
-/// against. Light is not recorded: it has a boot transient and its register
-/// value is untrustworthy.
+/// against.
+///
+/// [bootLight] stays null from the old one-boot guide (`classifyBootSignature`
+/// in `bike.dart`): that flow never moves light on purpose, so a single boot
+/// read of it proves nothing, and its register value is untrustworthy on its
+/// own. The newer two-boot capability probe (`classifyCapabilityBoot`)
+/// deliberately drives light away from its boot value before the second
+/// boot, which makes a real measurement possible — [bootLight] is populated
+/// only by that path.
 @freezed
 abstract class BootSignature with _$BootSignature {
   const factory BootSignature({
     required DateTime measuredAt,
     int? bootWire,
     int? bootAssist,
+    bool? bootLight,
     required int preOffWire,
     required int preOffAssist,
   }) = _BootSignature;
 
   factory BootSignature.fromJson(Map<String, Object?> json) =>
       _$BootSignatureFromJson(json);
+}
+
+/// What a bike accepts, measured by writing every wire, every assist level
+/// and the light and reading back what stuck.
+///
+/// The app used to assume every bike accepts every write it sends. Some
+/// firmwares refuse a mode change outright, or answer only a narrower bank
+/// than the region table offers — on such a bike the mode picker did
+/// nothing, silently. A bike this has never measured has `capabilities ==
+/// null` on its [BikeState]; the setup flow that produces this record is the
+/// gate the rest of the app checks before it trusts a mode/assist/light
+/// control to do anything.
+@freezed
+abstract class BikeCapabilities with _$BikeCapabilities {
+  const BikeCapabilities._();
+
+  const factory BikeCapabilities({
+    required DateTime measuredAt,
+    required List<int> acceptedWires,
+    required List<int> acceptedAssist,
+    required bool lightWritable,
+  }) = _BikeCapabilities;
+
+  factory BikeCapabilities.fromJson(Map<String, Object?> json) =>
+      _$BikeCapabilitiesFromJson(json);
+
+  /// Whether there is more than one wire to choose between. A bike that only
+  /// ever echoes back the wire it already sat on has nothing else a mode
+  /// picker could offer.
+  bool get modeWritable => acceptedWires.length > 1;
+
+  /// Whether there is more than one assist level to choose between, for the
+  /// same reason as [modeWritable].
+  bool get assistWritable => acceptedAssist.length > 1;
+
+  /// The region [acceptedWires] names, or null when it does not name one
+  /// cleanly: nothing accepted, a mix of both banks, or only part of one.
+  ///
+  /// [BikeRegion.ch] is never returned. It has no firmware bank of its own —
+  /// its only native wire is off-road, riding the EU bank — so the probe can
+  /// never see it as a distinct accepted set.
+  BikeRegion? get detectedRegion {
+    const usWires = {0, 1, 2, 3};
+    const euWires = {4, 5, 6, 7};
+    final accepted = acceptedWires.toSet();
+    if (usWires.every(accepted.contains) &&
+        euWires.every((w) => !accepted.contains(w))) {
+      return BikeRegion.us;
+    }
+    if (euWires.every(accepted.contains) &&
+        usWires.every((w) => !accepted.contains(w))) {
+      return BikeRegion.eu;
+    }
+    return null;
+  }
 }
 
 /// The mode a CH bike is seeded with: what the old CH dynamic mode was, as a
@@ -674,6 +737,10 @@ abstract class BikeState with _$BikeState {
       // Null until the rider calibrates this bike, which every existing bike
       // is: detection has nothing measured to compare a fresh read against.
       BootSignature? bootSignature,
+      // Null until the rider runs the setup probe, which every existing
+      // bike is: an old bikes.json has no such key, and decodes to null for
+      // free — exactly like [bootSignature] above.
+      BikeCapabilities? capabilities,
       required String name,
       BikeRegion? region,
       // Whether the app keeps trying to reconnect to this bike on its own.

@@ -212,7 +212,7 @@ final class ConnectionHandlerProvider
   }
 }
 
-String _$connectionHandlerHash() => r'7508c6725e14938d6961656ffa5ee6ee447cc831';
+String _$connectionHandlerHash() => r'c3f6f74c7daf43e1e87c08f18b3ca082e8263c4d';
 
 final class ConnectionHandlerFamily extends $Family
     with

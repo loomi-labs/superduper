@@ -130,18 +130,104 @@ String? backgroundStatusText(BackgroundStatus status, BikeState bike,
 /// has to ignore it. Null is that answer — "unusable", never "unknown". The
 /// staged pair is kept whole, so a later audit can read what the measurement
 /// compared against.
+///
+/// [preOffLight]/[settledLight] are additive: every existing caller omits
+/// them, and omitting them reproduces exactly today's [BootSignature] with
+/// `bootLight: null`. The one-boot guide never drives light through a change
+/// on purpose, so it has never had a light pair to pass here — see
+/// [BootSignature]'s own doc comment.
 BootSignature classifyBootSignature({
   required ({int assist, int wire}) preOff,
   required ({int assist, int wire}) settled,
   required DateTime measuredAt,
+  bool? preOffLight,
+  bool? settledLight,
 }) =>
     BootSignature(
       measuredAt: measuredAt,
       bootWire: settled.wire == preOff.wire ? null : settled.wire,
       bootAssist: settled.assist == preOff.assist ? null : settled.assist,
+      bootLight: (preOffLight != null &&
+              settledLight != null &&
+              preOffLight != settledLight)
+          ? settledLight
+          : null,
       preOffWire: preOff.wire,
       preOffAssist: preOff.assist,
     );
+
+/// What a two-boot capability probe says a byte does on power-on — a
+/// different comparison from [classifyBootSignature], not an extension of it.
+///
+/// The old flow has exactly one before/after pair: a value staged before an
+/// outage, a value read after it. Different can only mean one thing —
+/// nothing else touched the byte, so the firmware must have reset it.
+///
+/// The new probe cannot use that shortcut, because it deliberately WRITES a
+/// sweep of test values between the two boots, ending on [parting]. A boot
+/// that disagrees with [bootA] might mean "the firmware reset this byte" or
+/// it might just mean "the probe's own write survived the power cycle" —
+/// telling those apart needs [parting], the third point this function reads
+/// that [classifyBootSignature] never had.
+///
+/// A byte classifies as follows:
+/// - [bootA] and [bootB] agree, and differ from [parting]: the firmware
+///   resets it to that fixed value on every boot, independent of what was
+///   last written — that value enters the signature.
+/// - [bootA], [bootB] and [parting] all agree: ambiguous. Either the byte
+///   always resets to a value that happens to equal what the probe left
+///   there, or it never resets at all. Treated as unusable, `null` — the
+///   same conservative reading [classifyBootSignature] gives "unusable,
+///   never unknown". This is also the outcome for a byte the probe never
+///   moved away from [bootA] at all (`parting == bootA`), which is exactly
+///   what "not writable" looks like here.
+/// - [bootA] and [bootB] disagree: should not happen on real firmware — the
+///   fixed reset value would have to have changed between the two boots.
+///   Treated as unusable rather than picking one of the two arbitrarily, and
+///   logged at warning level as evidence something is off.
+///
+/// The returned signature's [BootSignature.preOffWire]/
+/// [BootSignature.preOffAssist] name [bootA] — the FIRST boot, not the
+/// probe's parting state — kept for symmetry with [classifyBootSignature]'s
+/// own field names, which name the state the old guide staged before its one
+/// outage. Callers of the two-boot flow should read `preOffWire`/
+/// `preOffAssist` as "what boot A reported", not "what was staged".
+BootSignature classifyCapabilityBoot({
+  required ({bool light, int assist, int wire}) bootA,
+  required ({bool light, int assist, int wire}) parting,
+  required ({bool light, int assist, int wire}) bootB,
+  required DateTime measuredAt,
+}) {
+  int? classifyByte(String name, int a, int p, int b) {
+    if (a != b) {
+      log.w(SDLogger.bike,
+          'Capability boot: $name disagreed between the two boots '
+          '($a then $b, parting was $p)');
+      return null;
+    }
+    return a == p ? null : a;
+  }
+
+  bool? classifyLight(bool a, bool p, bool b) {
+    if (a != b) {
+      log.w(SDLogger.bike,
+          'Capability boot: light disagreed between the two boots '
+          '($a then $b, parting was $p)');
+      return null;
+    }
+    return a == p ? null : a;
+  }
+
+  return BootSignature(
+    measuredAt: measuredAt,
+    bootWire: classifyByte('wire', bootA.wire, parting.wire, bootB.wire),
+    bootAssist:
+        classifyByte('assist', bootA.assist, parting.assist, bootB.assist),
+    bootLight: classifyLight(bootA.light, parting.light, bootB.light),
+    preOffWire: bootA.wire,
+    preOffAssist: bootA.assist,
+  );
+}
 
 /// Whether this platform can hold the app awake with no UI.
 bool get _hasBackgroundService => Platform.isAndroid;
@@ -1013,14 +1099,187 @@ class Bike extends _$Bike {
   /// path a padlock takes, so nothing here reaches the bike.
   BootSignature saveBootSignature(
       {required ({int assist, int wire}) preOff,
-      required ({int assist, int wire}) settled}) {
+      required ({int assist, int wire}) settled,
+      bool? preOffLight,
+      bool? settledLight}) {
     final signature = classifyBootSignature(
-        preOff: preOff, settled: settled, measuredAt: DateTime.now());
+        preOff: preOff,
+        settled: settled,
+        measuredAt: DateTime.now(),
+        preOffLight: preOffLight,
+        settledLight: settledLight);
     _logCalibration('Signature: boot wire ${signature.bootWire}, boot assist '
         '${signature.bootAssist} (staged wire ${preOff.wire}, assist '
         '${preOff.assist})');
     writeStateData(state.copyWith(bootSignature: signature), saveToBike: false);
     return signature;
+  }
+
+  /// One settings read, guarded exactly like the calibration flow's own
+  /// reads. Returns null on a bad/foreign packet or while disconnected — the
+  /// caller has nothing usable to compare against.
+  Future<LastSeen?> readBikeState() async {
+    if (!_isConnected) {
+      return null;
+    }
+    final data = await _withRegister(
+        () => ref.read(connectionHandlerProvider(id).notifier).read());
+    if (data == null || !isSettingsPacket(data)) {
+      return null;
+    }
+    return LastSeen(assist: data[2], light: data[4] == 1, wire: data[5]);
+  }
+
+  /// The wire [probeCapabilities] parks on once its own wire sweep is done:
+  /// the most-limited accepted wire (smallest [FirmwareProfile.capKmh]),
+  /// skipping the two unlimited ones (3 and 7) even when they are the only
+  /// wires accepted at all — a bike that only answers unlimited wires is
+  /// itself a useful result, but the sweep must never park there while it
+  /// still has assist and light left to test. [fallback] — [LastSeen.wire]
+  /// of the boot read the sweep started from — is used when nothing
+  /// accepted qualifies, which the sweep's own full coverage (see
+  /// [probeCapabilities]) means should not happen in practice.
+  int _safeWireAfterSweep(List<int> acceptedWires, int fallback) {
+    FirmwareProfile? best;
+    for (final wire in acceptedWires) {
+      if (wire == chWireUsOffroad || wire == chWireOffroad) {
+        continue;
+      }
+      final profile = profileByWire(wire);
+      if (best == null || profile.capKmh! < best.capKmh!) {
+        best = profile;
+      }
+    }
+    if (best == null) {
+      _logCalibration('Probe: only unlimited wires accepted, parking on the '
+          'boot wire $fallback');
+      return fallback;
+    }
+    return best.wire;
+  }
+
+  /// Writes one settings packet raw and reads back what stuck, in one queue
+  /// slot: write-then-read is a select-then-use sequence on the shared
+  /// register characteristic, exactly like the fresh read [writeStateData]
+  /// takes alongside its own write.
+  Future<List<int>?> _probeWriteRead(ConnectionHandler handler,
+      {required bool light, required int assist, required int wire}) {
+    return _withRegister(() async {
+      await handler.write(
+          state.copyWith(light: light, assist: assist).toWriteData(wire: wire));
+      return handler.read();
+    });
+  }
+
+  /// Sweeps every wire (0-7), every assist level (0-4) and the light,
+  /// writing each raw and reading back what stuck, against [bootA] — the
+  /// fresh-boot read the caller took just before calling this. Refuses while
+  /// calibrating or moving.
+  ///
+  /// Never calls [writeStateData]: none of this is a mode selection the app
+  /// should remember mid-sweep, and the production write pipeline's side
+  /// effects (a bikes.json save per write, foreground-service sync,
+  /// dynamic-mode re-entry) are wrong for a raw firmware probe. Every write
+  /// instead goes straight through [ConnectionHandler.write], exactly the
+  /// pattern [stageForCalibration] and [recordBootWindow] already use to talk
+  /// to the bike below the notifier's normal abstractions.
+  ///
+  /// Returns null only when the probe could not run at all — not when it ran
+  /// and found nothing writable. A bike that refuses every write is still a
+  /// valid, useful result: see the return below.
+  Future<BikeCapabilities?> probeCapabilities(LastSeen bootA) async {
+    if (_calibrating) {
+      _logCalibration('Refused to probe: a calibration window is open');
+      return null;
+    }
+    if (!_isConnected || !_isStopped) {
+      _logCalibration(
+          'Refused to probe: connected $_isConnected, standing $_isStopped');
+      return null;
+    }
+    final handler = ref.read(connectionHandlerProvider(id).notifier);
+    // Tracks whether the wire the sweep left on the bus is the deliberately
+    // chosen safe one. See the `finally` below.
+    var wireSettled = false;
+    try {
+      final acceptedWires = <int>[];
+      // Every wire is tested, including bootA.wire: only a real
+      // write-then-readback proves the bike accepted THAT write, and by the
+      // time this loop reaches bootA.wire the bike has already been moved
+      // through the seven others, so the test is not vacuous.
+      for (var wire = 0; wire < firmwareProfiles.length; wire++) {
+        final data = await _probeWriteRead(handler,
+            light: bootA.light, assist: bootA.assist, wire: wire);
+        if (data != null && isSettingsPacket(data) && data[5] == wire) {
+          acceptedWires.add(wire);
+        }
+      }
+      final safeWire = _safeWireAfterSweep(acceptedWires, bootA.wire);
+      await _probeWriteRead(handler,
+          light: bootA.light, assist: bootA.assist, wire: safeWire);
+      wireSettled = true;
+
+      final acceptedAssist = <int>[];
+      // The physically-current assist value, updated from every readback —
+      // not from what was intended — so it stays correct even where the
+      // bike rejects a candidate.
+      var partingAssist = bootA.assist;
+      for (var assist = 0; assist <= 4; assist++) {
+        final data = await _probeWriteRead(handler,
+            light: bootA.light, assist: assist, wire: safeWire);
+        if (data != null && isSettingsPacket(data)) {
+          partingAssist = data[2];
+          if (data[2] == assist) {
+            acceptedAssist.add(assist);
+          }
+        }
+      }
+      if (acceptedAssist.length > 1 && partingAssist == bootA.assist) {
+        // The sweep's own last value happened to coincide with the boot
+        // value — write one more accepted value that does not, so a later
+        // second boot has something to compare against. At least one such
+        // value exists: more than one was accepted, and bootA.assist can
+        // equal at most one of them.
+        final differing = acceptedAssist.firstWhere((a) => a != bootA.assist);
+        final data = await _probeWriteRead(handler,
+            light: bootA.light, assist: differing, wire: safeWire);
+        if (data != null && isSettingsPacket(data)) {
+          partingAssist = data[2];
+        }
+      }
+
+      final lightData = await _probeWriteRead(handler,
+          light: !bootA.light, assist: partingAssist, wire: safeWire);
+      final lightWritable = lightData != null &&
+          isSettingsPacket(lightData) &&
+          (lightData[4] == 1) == !bootA.light;
+
+      _logCalibration('Probe: wires $acceptedWires, assist $acceptedAssist, '
+          'light writable $lightWritable');
+      return BikeCapabilities(
+        measuredAt: DateTime.now(),
+        acceptedWires: acceptedWires,
+        acceptedAssist: acceptedAssist,
+        lightWritable: lightWritable,
+      );
+    } finally {
+      // Unlike a selected custom/native mode, a raw wire left on the bus
+      // mid-sweep is not something _capUnwatchedMode or
+      // _reassertAfterReconnect protect: both act on state.selectedMode,
+      // which never changes during this probe, so neither can see — let
+      // alone correct — a wire the probe itself wrote. This `finally` is
+      // this probe's own mitigation for that gap, not a case the existing
+      // machinery already covers. Best-effort and swallowed: a failure here
+      // must never replace the exception the caller actually needs to see.
+      if (!wireSettled) {
+        try {
+          await _probeWriteRead(handler,
+              light: bootA.light, assist: bootA.assist, wire: bootA.wire);
+        } catch (_) {
+          // Nothing more to do if even the safety-net write fails.
+        }
+      }
+    }
   }
 
   /// Opens or closes the write-suppression window. See [_calibrating].

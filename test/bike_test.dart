@@ -78,6 +78,67 @@ class _CountingWriteStore extends FakeBikeStore {
   }
 }
 
+/// A bike that answers every read with something that is not a settings
+/// packet at all — a mis-sequenced read, or a firmware frame the app does
+/// not know — standing in for a read [readBikeState] must reject outright,
+/// distinct from [_RideDataStore]'s specific ride-data frame.
+class _GarbageReadStore extends FakeBikeStore {
+  @override
+  List<int> read(String deviceId) => const [9, 9, 9, 9, 9, 9, 9, 9, 9, 9];
+}
+
+/// A bike whose firmware ignores a write to one byte of the settings packet
+/// and always reports the same value back, standing in for locked firmware:
+/// wire, assist and light are each lockable independently, matching how a
+/// real firmware can refuse one control and honour the others.
+class _LockedByteStore extends FakeBikeStore {
+  _LockedByteStore({this.fixedWire, this.fixedAssist, this.fixedLight});
+
+  final int? fixedWire;
+  final int? fixedAssist;
+  final bool? fixedLight;
+
+  @override
+  void write(String deviceId, List<int> data) {
+    if (data.length < 5 || data[0] != 0 || data[1] != 209) {
+      super.write(deviceId, data);
+      return;
+    }
+    final forced = List<int>.from(data);
+    if (fixedLight != null) {
+      forced[2] = fixedLight! ? 1 : 0;
+    }
+    if (fixedAssist != null) {
+      forced[3] = fixedAssist!;
+    }
+    if (fixedWire != null) {
+      forced[4] = fixedWire!;
+    }
+    super.write(deviceId, forced);
+  }
+}
+
+/// Records every write like [_CountingWriteStore], and throws on the
+/// [failOnWrite]-th one (1-indexed), standing in for a write that never
+/// reached the bike — a disconnect or a BLE error partway through a sweep.
+class _CountingFlakyStore extends FakeBikeStore {
+  _CountingFlakyStore({this.failOnWrite = -1});
+
+  final writes = <List<int>>[];
+  final int failOnWrite;
+  int _count = 0;
+
+  @override
+  void write(String deviceId, List<int> data) {
+    _count++;
+    writes.add(List.of(data));
+    if (_count == failOnWrite) {
+      throw Exception('BLE write failed');
+    }
+    super.write(deviceId, data);
+  }
+}
+
 /// A bike whose register changes from read to read: every read takes the next
 /// staged answer and the last one stays. Stands in for a controller that boots
 /// on one value and settles on another during the recording window.
@@ -2235,6 +2296,296 @@ void main() {
     test('the window reads through the first eight seconds', () {
       expect(Bike.bootWindowSchedule.map((d) => d.inSeconds).toList(),
           [0, 1, 2, 3, 5, 8]);
+    });
+  });
+
+  group('classifyBootSignature light parameter', () {
+    final at = DateTime(2026, 8, 11);
+
+    test('omitting the light pair reproduces today\'s signature exactly',
+        () {
+      // Every existing call site — calibration_page.dart's guide included —
+      // omits preOffLight/settledLight. A future edit that changed the
+      // default behaviour would break this before it ever reached a rider.
+      final signature = classifyBootSignature(
+          preOff: (assist: 2, wire: 5),
+          settled: (assist: 0, wire: 4),
+          measuredAt: at);
+      expect(signature.bootLight, isNull);
+      expect(signature.bootWire, 4);
+      expect(signature.bootAssist, 0);
+      expect(signature.preOffWire, 5);
+      expect(signature.preOffAssist, 2);
+    });
+
+    test('a light pair that changed becomes the boot light', () {
+      final signature = classifyBootSignature(
+          preOff: (assist: 2, wire: 5),
+          settled: (assist: 2, wire: 5),
+          measuredAt: at,
+          preOffLight: false,
+          settledLight: true);
+      expect(signature.bootLight, isTrue);
+    });
+
+    test('a light pair that did not change is unusable', () {
+      final signature = classifyBootSignature(
+          preOff: (assist: 2, wire: 5),
+          settled: (assist: 2, wire: 5),
+          measuredAt: at,
+          preOffLight: true,
+          settledLight: true);
+      expect(signature.bootLight, isNull);
+    });
+  });
+
+  group('classifyCapabilityBoot', () {
+    final at = DateTime(2026, 8, 11);
+
+    ({bool light, int assist, int wire}) triple(
+            {bool light = false, int assist = 0, int wire = 0}) =>
+        (light: light, assist: assist, wire: wire);
+
+    test('a byte that resets to a fixed value enters the signature', () {
+      final signature = classifyCapabilityBoot(
+          bootA: triple(wire: 4, assist: 0, light: false),
+          parting: triple(wire: 2, assist: 3, light: true),
+          bootB: triple(wire: 4, assist: 0, light: false),
+          measuredAt: at);
+      expect(signature.bootWire, 4);
+      expect(signature.bootAssist, 0);
+      expect(signature.bootLight, isFalse);
+      expect(signature.preOffWire, 4,
+          reason: 'preOffWire names boot A, the first boot');
+      expect(signature.preOffAssist, 0);
+    });
+
+    test('a byte that keeps the probe value persists, so it stays null', () {
+      final signature = classifyCapabilityBoot(
+          bootA: triple(wire: 4, assist: 0, light: false),
+          parting: triple(wire: 2, assist: 3, light: true),
+          bootB: triple(wire: 2, assist: 3, light: true),
+          measuredAt: at);
+      expect(signature.bootWire, isNull);
+      expect(signature.bootAssist, isNull);
+      expect(signature.bootLight, isNull);
+    });
+
+    test('all three points equal is ambiguous, so it stays null', () {
+      final signature = classifyCapabilityBoot(
+          bootA: triple(wire: 4, assist: 0, light: false),
+          parting: triple(wire: 4, assist: 0, light: false),
+          bootB: triple(wire: 4, assist: 0, light: false),
+          measuredAt: at);
+      expect(signature.bootWire, isNull);
+      expect(signature.bootAssist, isNull);
+      expect(signature.bootLight, isNull);
+    });
+
+    test('the two boots disagreeing is unusable too', () {
+      final signature = classifyCapabilityBoot(
+          bootA: triple(wire: 4, assist: 0, light: false),
+          parting: triple(wire: 2, assist: 3, light: true),
+          bootB: triple(wire: 5, assist: 1, light: true),
+          measuredAt: at);
+      expect(signature.bootWire, isNull);
+      expect(signature.bootAssist, isNull);
+      expect(signature.bootLight, isNull);
+    });
+  });
+
+  group('readBikeState', () {
+    test('returns a correct LastSeen from a good packet', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      container.read(fakeBikeStoreProvider).write(id, [0, 209, 1, 3, 6, 0, 0, 0, 0, 0]);
+
+      final seen = await bike.readBikeState();
+
+      expect(seen, isNotNull);
+      expect(seen!.light, isTrue);
+      expect(seen.assist, 3);
+      expect(seen.wire, 6);
+    });
+
+    test('returns null while disconnected', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // ignore: invalid_use_of_protected_member
+      container.read(connectionHandlerProvider(id).notifier).state =
+          SDBluetoothConnectionState.disconnected;
+
+      expect(await bike.readBikeState(), isNull);
+    });
+
+    test('returns null from a foreign ride-data packet', () async {
+      final store = _RideDataStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      store.serveRideData = true;
+
+      expect(await bike.readBikeState(), isNull);
+    });
+
+    test('returns null from a bad read', () async {
+      final store = _GarbageReadStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      expect(await bike.readBikeState(), isNull);
+    });
+  });
+
+  group('probeCapabilities', () {
+    const bootA = LastSeen(assist: 0, light: false, wire: 5);
+
+    test('a bike that accepts everything reports full capabilities',
+        () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, List.generate(8, (i) => i));
+      expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
+      expect(caps.lightWritable, isTrue);
+      expect(caps.modeWritable, isTrue);
+      expect(caps.assistWritable, isTrue);
+      expect(caps.detectedRegion, isNull,
+          reason: 'both banks accepted at once names no region cleanly — '
+              'see models_test.dart for the clean-set cases');
+    });
+
+    test('a bike locked onto one wire reports it as the only accepted wire',
+        () async {
+      final store = _LockedByteStore(fixedWire: 5);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, [5]);
+      expect(caps.modeWritable, isFalse,
+          reason: 'nothing else was ever accepted to pick instead');
+    });
+
+    test(
+        'a bike locked onto one assist level reports it as the only '
+        'accepted level', () async {
+      final store = _LockedByteStore(fixedAssist: 2);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      final caps =
+          await bike.probeCapabilities(const LastSeen(assist: 2, light: false, wire: 5));
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedAssist, [2]);
+      expect(caps.assistWritable, isFalse);
+    });
+
+    test('a bike locked onto the light reports it as not writable',
+        () async {
+      final store = _LockedByteStore(fixedLight: false);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNotNull);
+      expect(caps!.lightWritable, isFalse);
+    });
+
+    test('the success path never leaves the bus on wire 3 or 7', () async {
+      final store = _CountingFlakyStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNotNull);
+      final lastWire = store.writes.last[4];
+      expect(lastWire, isNot(3));
+      expect(lastWire, isNot(7));
+    });
+
+    test('a mid-sweep failure still leaves the bus off wire 3 and 7',
+        () async {
+      // Throws on the third write, mid wire sweep (wire 2 of 0-7).
+      final store = _CountingFlakyStore(failOnWrite: 3);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      await expectLater(bike.probeCapabilities(bootA), throwsException);
+
+      final lastWire = store.writes.last[4];
+      expect(lastWire, isNot(3));
+      expect(lastWire, isNot(7));
+      expect(lastWire, bootA.wire,
+          reason: 'the finally block parks on the boot wire it started from');
+    });
+
+    test('refuses while a calibration window is open', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      bike.setCalibrating(true);
+
+      expect(await bike.probeCapabilities(bootA), isNull);
+    });
+
+    test('refuses while the bike is moving', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      container.read(fakeBikeStoreProvider).setSpeed(id, 20);
+      await settle();
+
+      expect(await bike.probeCapabilities(bootA), isNull);
+    });
+
+    test('refuses while disconnected', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // ignore: invalid_use_of_protected_member
+      container.read(connectionHandlerProvider(id).notifier).state =
+          SDBluetoothConnectionState.disconnected;
+
+      expect(await bike.probeCapabilities(bootA), isNull);
     });
   });
 }

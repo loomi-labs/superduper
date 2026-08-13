@@ -38,6 +38,7 @@ _BootSignature _$BootSignatureFromJson(Map<String, dynamic> json) =>
       measuredAt: DateTime.parse(json['measuredAt'] as String),
       bootWire: (json['bootWire'] as num?)?.toInt(),
       bootAssist: (json['bootAssist'] as num?)?.toInt(),
+      bootLight: json['bootLight'] as bool?,
       preOffWire: (json['preOffWire'] as num).toInt(),
       preOffAssist: (json['preOffAssist'] as num).toInt(),
     );
@@ -47,8 +48,29 @@ Map<String, dynamic> _$BootSignatureToJson(_BootSignature instance) =>
       'measuredAt': instance.measuredAt.toIso8601String(),
       'bootWire': instance.bootWire,
       'bootAssist': instance.bootAssist,
+      'bootLight': instance.bootLight,
       'preOffWire': instance.preOffWire,
       'preOffAssist': instance.preOffAssist,
+    };
+
+_BikeCapabilities _$BikeCapabilitiesFromJson(Map<String, dynamic> json) =>
+    _BikeCapabilities(
+      measuredAt: DateTime.parse(json['measuredAt'] as String),
+      acceptedWires: (json['acceptedWires'] as List<dynamic>)
+          .map((e) => (e as num).toInt())
+          .toList(),
+      acceptedAssist: (json['acceptedAssist'] as List<dynamic>)
+          .map((e) => (e as num).toInt())
+          .toList(),
+      lightWritable: json['lightWritable'] as bool,
+    );
+
+Map<String, dynamic> _$BikeCapabilitiesToJson(_BikeCapabilities instance) =>
+    <String, dynamic>{
+      'measuredAt': instance.measuredAt.toIso8601String(),
+      'acceptedWires': instance.acceptedWires,
+      'acceptedAssist': instance.acceptedAssist,
+      'lightWritable': instance.lightWritable,
     };
 
 _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
@@ -80,6 +102,9 @@ _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
   bootSignature: json['bootSignature'] == null
       ? null
       : BootSignature.fromJson(json['bootSignature'] as Map<String, dynamic>),
+  capabilities: json['capabilities'] == null
+      ? null
+      : BikeCapabilities.fromJson(json['capabilities'] as Map<String, dynamic>),
   name: json['name'] as String,
   region: $enumDecodeNullable(_$BikeRegionEnumMap, json['region']),
   autoReconnect: json['autoReconnect'] as bool? ?? true,
@@ -102,6 +127,7 @@ Map<String, dynamic> _$BikeStateToJson(_BikeState instance) =>
       'startupAssist': instance.startupAssist,
       'lastSeen': instance.lastSeen?.toJson(),
       'bootSignature': instance.bootSignature?.toJson(),
+      'capabilities': instance.capabilities?.toJson(),
       'name': instance.name,
       'region': _$BikeRegionEnumMap[instance.region],
       'autoReconnect': instance.autoReconnect,
