@@ -209,7 +209,7 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
   Future<void> _addCustomMode() async {
     final mode = CustomMode(
         id: newCustomModeId(),
-        name: customModeNameFor(customLimitMin),
+        name: customModeNameFor(customLimitMin, _draftBike.region),
         limitKmh: customLimitMin,
         throttle: false);
     setState(() {
@@ -673,6 +673,7 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                         _CustomModeTile(
                           key: ValueKey('customModeTile:${mode.id}'),
                           mode: mode,
+                          region: _draftBike.region,
                           onTap: () => _editCustomMode(mode),
                           onDelete: () => _deleteCustomMode(mode),
                         ),
@@ -778,15 +779,24 @@ class _CustomModeTile extends StatelessWidget {
   const _CustomModeTile(
       {super.key,
       required this.mode,
+      required this.region,
       required this.onTap,
       required this.onDelete});
   final CustomMode mode;
+
+  /// The region the sheet would SAVE, for the same reason
+  /// [_CustomModeEditor.region] takes it: it decides the unit, not the bike's
+  /// stale region.
+  final BikeRegion? region;
   final VoidCallback onTap;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
     final limit = mode.effectiveLimitKmh;
+    final useMph = region == BikeRegion.us;
+    final displayed = useMph ? mphFromKmh(limit) : limit;
+    final unit = useMph ? 'mph' : 'km/h';
     return ListTile(
       contentPadding: EdgeInsets.zero,
       title: Text(
@@ -794,7 +804,7 @@ class _CustomModeTile extends StatelessWidget {
         style: Theme.of(context).textTheme.bodyMedium,
       ),
       subtitle: Text(
-        mode.throttle ? '$limit km/h · throttle' : '$limit km/h',
+        mode.throttle ? '$displayed $unit · throttle' : '$displayed $unit',
         style: Theme.of(context).textTheme.bodySmall!.copyWith(
               color: Colors.grey,
               fontSize: 12,
@@ -811,9 +821,35 @@ class _CustomModeTile extends StatelessWidget {
 }
 
 /// The name a new custom mode carries while the rider has not named it: the
-/// speed it holds. One function for both the seed and the live update in the
-/// editor, so the two cannot drift apart.
-String customModeNameFor(int limitKmh) => '$limitKmh km/h';
+/// speed it holds, in the unit the rider reads everywhere else in the mode
+/// list. One function for both the seed and the live update in the editor, so
+/// the two cannot drift apart.
+///
+/// mph only for [BikeRegion.us]: `eu`, `ch` and a legacy null region all read
+/// km/h. A null region has no bike behind it to call US, so it keeps the
+/// metric storage unit rather than guessing — unlike [FirmwareProfile.label],
+/// which falls back to the US bank for a null region because that fallback
+/// already exists in the mode-selection engine.
+String customModeNameFor(int limitKmh, BikeRegion? region) =>
+    region == BikeRegion.us
+        ? '${mphFromKmh(limitKmh)} mph'
+        : '$limitKmh km/h';
+
+/// Rounds a stored km/h limit to the nearest mph, for display on a US bike.
+int mphFromKmh(int kmh) => (kmh / 1.609344).round();
+
+/// Rounds an mph value the rider dragged a US slider to, back to km/h for
+/// storage. The caller still clamps the result to [customLimitMin]/
+/// [customLimitMax] (`_setLimit` does this) — the same clamp the km/h slider
+/// goes through today.
+///
+/// Known edge: 25 km/h rounds to 16 mph, but 16 mph rounds back to 26 km/h,
+/// not 25. A custom mode already stored at 25 km/h therefore reads 16 mph the
+/// first time a US rider opens the editor, and snaps to 26 km/h the moment
+/// they nudge the slider at all. This is accepted: the switching engine's
+/// hysteresis (`dynamicHysteresisKmh` in models.dart) treats 25 and 26 km/h
+/// alike, so the ride does not change.
+int kmhFromMph(int mph) => (mph * 1.609344).round();
 
 /// Edits one custom mode in a sheet of its own (the colour picker's precedent).
 /// Returns the edited mode, or null when the rider backs out — the caller's
@@ -887,6 +923,28 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
     _syncAutoName();
   }
 
+  /// True on a US bike, where the slider, its label and the trailing readout
+  /// all switch to mph. Every other region keeps km/h, unchanged.
+  bool get _useMph => widget.region == BikeRegion.us;
+
+  /// The limit as the slider shows it: mph on a US bike, km/h otherwise.
+  /// [_limitKmh] itself never changes unit — only this reads it for display.
+  int get _displayLimit => _useMph ? mphFromKmh(_limitKmh) : _limitKmh;
+
+  String get _displayUnit => _useMph ? 'mph' : 'km/h';
+
+  /// The slider's bounds in the displayed unit: the mph equivalents of
+  /// [customLimitMin]/[customLimitMax] on a US bike, unchanged km/h
+  /// otherwise.
+  int get _displayMin => _useMph ? mphFromKmh(customLimitMin) : customLimitMin;
+  int get _displayMax => _useMph ? mphFromKmh(customLimitMax) : customLimitMax;
+
+  /// Turns a slider position or a +/- tap, given in the displayed unit, into
+  /// the km/h [_setLimit] stores. On a US bike this is mph -> km/h; elsewhere
+  /// the displayed unit already is km/h.
+  void _setDisplayLimit(int displayed) =>
+      _setLimit(_useMph ? kmhFromMph(displayed) : displayed);
+
   /// Writes the automatic name after the limit moved. Only [_setLimit] calls
   /// it: the throttle switch no longer changes the limit.
   ///
@@ -897,7 +955,7 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
     if (!widget.autoName || _nameEdited) {
       return;
     }
-    final name = customModeNameFor(_limitKmh);
+    final name = customModeNameFor(_limitKmh, widget.region);
     // Not the plain `text` setter: it leaves the selection invalid, and the
     // field can hold the cursor while the rider drags the slider.
     _nameController.value = TextEditingValue(
@@ -1034,29 +1092,32 @@ class _CustomModeEditorState extends State<_CustomModeEditor> {
                               key: const ValueKey('customModeLimitMinus'),
                               tooltip: 'Decrease limit',
                               icon: const Icon(Icons.remove),
-                              onPressed: () => _setLimit(_limitKmh - 1),
+                              onPressed: () =>
+                                  _setDisplayLimit(_displayLimit - 1),
                             ),
                             Expanded(
                               child: Slider(
                                 key: const ValueKey('customModeLimitSlider'),
-                                value: _limitKmh.toDouble(),
-                                min: customLimitMin.toDouble(),
-                                max: customLimitMax.toDouble(),
-                                divisions: customLimitMax - customLimitMin,
-                                label: '$_limitKmh km/h',
-                                onChanged: (value) => _setLimit(value.round()),
+                                value: _displayLimit.toDouble(),
+                                min: _displayMin.toDouble(),
+                                max: _displayMax.toDouble(),
+                                divisions: _displayMax - _displayMin,
+                                label: '$_displayLimit $_displayUnit',
+                                onChanged: (value) =>
+                                    _setDisplayLimit(value.round()),
                               ),
                             ),
                             IconButton(
                               key: const ValueKey('customModeLimitPlus'),
                               tooltip: 'Increase limit',
                               icon: const Icon(Icons.add),
-                              onPressed: () => _setLimit(_limitKmh + 1),
+                              onPressed: () =>
+                                  _setDisplayLimit(_displayLimit + 1),
                             ),
                             SizedBox(
                               width: 68,
                               child: Text(
-                                '$_limitKmh km/h',
+                                '$_displayLimit $_displayUnit',
                                 textAlign: TextAlign.end,
                                 style: Theme.of(context).textTheme.bodyMedium,
                               ),

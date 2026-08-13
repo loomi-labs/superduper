@@ -426,20 +426,38 @@ void main() {
     expect(saved.light, isTrue);
   });
 
+  group('customModeNameFor', () {
+    test('reads mph on a US bike', () {
+      // 30 km/h is 18.64 mph, rounded to 19.
+      expect(customModeNameFor(30, BikeRegion.us), '19 mph');
+    });
+
+    test('reads km/h on EU, CH and a legacy null region', () {
+      // A null region has no bike behind it to call US, so it keeps the
+      // metric storage unit — see the code comment on customModeNameFor.
+      expect(customModeNameFor(30, BikeRegion.eu), '30 km/h');
+      expect(customModeNameFor(30, BikeRegion.ch), '30 km/h');
+      expect(customModeNameFor(30, null), '30 km/h');
+    });
+  });
+
   group('custom mode editor', () {
     const fast40 =
         CustomMode(id: 'c1', name: 'Fast', limitKmh: 40, throttle: false);
 
-    /// A CH bike carrying [modes], selected on [modeId].
+    /// A CH bike carrying [modes], selected on [modeId]. [region], when given,
+    /// overrides the default CH region — the US/EU cases share this helper
+    /// rather than a second one, so both paths build the bike the same way.
     Future<ProviderContainer> openWith(WidgetTester tester,
-        List<CustomMode> modes, String modeId) async {
+        List<CustomMode> modes, String modeId, {BikeRegion? region}) async {
       final container = ProviderContainer();
       container.listen(bikeProvider(id), (previous, next) {});
+      var bike = BikeState.defaultState(id).copyWith(customModes: modes);
+      if (region != null) {
+        bike = bike.copyWith(region: region);
+      }
       container.read(bikeProvider(id).notifier).writeStateData(
-          BikeState.defaultState(id)
-              .copyWith(customModes: modes)
-              .withSelectedMode(modeId),
-          saveToBike: false);
+          bike.withSelectedMode(modeId), saveToBike: false);
       await tester.pump();
       await openSheet(tester, container, container.read(bikeProvider(id)));
       return container;
@@ -1003,6 +1021,135 @@ void main() {
         container.dispose();
         expect(limit, 35);
         expect(kept, 'Trail');
+      });
+    });
+
+    // The one inconsistency WP1 left: a US bike's default modes read in mph,
+    // but a custom mode still read km/h. These guard the editor's US branch
+    // and the EU/CH path it must not disturb.
+    group('mph on a US bike', () {
+      testWidgets('the slider bounds and label read mph', (tester) async {
+        final container = await openWith(tester, const [fast40], fast40.id,
+            region: BikeRegion.us);
+
+        await tapKey(tester, 'customModeTile:${fast40.id}');
+        final slider = tester.widget<Slider>(
+            find.byKey(const ValueKey('customModeLimitSlider')));
+
+        container.dispose();
+        // 25/45 km/h round to 16/28 mph; 40 km/h rounds to 25 mph.
+        expect(slider.min, 16);
+        expect(slider.max, 28);
+        expect(slider.divisions, 12);
+        expect(slider.value, 25);
+        expect(slider.label, '25 mph');
+      });
+
+      testWidgets('the trailing readout reads mph', (tester) async {
+        final container = await openWith(tester, const [fast40], fast40.id,
+            region: BikeRegion.us);
+
+        await tapKey(tester, 'customModeTile:${fast40.id}');
+        final readout = find.text('25 mph');
+
+        container.dispose();
+        expect(readout, findsWidgets,
+            reason: 'both the tile subtitle and the editor readout say so');
+      });
+
+      testWidgets('the +/- buttons step by one mph, not one km/h',
+          (tester) async {
+        final container = await openWith(tester, const [fast40], fast40.id,
+            region: BikeRegion.us);
+
+        await tapKey(tester, 'customModeTile:${fast40.id}');
+        expect(sliderValue(tester), 25);
+
+        await tapKey(tester, 'customModeLimitPlus');
+        expect(sliderValue(tester), 26);
+
+        await tapKey(tester, 'customModeLimitMinus');
+        await tapKey(tester, 'customModeLimitMinus');
+        final result = sliderValue(tester);
+        container.dispose();
+        expect(result, 24);
+      });
+
+      testWidgets('a slider position stores its km/h equivalent',
+          (tester) async {
+        final container = await openWith(tester, const [fast40], fast40.id,
+            region: BikeRegion.us);
+
+        await tapKey(tester, 'customModeTile:${fast40.id}');
+        // 25 mph -> 23 mph.
+        await tapKey(tester, 'customModeLimitMinus');
+        await tapKey(tester, 'customModeLimitMinus');
+        expect(sliderValue(tester), 23);
+        await tapKey(tester, 'customModeEditorDone');
+
+        await tester.ensureVisible(find.text('Save'));
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+
+        final saved = container.read(bikeProvider(id));
+        container.dispose();
+        // 23 mph rounds to 37 km/h, not a straight unit swap.
+        expect(saved.customModes.single.limitKmh, 37);
+      });
+
+      testWidgets('the name follows the slider in mph', (tester) async {
+        final container = await openWith(
+            tester, const [], nativeModeId(0),
+            region: BikeRegion.us);
+
+        await tapKey(tester, 'addCustomModeButton');
+        // 25 km/h -> 16 mph, the mode's opening limit.
+        expect(nameFieldText(tester), '16 mph');
+
+        // Each plus tap steps the DISPLAY by one mph, so 5 taps land on
+        // 16 + 5 = 21 mph (34 km/h stored) — not the 30 km/h a km/h-mode
+        // custom mode would land on for the same 5 taps.
+        await raiseLimit(tester, 5);
+        final followed = nameFieldText(tester);
+        container.dispose();
+        expect(followed, '21 mph');
+      });
+
+      testWidgets('the tile subtitle reads mph', (tester) async {
+        final container = await openWith(tester, const [fast40], fast40.id,
+            region: BikeRegion.us);
+
+        final subtitle = find.text('25 mph');
+        container.dispose();
+        expect(subtitle, findsOneWidget,
+            reason: 'no editor is open, so only the tile shows the limit');
+      });
+    });
+
+    group('km/h unchanged outside the US', () {
+      testWidgets('the editor still shows km/h on an EU bike', (tester) async {
+        final container = await openWith(tester, const [fast40], fast40.id,
+            region: BikeRegion.eu);
+
+        await tapKey(tester, 'customModeTile:${fast40.id}');
+        final slider = tester.widget<Slider>(
+            find.byKey(const ValueKey('customModeLimitSlider')));
+
+        container.dispose();
+        expect(slider.min, 25);
+        expect(slider.max, 45);
+        expect(slider.divisions, 20);
+        expect(slider.value, 40);
+        expect(slider.label, '40 km/h');
+      });
+
+      testWidgets('the tile subtitle stays km/h on a CH bike', (tester) async {
+        final container = await openWith(
+            tester, const [seededChMode, fast40], seededChModeId);
+
+        final subtitle = find.text('40 km/h');
+        container.dispose();
+        expect(subtitle, findsOneWidget);
       });
     });
   });
