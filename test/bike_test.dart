@@ -119,6 +119,31 @@ class _LockedByteStore extends FakeBikeStore {
   }
 }
 
+/// A bike whose firmware only accepts a write to one of [accepted] wires; a
+/// write naming any other wire is applied for light/assist but leaves the
+/// wire byte exactly as it was, standing in for firmware that refuses a
+/// subset of wires outright (distinct from [_LockedByteStore], which locks a
+/// byte to one fixed value regardless of what is written).
+class _LimitedWireStore extends FakeBikeStore {
+  _LimitedWireStore(this.accepted);
+
+  final Set<int> accepted;
+
+  @override
+  void write(String deviceId, List<int> data) {
+    if (data.length < 5 ||
+        data[0] != 0 ||
+        data[1] != 209 ||
+        accepted.contains(data[4])) {
+      super.write(deviceId, data);
+      return;
+    }
+    final kept = List<int>.from(data);
+    kept[4] = read(deviceId)[5];
+    super.write(deviceId, kept);
+  }
+}
+
 /// Records every write like [_CountingWriteStore], and throws on the
 /// [failOnWrite]-th one (1-indexed), standing in for a write that never
 /// reached the bike — a disconnect or a BLE error partway through a sweep.
@@ -1625,6 +1650,35 @@ void main() {
         reason: 'a deleted bike must not be resurrected by its own loop');
   });
 
+  test(
+      'readBikeState and probeCapabilities no-op after deletion instead of '
+      'throwing on a torn-down notifier', () async {
+    final container = makeContainer();
+    await loadBikesDB(container);
+
+    final sub = container.listen(bikeProvider(id), (previous, next) {});
+    final bike = container.read(bikeProvider(id).notifier);
+    bike.writeStateData(
+        BikeState.defaultState(id).copyWith(region: BikeRegion.ch));
+    await settle();
+    final saved = container.read(bikeProvider(id));
+
+    bike.deleteStateData(saved);
+    await settle();
+    // The setup wizard can span the deletion happening from another screen;
+    // closing every listener is what actually tears the notifier's ref down.
+    sub.close();
+    await settle();
+
+    expect(await bike.readBikeState(), isNull,
+        reason: 'a deleted bike must answer gracefully, not throw on a '
+            'torn-down notifier');
+    expect(
+        await bike.probeCapabilities(
+            const LastSeen(assist: 0, light: false, wire: 0)),
+        isNull);
+  });
+
   test('a light toggle above the limit keeps the cap wire byte', () async {
     final container = makeContainer();
     final bike = await openBike(container, region: BikeRegion.ch);
@@ -2390,6 +2444,83 @@ void main() {
     });
   });
 
+  group('saveCapabilities', () {
+    const bootA = LastSeen(assist: 0, light: false, wire: 0);
+    const parting = LastSeen(assist: 3, light: true, wire: 2);
+    const bootB = LastSeen(assist: 0, light: false, wire: 0);
+
+    final euCapabilities = BikeCapabilities(
+        measuredAt: DateTime(2026, 8, 13),
+        acceptedWires: const [4, 5, 6, 7],
+        acceptedAssist: const [0, 1, 2, 3, 4],
+        lightWritable: true);
+
+    test(
+        'a detected region change remaps the mode exactly like a manual '
+        'region change would', () async {
+      final container = makeContainer();
+      container.listen(bikeProvider(id), (previous, next) {});
+      final bike = container.read(bikeProvider(id).notifier);
+      // A legacy bike: no region measured yet, riding US ECO (native:0).
+      bike.writeStateData(
+          BikeState.defaultState(id)
+              .copyWith(
+                  region: null,
+                  customModes: const [],
+                  capabilities: null,
+                  bootSignature: null)
+              .withSelectedMode(nativeModeId(0)),
+          saveToBike: false);
+      await settle();
+
+      bike.saveCapabilities(
+          capabilities: euCapabilities,
+          bootA: bootA,
+          parting: parting,
+          bootB: bootB);
+      await settle();
+
+      final saved = container.read(bikeProvider(id));
+      expect(saved.region, BikeRegion.eu);
+      // The same outcome remapModeForRegion's own tests lock in for a manual
+      // region change: US ECO (bank index 0) moves to the same index of the
+      // EU bank, EPAC 25 (native:4) — not the fallbackMode a raw
+      // copyWith(region:) would silently land on because native:0 is not in
+      // the EU bank's selectableModes.
+      expect(saved.selectedMode.id, nativeModeId(4));
+    });
+
+    test('a detected region equal to the current one moves nothing',
+        () async {
+      final container = makeContainer();
+      container.listen(bikeProvider(id), (previous, next) {});
+      final bike = container.read(bikeProvider(id).notifier);
+      bike.writeStateData(
+          BikeState.defaultState(id)
+              .copyWith(
+                  region: BikeRegion.eu,
+                  customModes: const [],
+                  capabilities: null,
+                  bootSignature: null)
+              .withSelectedMode(nativeModeId(5)),
+          saveToBike: false);
+      await settle();
+
+      bike.saveCapabilities(
+          capabilities: euCapabilities,
+          bootA: bootA,
+          parting: parting,
+          bootB: bootB);
+      await settle();
+
+      final saved = container.read(bikeProvider(id));
+      expect(saved.region, BikeRegion.eu);
+      expect(saved.selectedMode.id, nativeModeId(5),
+          reason: 'the region did not change, so the selection must not '
+              'move — a regression guard against remapping on every save');
+    });
+  });
+
   group('readBikeState', () {
     test('returns a correct LastSeen from a good packet', () async {
       final container = makeContainer();
@@ -2659,6 +2790,51 @@ void main() {
               'is still on the mode it started the probe with');
     });
 
+    test(
+        "an interleaved poll's read must not corrupt lastSeen with a "
+        'transient mid-sweep value', () async {
+      // Same interleaving harness as the startup-pin regression above: a
+      // read fired from inside one of the probe's own write-then-read steps,
+      // the way the register queue actually interleaves an ordinary poll
+      // between two of them.
+      final store = _ReentrantReadStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      // A real boot read, exactly what the wizard's own readBikeState
+      // establishes — the baseline the fix has to preserve.
+      store.write(id, [0, 209, 0, 2, 5, 0, 0, 0, 0, 0]);
+      await bike.updateStateDataNow();
+      await settle();
+      final baseline = container.read(bikeProvider(id)).lastSeen;
+      expect(baseline, const LastSeen(assist: 2, light: false, wire: 5));
+
+      bike.setCalibrating(true);
+      // Fires once, from inside the probe's very first readback: lands on
+      // whatever transient value the sweep has written by the time the
+      // register queue actually runs it, between two of the probe's own
+      // steps.
+      store.onRead = () {
+        unawaited(bike.updateStateDataNow());
+      };
+
+      await bike.probeCapabilities(
+          const LastSeen(assist: 2, light: false, wire: 5));
+      await settle();
+      bike.setCalibrating(false);
+      await settle();
+
+      expect(container.read(bikeProvider(id)).lastSeen, baseline,
+          reason: "a poll's read mid-sweep must not overwrite the real boot "
+              'baseline with a transient value the probe itself wrote — that '
+              'baseline is what the NEXT real disconnect/reconnect is '
+              'measured against');
+    });
+
     test('refuses while the bike is moving', () async {
       final container = makeContainer();
       final bike = await openBike(container,
@@ -2678,6 +2854,97 @@ void main() {
           SDBluetoothConnectionState.disconnected;
 
       expect(await bike.probeCapabilities(bootA), isNull);
+    });
+
+    test(
+        'an exception during the assist phase restores the full boot triple, '
+        'not just the wire', () async {
+      // failOnWrite is 1-indexed over every write the sweep makes: 8 wire +
+      // 1 safe-wire settle lands write 10 on the assist loop's first write.
+      final store = _CountingFlakyStore(failOnWrite: 10);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      await expectLater(bike.probeCapabilities(bootA), throwsException);
+
+      expect(bikeWire(container), bootA.wire,
+          reason: 'the old wire-only safety net already covered this');
+      expect(bikeAssist(container), bootA.assist,
+          reason: 'the assist level the sweep left behind must be restored '
+              'too, not just the wire');
+      expect(bikeLight(container), bootA.light ? 1 : 0);
+    });
+
+    test(
+        'an exception during the light phase restores the full boot triple, '
+        'not just the wire', () async {
+      // 8 wire + 1 safe-wire settle + 5 assist lands write 15 on the light
+      // test itself, the sweep's very last step.
+      final store = _CountingFlakyStore(failOnWrite: 15);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      await expectLater(bike.probeCapabilities(bootA), throwsException);
+
+      expect(bikeWire(container), bootA.wire);
+      expect(bikeAssist(container), bootA.assist);
+      expect(bikeLight(container), bootA.light ? 1 : 0,
+          reason: 'the light the sweep flipped for its own test must be '
+              'restored too, not just the wire');
+    });
+
+    test(
+        'the safe wire prefers a second accepted wire over the boot wire, so '
+        'the second boot can learn something', () async {
+      final store = _LimitedWireStore(const {0, 1});
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      final caps = await bike.probeCapabilities(
+          const LastSeen(assist: 0, light: false, wire: 0));
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, [0, 1]);
+      expect(bikeWire(container), 1,
+          reason: 'wire 0 is the most limited accepted wire, but it is also '
+              'the boot wire — parking there would compare a byte against '
+              "itself, which classifyCapabilityBoot can only read as "
+              "'ambiguous'. Wire 1 is the only other accepted wire.");
+    });
+
+    test(
+        'the safe wire stays on the boot wire when there is no other '
+        'accepted wire to prefer', () async {
+      final store = _LimitedWireStore(const {0});
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+
+      final caps = await bike.probeCapabilities(
+          const LastSeen(assist: 0, light: false, wire: 0));
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, [0]);
+      expect(bikeWire(container), 0,
+          reason: 'no safer alternative exists, so parking on the boot wire '
+              '(and the resulting ambiguous classification) is the honest '
+              'answer, not a bug to work around — the fix must never pick '
+              'an unlimited wire just to differ from it');
     });
   });
 }

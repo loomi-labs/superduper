@@ -674,8 +674,15 @@ class Bike extends _$Bike {
       _logW('Ignoring non settings read: $data');
       return;
     }
-    // Bike truth, before any lock override turns it into app desire.
-    _lastKnown = (light: data[4] == 1, assist: data[2]);
+    // Bike truth, before any lock override turns it into app desire. Skipped
+    // during a calibration window: a poll's read landing between two of the
+    // probe's own write-then-read steps would otherwise cache a transient
+    // mid-sweep value as the fallback the very first write after the window
+    // closes composes from. The wizard's own reads are what establishes
+    // truth for this window.
+    if (!_calibrating) {
+      _lastKnown = (light: data[4] == 1, assist: data[2]);
+    }
     if (_pendingWrites > 0) {
       // This read predates a settings write that waits in the queue. Judging
       // its wire byte would heal against the past — the ride log shows the
@@ -705,11 +712,15 @@ class Bike extends _$Bike {
       powerCycled = _powerCycleCheckDue && _isPowerCycle(seen);
       _powerCycleCheckDue = false;
     }
-    if (seen != state.lastSeen) {
+    if (!_calibrating && seen != state.lastSeen) {
       // Saved on its own, because an unchanged poll returns below without ever
       // reaching a write — and the record has to survive an app restart: the
       // sequence this exists for (bike off overnight, app opened, bike
-      // switched on) is a cold start.
+      // switched on) is a cold start. Gated on _calibrating for the same
+      // reason as _lastKnown above: this write bypasses writeStateData's own
+      // suppression entirely, and a poll's read landing mid-sweep must not be
+      // allowed to corrupt the baseline the next real disconnect/reconnect is
+      // measured against.
       final next = state.copyWith(lastSeen: seen);
       ref.read(bikesDBProvider.notifier).saveBike(next);
       state = next;
@@ -911,6 +922,9 @@ class Bike extends _$Bike {
   /// Returns null on a bad/foreign packet or while disconnected — the caller
   /// has nothing usable to compare against.
   Future<LastSeen?> readBikeState() async {
+    if (_deleted || !ref.mounted) {
+      return null;
+    }
     if (!_isConnected) {
       return null;
     }
@@ -932,20 +946,33 @@ class Bike extends _$Bike {
   /// accepted qualifies, which the sweep's own full coverage (see
   /// [probeCapabilities]) means should not happen in practice.
   int _safeWireAfterSweep(List<int> acceptedWires, int fallback) {
-    FirmwareProfile? best;
-    for (final wire in acceptedWires) {
-      if (wire == chWireUsOffroad || wire == chWireOffroad) {
-        continue;
-      }
-      final profile = profileByWire(wire);
-      if (best == null || profile.capKmh! < best.capKmh!) {
-        best = profile;
-      }
-    }
-    if (best == null) {
+    final candidates = [
+      for (final wire in acceptedWires)
+        if (wire != chWireUsOffroad && wire != chWireOffroad) wire,
+    ];
+    if (candidates.isEmpty) {
       _logCalibration('Probe: only unlimited wires accepted, parking on the '
           'boot wire $fallback');
       return fallback;
+    }
+    var best = profileByWire(candidates.first);
+    for (final wire in candidates.skip(1)) {
+      final profile = profileByWire(wire);
+      if (profile.capKmh! < best.capKmh!) {
+        best = profile;
+      }
+    }
+    if (best.wire == fallback && candidates.length > 1) {
+      // The most-limited accepted wire happens to be the one the bike
+      // already booted on: parking there compares a byte against itself,
+      // which classifyCapabilityBoot can only read as "unusable/ambiguous".
+      // Mirrors the assist sweep's own coincidence check a few lines below —
+      // any other accepted, non-unlimited wire lets the second boot actually
+      // learn something. Which one does not matter here: the loop above
+      // already chose "most limited" for safety, and this tie-break is
+      // purely about maximizing what the two-boot comparison can learn, a
+      // secondary concern to safety.
+      return candidates.firstWhere((wire) => wire != fallback);
     }
     return best.wire;
   }
@@ -997,6 +1024,9 @@ class Bike extends _$Bike {
   /// omitting it changes nothing about the sweep itself.
   Future<BikeCapabilities?> probeCapabilities(LastSeen bootA,
       {void Function(String phase, int done, int total)? onProgress}) async {
+    if (_deleted || !ref.mounted) {
+      return null;
+    }
     if (!_isConnected || !_isStopped) {
       _logCalibration(
           'Refused to probe: connected $_isConnected, standing $_isStopped');
@@ -1005,9 +1035,11 @@ class Bike extends _$Bike {
     final handler = ref.read(connectionHandlerProvider(id).notifier);
     // Mode, then assist, then light: the same order [onProgress] reports.
     final total = firmwareProfiles.length + 5 + 1;
-    // Tracks whether the wire the sweep left on the bus is the deliberately
-    // chosen safe one. See the `finally` below.
-    var wireSettled = false;
+    // Tracks whether the sweep reached its very last step — the light test —
+    // so the bike is left on values the caller actually chose (the safe
+    // wire, the parting assist, the flipped light), not a transient value
+    // from partway through. See the `finally` below.
+    var fullyParked = false;
     try {
       final acceptedWires = <int>[];
       // Every wire is tested, including bootA.wire: only a real
@@ -1025,7 +1057,6 @@ class Bike extends _$Bike {
       final safeWire = _safeWireAfterSweep(acceptedWires, bootA.wire);
       await _probeWriteRead(handler,
           light: bootA.light, assist: bootA.assist, wire: safeWire);
-      wireSettled = true;
 
       final acceptedAssist = <int>[];
       // The physically-current assist value, updated from every readback —
@@ -1063,6 +1094,7 @@ class Bike extends _$Bike {
           isSettingsPacket(lightData) &&
           (lightData[4] == 1) == !bootA.light;
       onProgress?.call('light', total, total);
+      fullyParked = true;
 
       _logCalibration('Probe: wires $acceptedWires, assist $acceptedAssist, '
           'light writable $lightWritable');
@@ -1073,18 +1105,24 @@ class Bike extends _$Bike {
         lightWritable: lightWritable,
       );
     } finally {
-      // Unlike a selected custom/native mode, a raw wire left on the bus
-      // mid-sweep is not something _capUnwatchedMode or
-      // _reassertAfterReconnect protect: both act on state.selectedMode,
-      // which never changes during this probe, so neither can see — let
-      // alone correct — a wire the probe itself wrote. This `finally` is
-      // this probe's own mitigation for that gap, not a case the existing
-      // machinery already covers. Best-effort and swallowed: a failure here
-      // must never replace the exception the caller actually needs to see.
-      if (!wireSettled) {
+      // Unlike a selected custom/native mode, a raw wire, assist level or
+      // light state left on the bus mid-sweep is not something
+      // _capUnwatchedMode or _reassertAfterReconnect protect: both act on
+      // state.selectedMode, which never changes during this probe, so
+      // neither can see — let alone correct — a byte the probe itself wrote.
+      // This `finally` is this probe's own mitigation for that gap, not a
+      // case the existing machinery already covers. One write of the full
+      // triple, not per-field: an exception can land during the wire loop,
+      // the assist loop or the light test alike, and by the time it is
+      // caught here there is no way to tell which fields the sweep already
+      // moved away from bootA, so every field is put back. Best-effort and
+      // swallowed: a failure here must never replace the exception the
+      // caller actually needs to see.
+      if (!fullyParked) {
         try {
-          await _probeWriteRead(handler,
-              light: bootA.light, assist: bootA.assist, wire: bootA.wire);
+          await handler.write(state
+              .copyWith(light: bootA.light, assist: bootA.assist)
+              .toWriteData(wire: bootA.wire));
         } catch (_) {
           // Nothing more to do if even the safety-net write fails.
         }
@@ -1117,9 +1155,19 @@ class Bike extends _$Bike {
     _logCalibration('Capabilities: wires ${capabilities.acceptedWires}, '
         'assist ${capabilities.acceptedAssist}, light writable '
         '${capabilities.lightWritable}, region $region');
+    // A raw copyWith(region: region) does not remap modeId: if the detected
+    // region's bank does not contain the bike's current selection,
+    // BikeState.selectedMode would silently fall back to fallbackMode — a
+    // rider's mode changing the moment setup finishes, with no warning.
+    // remapModeForRegion is what a manual region change already goes
+    // through, so a detected region gets the same treatment. Skipped when
+    // the region does not actually change: the bike is already valid for
+    // it, and remapping again must never be the thing that moves a rider's
+    // selection.
+    final remapped =
+        region == state.region ? state : remapModeForRegion(state, region);
     writeStateData(
-        state.copyWith(
-            capabilities: capabilities, bootSignature: signature, region: region),
+        remapped.copyWith(capabilities: capabilities, bootSignature: signature),
         saveToBike: false);
     return signature;
   }

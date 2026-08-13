@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:superduper/bike.dart';
 import 'package:superduper/repository.dart';
 import 'package:superduper/theme.dart';
+import 'package:superduper/utils/logger.dart';
 
 /// The short explanation of what the setup flow is about and why it takes
 /// two power cycles.
@@ -204,6 +205,15 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   bool _cancelled = false;
   bool _finished = false;
 
+  /// Set by a Cancel tap while [SetupStep.probing] is running. Dart cannot
+  /// abort the in-flight [Bike.probeCapabilities] future, and its writes go
+  /// straight to the bike below [Bike.setCalibrating]'s suppression — closing
+  /// the window right away would reopen the exact write race a previous fix
+  /// closed. This only records the rider's intent; [_run] checks it once the
+  /// probe returns (successfully or not) and finishes the flow exactly as an
+  /// ordinary cancel would, with nothing saved.
+  bool _cancelPending = false;
+
   /// The step's wait for the link to go down or come back, and which of the
   /// two it waits for.
   Completer<bool>? _waiter;
@@ -279,6 +289,32 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     Navigator.of(context).maybePop();
   }
 
+  /// Cancel while the sweep is running: see [_cancelPending]. Only records
+  /// the intent and updates the copy the rider sees; [_run] does the actual
+  /// cleanup once the sweep itself returns.
+  void _requestCancel() {
+    if (_cancelPending) {
+      return;
+    }
+    setState(() {
+      _cancelPending = true;
+      _hint = 'Finishing the test, then stopping…';
+    });
+  }
+
+  /// The cleanup for a cancel that arrived during the probe, run once the
+  /// probe itself has returned. The same outcome [_cancel] gives at every
+  /// other step: the guard released, nothing saved, the page popped.
+  void _finishCancelledProbe() {
+    if (mounted) {
+      _cancel();
+    } else {
+      // The page is already gone for some other reason; there is nothing
+      // left to pop, but the guard still has to close.
+      _finish();
+    }
+  }
+
   void _fail(String reason) {
     _finish();
     if (!mounted) {
@@ -326,6 +362,31 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       'The app cannot find the bike. Make sure the bike is on and near the '
       'phone, then use Connect.';
 
+  /// [_runSteps], guarded against a step throwing instead of returning a
+  /// plain failure sentinel (a real BLE exception rather than a `null`
+  /// [Bike.readBikeState]/[Bike.probeCapabilities] already handles on its
+  /// own). Left uncaught, such an exception would strand [_step] wherever it
+  /// was — typically [SetupStep.probing], mid-spinner, with the calibration
+  /// guard held open until the rider force-backs out and [dispose]'s own
+  /// backstop finally closes it.
+  ///
+  /// A cancel tapped during the probe (see [_cancelPending]) takes priority
+  /// over reporting the exception as a failure: the rider already asked to
+  /// leave, so this finishes the flow the same way a clean cancel would
+  /// rather than showing them a failure screen for it.
+  Future<void> _run() async {
+    try {
+      await _runSteps();
+    } catch (e, st) {
+      log.e(SDLogger.bike, 'Setup wizard step threw', e, st);
+      if (_cancelPending) {
+        _finishCancelledProbe();
+        return;
+      }
+      _fail('Something went wrong. Try again.');
+    }
+  }
+
   /// The whole flow, in the order the rider walks it. Every await is
   /// followed by the same question: is this page still the one the rider is
   /// looking at. Re-entered from the top by both the intro's Start and a
@@ -333,9 +394,10 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   /// once anything has failed: a [_bootA] or [_capabilities] left over from
   /// an earlier, incomplete attempt must never be trusted for a fresh probe
   /// or a fresh second boot.
-  Future<void> _run() async {
+  Future<void> _runSteps() async {
     _cancelled = false;
     _finished = false;
+    _cancelPending = false;
     _bootA = null;
     _parting = null;
     _bootB = null;
@@ -398,6 +460,14 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       }
       setState(() => _progress = (phase: phase, done: done, total: total));
     });
+    if (_cancelPending) {
+      // The sweep ran to completion regardless of the tap (Dart cannot abort
+      // it, and it writes below the calibration guard's own suppression —
+      // see _cancelPending). Finish exactly as an ordinary cancel would,
+      // whether the sweep succeeded or not: nothing measured here is saved.
+      _finishCancelledProbe();
+      return;
+    }
     if (!_alive) {
       return;
     }
@@ -629,10 +699,19 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         SetupStep.turnOff1 ||
         SetupStep.turnOff2 ||
         SetupStep.readBoot1 ||
-        SetupStep.readBoot2 ||
-        SetupStep.probing =>
+        SetupStep.readBoot2 =>
           [
             _secondary('Cancel', const ValueKey('setupCancel'), _cancel),
+          ],
+        SetupStep.probing => [
+            // The sweep cannot actually be stopped mid-flight (see
+            // _cancelPending), so a tap here disables the button rather than
+            // pretending it worked — the rider's tap is acknowledged in the
+            // body text instead.
+            _secondary(
+                _cancelPending ? 'Stopping…' : 'Cancel',
+                const ValueKey('setupCancel'),
+                _cancelPending ? null : _requestCancel),
           ],
         SetupStep.turnOn1 || SetupStep.turnOn2 => [
             // The manual connect never consults the auto-reconnect setting,
@@ -670,7 +749,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         child: Text(label),
       );
 
-  Widget _secondary(String label, Key key, VoidCallback onPressed) =>
+  Widget _secondary(String label, Key key, VoidCallback? onPressed) =>
       TextButton(
         key: key,
         onPressed: onPressed,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -15,6 +16,50 @@ import 'package:superduper/widgets.dart';
 class _GarbageReadStore extends FakeBikeStore {
   @override
   List<int> read(String deviceId) => const [9, 9, 9, 9, 9, 9, 9, 9, 9, 9];
+}
+
+/// A bike whose read throws instead of answering with anything at all, once —
+/// standing in for a real BLE failure, distinct from [_GarbageReadStore],
+/// which answers with a value [Bike.readBikeState] rejects rather than an
+/// exception the wizard has to catch. Only once, and not on every read from
+/// here on: a real reconnect also fires the control loop's own unrelated
+/// re-assert read (see [Bike._reassertAfterReconnect]), and that one throwing
+/// too would just be test noise around the one call this exists to fail.
+class _ThrowingReadStore extends FakeBikeStore {
+  bool _thrown = false;
+
+  @override
+  List<int> read(String deviceId) {
+    if (!_thrown) {
+      _thrown = true;
+      throw Exception('BLE read failed');
+    }
+    return super.read(deviceId);
+  }
+}
+
+/// A [ConnectionHandler] whose [write] genuinely pauses on its
+/// [pauseOnWrite]-th call (1-indexed) until the test completes [resume].
+///
+/// The fake bike store's own read/write are plain synchronous calls, so
+/// [Bike.probeCapabilities]'s sweep otherwise runs to completion inside a
+/// single microtask drain, well before a widget-driven Cancel tap could ever
+/// land on it — there is no real await for a test to interleave with. This is
+/// the one seam that creates a genuine one: the sweep's own await on this
+/// write is what a test can hold open while it drives the rest of the wizard.
+class _SlowConnectionHandler extends ConnectionHandler {
+  int _writeCount = 0;
+  int pauseOnWrite = -1;
+  final resume = Completer<void>();
+
+  @override
+  Future<void> write(List<int> data) async {
+    _writeCount++;
+    if (_writeCount == pauseOnWrite) {
+      await resume.future;
+    }
+    return super.write(data);
+  }
 }
 
 /// The setup wizard: the ten-step flow (stage, two power cycles, probe,
@@ -303,6 +348,62 @@ void main() {
     });
   });
 
+  group('cancelling mid-probe', () {
+    testWidgets(
+        'does not stop the sweep, and finishes cleanly with nothing saved '
+        'once it completes on its own', (tester) async {
+      final slowHandler = _SlowConnectionHandler();
+      final container = ProviderContainer(overrides: [
+        connectionHandlerProvider(id).overrideWith(() => slowHandler),
+      ]);
+      final bike = openBike(container);
+      await openWizard(tester, container);
+
+      await tap(tester, 'setupStart');
+      setConnection(container, SDBluetoothConnectionState.disconnected);
+      await pump(tester);
+      bootBike(container, light: false, assist: 0, wire: 0);
+      // Pauses on the sweep's own third write — part-way through the wire
+      // loop (wires 0 and 1 already tried), genuinely still running.
+      slowHandler.pauseOnWrite = 3;
+      setConnection(container, SDBluetoothConnectionState.connected);
+      await pump(tester);
+
+      expect(textShown('Testing the bike'), isTrue,
+          reason: 'the sweep is paused mid-flight, not finished, so the '
+              'wizard must still be showing the probing step');
+      expect(find.byKey(const ValueKey('setupCancel')), findsOneWidget);
+
+      await tap(tester, 'setupCancel');
+
+      expect(find.textContaining('Finishing the test'), findsOneWidget,
+          reason: "the tap is acknowledged, but the sweep can't actually "
+              'be stopped mid-flight');
+      expect(bike.debugCalibrating, isTrue,
+          reason: 'the sweep is still running below the write-suppression '
+              "guard — closing it now would reopen the exact write race a "
+              'previous fix closed');
+      expect(find.byKey(const ValueKey('setupTitle')), findsOneWidget,
+          reason: 'the page must not have popped yet either');
+
+      // Let the sweep run to completion, exactly as if the tap had never
+      // happened.
+      slowHandler.resume.complete();
+      await pump(tester, const Duration(seconds: 1));
+
+      expect(find.byKey(const ValueKey('setupTitle')), findsNothing,
+          reason: 'once the sweep actually finishes, the deferred cancel '
+              'runs the same cleanup an ordinary one would: the wizard pops');
+      expect(bike.debugCalibrating, isFalse,
+          reason: 'the guard is released once the sweep actually finishes');
+      expect(container.read(bikeProvider(id)).capabilities, isNull,
+          reason: 'a cancel mid-probe must never reach saveCapabilities, '
+              'exactly like a cancel at any other step');
+      expect(container.read(bikeProvider(id)).bootSignature, isNull);
+      container.dispose();
+    });
+  });
+
   group('failure and retry', () {
     testWidgets('a bad read of the first boot reaches failed, with a retry',
         (tester) async {
@@ -346,6 +447,37 @@ void main() {
       await pumpUntil(tester, () => textShown('Setup stopped'));
 
       expect(find.byKey(const ValueKey('setupRetry')), findsOneWidget);
+      container.dispose();
+    });
+
+    testWidgets(
+        'a step that throws (not just returns null) still reaches failed, '
+        'with the guard released', (tester) async {
+      final store = _ThrowingReadStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      final bike = openBike(container);
+      await openWizard(tester, container);
+
+      await tap(tester, 'setupStart');
+      setConnection(container, SDBluetoothConnectionState.disconnected);
+      await pump(tester);
+      // readBoot1's Bike.readBikeState() call throws outright here, instead
+      // of returning null the way _GarbageReadStore's read above does.
+      // Without a try/catch around the whole flow this is an unhandled
+      // Future error: _step gets stuck on readBoot1 forever, with the
+      // calibration guard held open.
+      setConnection(container, SDBluetoothConnectionState.connected);
+      await pumpUntil(tester, () => textShown('Setup stopped'));
+
+      expect(find.textContaining('Something went wrong'), findsOneWidget,
+          reason: 'a generic message, not a technical one the rider cannot '
+              'act on');
+      expect(find.byKey(const ValueKey('setupRetry')), findsOneWidget);
+      expect(bike.debugCalibrating, isFalse,
+          reason: 'the guard must close even when a step throws, not just '
+              'when one returns a plain failure');
       container.dispose();
     });
   });

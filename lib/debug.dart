@@ -144,7 +144,16 @@ void _simulatePowerCycle(WidgetRef ref, String deviceId) {
   // ignore: invalid_use_of_visible_for_testing_member, invalid_use_of_protected_member
   handler.state = SDBluetoothConnectionState.disconnected;
   Timer(const Duration(milliseconds: 400), () {
-    unawaited(handler.connect());
+    unawaited(() async {
+      try {
+        await handler.connect();
+      } catch (_) {
+        // The debug page (or its container) may have been torn down within
+        // this 400 ms window — a hot restart, or the developer navigating
+        // away. Dev-only tooling with no user-facing error surface, so
+        // nothing to do but swallow it.
+      }
+    }());
   });
 }
 
