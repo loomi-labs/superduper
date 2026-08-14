@@ -858,6 +858,47 @@ void main() {
       expect(container.read(bikeProvider(id)).bootSignature, isNull);
       container.dispose();
     });
+
+    testWidgets('the back gesture waits for the sweep, like the button',
+        (tester) async {
+      final slowHandler = _SlowConnectionHandler();
+      final container = ProviderContainer(overrides: [
+        connectionHandlerProvider(id).overrideWith(() => slowHandler),
+      ]);
+      final bike = openBike(container);
+      bootBike(container, light: false, assist: 0, wire: 0);
+      // Holds the sweep part-way through the wire loop, exactly as the test
+      // above does: the page is genuinely writing to the register.
+      slowHandler.pauseOnWrite = 3;
+      await openWizard(tester, container, settle: Duration.zero);
+      await pump(tester);
+      expect(textShown('Testing the bike'), isTrue);
+
+      // The system back gesture, not the Cancel button.
+      await tester.binding.handlePopRoute();
+      await pump(tester);
+
+      expect(find.byKey(const ValueKey('setupTitle')), findsOneWidget,
+          reason: 'the page must stay while the sweep writes');
+      expect(bike.debugCalibrating, isTrue,
+          reason: 'a back gesture must not release the guard under a running '
+              'sweep — that reopens the write race the Cancel button avoids');
+      expect(find.textContaining('Finishing the test'), findsOneWidget,
+          reason: 'the rider is told the app waits for the test to end');
+
+      slowHandler.resume.complete();
+      await pumpUntil(
+          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
+          maxTicks: 1000);
+
+      expect(find.byKey(const ValueKey('setupTitle')), findsNothing,
+          reason: 'the page pops once the sweep is done, as the button does');
+      expect(bike.debugCalibrating, isFalse);
+      expect(container.read(bikeProvider(id)).capabilities, isNull,
+          reason: 'nothing measured is saved');
+      expect(container.read(bikeProvider(id)).bootSignature, isNull);
+      container.dispose();
+    });
   });
 
   group('failure and retry', () {

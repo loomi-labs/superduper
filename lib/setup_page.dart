@@ -328,14 +328,23 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     _releaseGuard();
   }
 
-  void _cancel() {
+  /// Leaves the flow with nothing saved.
+  ///
+  /// [force] pops past this page's own [PopScope] guard, which blocks a pop
+  /// while the sweep writes. Only [_finishCancelledProbe] passes it: the sweep
+  /// has returned by then, so the reason for the guard is gone.
+  void _cancel({bool force = false}) {
     _cancelled = true;
     final waiter = _waiter;
     if (waiter != null && !waiter.isCompleted) {
       waiter.complete(false);
     }
     _finish();
-    Navigator.of(context).maybePop();
+    if (force) {
+      Navigator.of(context).pop();
+    } else {
+      Navigator.of(context).maybePop();
+    }
   }
 
   /// Cancel while the sweep is running: see [_cancelPending]. Only records
@@ -356,7 +365,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   /// other step: the guard released, nothing saved, the page popped.
   void _finishCancelledProbe() {
     if (mounted) {
-      _cancel();
+      _cancel(force: true);
     } else {
       // The page is already gone for some other reason; there is nothing
       // left to pop, but the guard still has to close.
@@ -685,13 +694,21 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         SDBluetoothConnectionState.connected;
     final theme = Theme.of(context);
     return PopScope(
+      // The sweep cannot be stopped mid-flight, and it writes below the
+      // window's own suppression: a pop here would release the window while
+      // the probe is still writing, which is the exact race [_cancelPending]
+      // exists to prevent. So the gesture is blocked for that one step.
+      canPop: _step != SetupStep.probing,
       // The back gesture is a cancel like any other, and it has to undo the
-      // same thing. Here rather than in [dispose]: the page is still mounted
-      // at this moment.
+      // same thing — except while the sweep writes: then it waits for the
+      // sweep, exactly as the Cancel button does. Here rather than in
+      // [dispose]: the page is still mounted at this moment.
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) {
           _finish();
+          return;
         }
+        _requestCancel();
       },
       child: _scaffold(theme, bike, connected),
     );
