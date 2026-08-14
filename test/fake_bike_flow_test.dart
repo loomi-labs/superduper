@@ -38,6 +38,9 @@ void main() {
     // Debug page opens the settings form, Save persists the bike.
     var dbNotifications = 0;
     container.listen(bikesDBProvider, (previous, next) => dbNotifications++);
+    // The app has bikes.json before any bike is opened. Until it does,
+    // [BikesDB] holds every save back, so Save could not create the record.
+    await container.read(bikesDBProvider.notifier).ready;
     final bikeSub = container.listen(bikeProvider(id), (previous, next) {});
     final bike = container.read(bikeProvider(id).notifier);
     bike.writeStateData(

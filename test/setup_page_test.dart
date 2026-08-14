@@ -159,6 +159,10 @@ void main() {
   /// Opens the bike the way the app does: a listener on the provider, and the
   /// record saved through the notifier.
   Bike openBike(ProviderContainer container, [BikeState? bike]) {
+    // A widget test runs on fake time, so the real bikes.json read never lands.
+    // Marked loaded by hand: while it is not, [BikesDB] holds every save back
+    // and the record below would never reach the DB.
+    container.read(bikesDBProvider.notifier).debugMarkLoaded();
     container.listen(bikeProvider(id), (previous, next) {});
     final notifier = container.read(bikeProvider(id).notifier);
     notifier.writeStateData(bike ?? freshBike(), saveToBike: false);

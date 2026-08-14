@@ -797,6 +797,10 @@ void main() {
         (BikeRegion.us, sport45.id, [sport45], 6, 2),
       ]) {
         final container = makeContainer();
+        // One temp directory serves the whole loop, so the record the previous
+        // pass saved is still there. Loading it before the bike is built keeps
+        // this pass from adopting it.
+        await loadBikesDB(container);
         final bike = await openBike(container,
             region: region, modeId: modeId, customModes: customModes);
         expect(bikeWire(container), expected, reason: '$region $modeId');
@@ -879,6 +883,9 @@ void main() {
         (BikeRegion.us, sport45.id, [sport45], chWireUsOffroad, chWireUsOffroad),
       ]) {
         final container = makeContainer();
+        // See the loop above: the previous pass left a record behind, and this
+        // pass must not adopt it.
+        await loadBikesDB(container);
         final bike = await openBike(container,
             region: region, modeId: modeId, customModes: customModes);
 
@@ -1731,6 +1738,66 @@ void main() {
       expect(bikeWire(container), 2,
           reason: 'the asserted wire comes from the restored mode base '
               'profile, not from a constant');
+    });
+  });
+
+  group('a bike opened before bikes.json has loaded', () {
+    const otherId = 'fa:ke:99:88:77:66';
+
+    /// The names the loaded bike list holds. This is the list every save
+    /// persists, so what it keeps, the file keeps too — see db_test for the
+    /// file itself. Read here rather than from bikes.json, because a save left
+    /// over from an earlier test in this file lands in the same temp directory.
+    List<String> namesInDB(ProviderContainer container) =>
+        [for (final bike in container.read(bikesDBProvider)) bike.name];
+
+    /// Puts a named record for [id] and one for another bike on disk.
+    void seedTwoBikes() {
+      seedBikesFile([
+        BikeState.defaultState(id).copyWith(name: 'Stored'),
+        BikeState.defaultState(otherId).copyWith(name: 'Other'),
+      ]);
+    }
+
+    // No loadBikesDB in this group: the bike is opened while the file read is
+    // still in flight, which is what a cold start does.
+    test('adopts its stored record, and the other bike survives', () async {
+      seedTwoBikes();
+      final container = makeContainer();
+
+      container.listen(bikeProvider(id), (previous, next) {});
+      container.read(bikeProvider(id).notifier);
+      expect(container.read(bikeProvider(id)).name, isNot('Stored'),
+          reason: 'the record has not landed yet');
+
+      await container.read(bikesDBProvider.notifier).ready;
+      await settle();
+
+      expect(container.read(bikeProvider(id)).name, 'Stored',
+          reason: 'the bike adopts its record once the file lands');
+      expect(namesInDB(container), containsAll(['Stored', 'Other']),
+          reason: 'and neither record is lost');
+    });
+
+    test('an early write does not persist the placeholder over the record',
+        () async {
+      seedTwoBikes();
+      final container = makeContainer();
+
+      container.listen(bikeProvider(id), (previous, next) {});
+      final bike = container.read(bikeProvider(id).notifier);
+      // An app-only write, the way a rider taps a padlock as the page opens:
+      // it needs no connection, so it persists at once.
+      bike.cycleLightPin();
+      await settle();
+
+      await container.read(bikesDBProvider.notifier).ready;
+      await settle();
+
+      expect(namesInDB(container), containsAll(['Stored', 'Other']),
+          reason: 'a write before the load must not overwrite the record, '
+              'least of all the other bike');
+      expect(container.read(bikeProvider(id)).name, 'Stored');
     });
   });
 

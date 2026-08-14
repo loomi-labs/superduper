@@ -955,6 +955,10 @@ void main() {
       // persisted yet, so Save has to create the record, custom modes and all.
       const newId = 'fa:ke:11:22:33:44';
       final container = ProviderContainer();
+      // A widget test runs on fake time, so the real bikes.json read never
+      // lands. Marked loaded by hand: while it is not, [BikesDB] holds every
+      // save back and Save could not create the record.
+      container.read(bikesDBProvider.notifier).debugMarkLoaded();
       container.listen(bikeProvider(newId), (previous, next) {});
       await openSheet(tester, container, BikeState.defaultState(newId));
 

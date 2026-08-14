@@ -329,6 +329,18 @@ class Bike extends _$Bike {
   /// bring the bike back.
   bool _deleted = false;
 
+  /// Set when this notifier was built before bikes.json landed and found no
+  /// record for the bike.
+  ///
+  /// The state it starts from is then a placeholder, not the rider's bike, and
+  /// nothing may persist it: a save writes the whole list, so it would put the
+  /// placeholder where the record is. [_onBikesLoaded] settles it.
+  bool _provisional = false;
+
+  /// Set when [_saveRecord] dropped a save because the state was provisional.
+  /// It tells [_onBikesLoaded] the bike still needs its first record.
+  bool _saveSkipped = false;
+
   /// Tail of the queue of register accesses this notifier has started. Reading
   /// state and requesting ride data both mean "select a register, then use it",
   /// on one shared characteristic: interleaved, a state read comes back with
@@ -399,8 +411,16 @@ class Bike extends _$Bike {
       _checkSpeedStream();
       logSpeedTrace();
     });
-    var bike = ref.read(bikesDBProvider.notifier).getBike(id) ??
-        BikeState.defaultState(id);
+    final db = ref.read(bikesDBProvider.notifier);
+    var bike = db.getBike(id);
+    // No record means one of two things, and here they look the same: the bike
+    // is new, or bikes.json has not landed yet. So the app starts from a
+    // placeholder and asks again when the file is there.
+    _provisional = bike == null && !db.isLoaded;
+    if (_provisional) {
+      db.ready.then((_) => _onBikesLoaded());
+    }
+    bike ??= BikeState.defaultState(id);
     // Deliberately listen instead of watch: a watch would invalidate this
     // notifier on every connection state change, and with no UI listening
     // riverpod skips the rebuild and disposes the provider instead — killing
@@ -430,6 +450,42 @@ class Bike extends _$Bike {
       _enterSwitchingMode();
     }
     return bike;
+  }
+
+  /// Decides what a provisional bike really is, once bikes.json has landed.
+  void _onBikesLoaded() {
+    if (!_provisional || _deleted || !ref.mounted) {
+      return;
+    }
+    _provisional = false;
+    final db = ref.read(bikesDBProvider.notifier);
+    final record = db.getBike(id);
+    if (record != null) {
+      // The rider's bike was on disk all along, so the state this notifier
+      // started from is a placeholder. Rebuild from the record.
+      _logI('Adopting the stored record for this bike');
+      ref.invalidateSelf();
+      return;
+    }
+    if (_saveSkipped) {
+      // The bike is new after all, and a save was dropped while the app could
+      // not tell. This is the real creation of the record.
+      _logI('Saving this bike, bikes.json holds no record for it');
+      db.saveBike(state);
+    }
+  }
+
+  /// Persists [next], unless this notifier still sits on a placeholder state.
+  ///
+  /// A dropped save is not lost work: [_onBikesLoaded] either adopts the stored
+  /// record or creates the missing one.
+  void _saveRecord(BikeState next) {
+    if (_provisional) {
+      _saveSkipped = true;
+      _logD('Skipped a save, bikes.json has not landed yet');
+      return;
+    }
+    ref.read(bikesDBProvider.notifier).saveBike(next);
   }
 
   void _onConnectionState(
@@ -771,7 +827,7 @@ class Bike extends _$Bike {
       // allowed to corrupt the baseline the next real disconnect/reconnect is
       // measured against.
       final next = state.copyWith(lastSeen: seen);
-      ref.read(bikesDBProvider.notifier).saveBike(next);
+      _saveRecord(next);
       state = next;
     }
     var newState = state.updateFromData(data);
@@ -1544,7 +1600,7 @@ class Bike extends _$Bike {
     // already.
     final wasNeeded = needsBackgroundEnforcement(state);
     final nowNeeded = needsBackgroundEnforcement(newState);
-    ref.read(bikesDBProvider.notifier).saveBike(newState);
+    _saveRecord(newState);
     state = newState;
     _syncKeepAlive(newState);
     if (wasNeeded != nowNeeded) {
