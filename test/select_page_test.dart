@@ -29,12 +29,21 @@ class _NoOpBluetoothRepository extends BluetoothRepository {
 /// inside a widget test's fake clock the way [seededBikesFile] tests
 /// elsewhere handle with a real millisecond delay. Read-only for these tests.
 class _SeededBikesDB extends BikesDB {
-  _SeededBikesDB(this._seed);
+  _SeededBikesDB(this._seed, {this.loaded = true});
 
   final List<BikeState> _seed;
 
+  /// Whether the seed stands for a landed bikes.json. False stands for the
+  /// window before the file lands, when every saved bike still reads as unknown.
+  final bool loaded;
+
   @override
-  List<BikeState> build() => _seed;
+  List<BikeState> build() {
+    if (loaded) {
+      debugMarkLoaded();
+    }
+    return _seed;
+  }
 }
 
 /// The "My Bikes" row status pill: connected, in range but not connected, or
@@ -61,11 +70,13 @@ void main() {
         timeStamp: DateTime.now(),
       );
 
-  Future<void> pumpSelectPage(WidgetTester tester, List<BikeState> bikes) async {
+  Future<void> pumpSelectPage(WidgetTester tester, List<BikeState> bikes,
+      {bool loaded = true}) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          bikesDBProvider.overrideWith(() => _SeededBikesDB(bikes)),
+          bikesDBProvider
+              .overrideWith(() => _SeededBikesDB(bikes, loaded: loaded)),
           bluetoothRepositoryProvider.overrideWith(
             (ref) => _NoOpBluetoothRepository(ref),
           ),
@@ -121,5 +132,21 @@ void main() {
     expect(find.byType(StatusPill), findsNothing);
     expect(find.text('Connected'), findsNothing);
     expect(find.text('In range'), findsNothing);
+  });
+
+  testWidgets('a found bike stays hidden until bikes.json has loaded',
+      (tester) async {
+    await pumpSelectPage(tester, const [], loaded: false);
+
+    expect(find.text(inRangeId), findsNothing,
+        reason: 'before the file lands a saved bike reads as unknown, and the '
+            'page would offer it as a fresh one');
+    expect(find.text('No bikes found nearby'), findsOneWidget);
+  });
+
+  testWidgets('a found bike shows once bikes.json has loaded', (tester) async {
+    await pumpSelectPage(tester, const []);
+
+    expect(find.text(inRangeId), findsOneWidget);
   });
 }

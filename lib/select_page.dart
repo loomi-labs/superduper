@@ -70,11 +70,16 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
     var isScanning = ref.watch(isScanningStatusProvider);
 
     List<BikeState> foundBikes = [];
-    for (var result in scanResults.value ?? []) {
-      if (bikeNotifier.getBike(result.device.remoteId.str) != null) {
-        continue;
+    // Only once bikes.json has landed: before that every saved bike reads as
+    // unknown, so this list would offer the rider's own bike as a fresh one —
+    // and opening it that way starts from a default state, not the record.
+    if (bikeNotifier.isLoaded) {
+      for (var result in scanResults.value ?? []) {
+        if (bikeNotifier.getBike(result.device.remoteId.str) != null) {
+          continue;
+        }
+        foundBikes.add(BikeState.defaultState(result.device.remoteId.str));
       }
-      foundBikes.add(BikeState.defaultState(result.device.remoteId.str));
     }
 
     // Every device id the scan currently answers, saved or not — a saved bike
