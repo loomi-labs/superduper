@@ -629,6 +629,45 @@ void main() {
       container.dispose();
     });
 
+    testWidgets('a CH bike reads its summary in km/h, not mph',
+        (tester) async {
+      final container = ProviderContainer();
+      openBike(
+          container,
+          BikeState.defaultState(id)
+              .copyWith(
+                  region: BikeRegion.ch,
+                  customModes: const [seededChMode],
+                  capabilities: null,
+                  bootSignature: null)
+              .withSelectedMode(seededChModeId));
+      await openWizard(tester, container);
+
+      await tap(tester, 'setupStart');
+      setConnection(container, SDBluetoothConnectionState.disconnected);
+      await pump(tester);
+      // Wire 4 is EPAC: 25 km/h, or '16 mph' for a bike of unknown region.
+      bootBike(container, light: false, assist: 0, wire: 4);
+      setConnection(container, SDBluetoothConnectionState.connected);
+      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      setConnection(container, SDBluetoothConnectionState.disconnected);
+      await pump(tester);
+      bootBike(container, light: false, assist: 0, wire: 4);
+      setConnection(container, SDBluetoothConnectionState.connected);
+      await pumpUntil(tester, () => textShown('Setup complete'));
+
+      expect(container.read(bikeProvider(id)).region, BikeRegion.ch);
+      expect(find.textContaining('25 km/h'), findsOneWidget,
+          reason: 'the rider reads the cap in the unit of the region the bike '
+              'is actually set to');
+      expect(find.textContaining('mph'), findsNothing,
+          reason: 'BikeCapabilities.detectedRegion is null for every CH bike, '
+              'and a null region renders mph, so the summary has to take the '
+              "region off the bike's own record");
+      await tap(tester, 'setupDone');
+      container.dispose();
+    });
+
     testWidgets(
         'cancelling after the probe succeeds still leaves capabilities null',
         (tester) async {

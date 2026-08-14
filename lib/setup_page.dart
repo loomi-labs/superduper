@@ -648,7 +648,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         '${progress.phase} ${progress.done} of ${progress.total}';
   }
 
-  String get _body => switch (_step) {
+  String _bodyFor(BikeState bike) => switch (_step) {
         SetupStep.intro => setupIntroBody,
         SetupStep.turnOff1 || SetupStep.turnOff2 =>
           'Switch the bike off with its power button. Do not ride it and do '
@@ -658,19 +658,27 @@ class _SetupPageState extends ConsumerState<SetupPage> {
               'usually in 5 to 30 seconds.',
         SetupStep.readBoot1 || SetupStep.readBoot2 => 'The app reads the bike.',
         SetupStep.probing => _probingBody,
-        SetupStep.done => _summary ?? 'Nothing was measured.',
+        SetupStep.done => _summaryFor(bike.region) ?? 'Nothing was measured.',
         SetupStep.failed => _failure ?? 'The setup stopped.',
       };
 
   /// Stands in for a result that cannot be missing: [_capabilities] and
   /// [_signature] are both set before the step becomes [SetupStep.done].
-  String? get _summary {
+  ///
+  /// [region] is the bike's own, resolved region, not
+  /// [BikeCapabilities.detectedRegion]: the detected one is null for every CH
+  /// bike (a CH bike answers the same EU bank an EU bike answers), and a null
+  /// region prints every cap in mph — a CH rider would read "resets the mode to
+  /// 16 mph" instead of "25 km/h". [Bike.saveCapabilities] has already applied
+  /// any detected region to the record by this step, so the record holds the
+  /// answer both cases need.
+  String? _summaryFor(BikeRegion? region) {
     final capabilities = _capabilities;
     final signature = _signature;
     if (capabilities == null || signature == null) {
       return null;
     }
-    return setupSummary(capabilities, signature);
+    return setupSummary(capabilities, signature, region: region);
   }
 
   bool get _busy => switch (_step) {
@@ -733,7 +741,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Text(
-                        _body,
+                        _bodyFor(bike),
                         key: const ValueKey('setupBody'),
                         style: theme.textTheme.bodyMedium
                             ?.copyWith(color: SDSurface.label),
