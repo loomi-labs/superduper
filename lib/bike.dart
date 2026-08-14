@@ -234,6 +234,16 @@ class Bike extends _$Bike {
   /// second hardcoded literal, which would silently drift from this one.
   static const connectSettle = Duration(seconds: 1);
 
+  /// Grace period inside [_probeWriteRead] between its write and its
+  /// readback. A real device log caught the probe reading back one write
+  /// early on every single step, for all 8 wires, all 5 assist levels and
+  /// the light: the bike's own settings register takes real time to apply a
+  /// write, and a read issued right after ack sees the PREVIOUS write's
+  /// value, never the one just sent. The log's own write-to-read round trips
+  /// ran 90-190 ms and were still consistently stale, so 250 ms gives a
+  /// solid margin above the observed lag.
+  static const _probeSettle = Duration(milliseconds: 250);
+
   Timer? _updateDebounce;
   Timer? _updateTimer;
 
@@ -990,6 +1000,7 @@ class Bike extends _$Bike {
     return _withRegister(() async {
       await handler.write(
           state.copyWith(light: light, assist: assist).toWriteData(wire: wire));
+      await Future<void>.delayed(_probeSettle);
       return handler.read();
     });
   }

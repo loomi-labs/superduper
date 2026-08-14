@@ -190,6 +190,59 @@ class _CountingReentrantStore extends FakeBikeStore {
   }
 }
 
+/// A bike whose settings register takes real time to apply a write, exactly
+/// like the real device a log caught this bug on: once [armed], a write's
+/// effect is not visible to a read until [applyDelay] has actually elapsed
+/// in real time since that write went out — a read taken any sooner sees
+/// whatever was already committed before it, never the write just sent.
+/// [applyDelay] is deliberately shorter than the production settle delay
+/// `Bike._probeWriteRead` waits between its write and its read, so a test
+/// asserting the fix works is proving the settle wait is what makes the
+/// difference, not a coincidence of test timing. Writes before [armed] is
+/// set land immediately, the same as the base class, so a test can seed its
+/// starting register without waiting out the lag itself.
+class _LaggyFirmwareStore extends FakeBikeStore {
+  final applyDelay = const Duration(milliseconds: 200);
+  bool armed = false;
+  List<int>? _pendingData;
+  DateTime? _pendingSince;
+
+  @override
+  void write(String deviceId, List<int> data) {
+    if (!armed) {
+      super.write(deviceId, data);
+      return;
+    }
+    _commitIfDue(deviceId);
+    _pendingData = List.of(data);
+    _pendingSince = DateTime.now();
+  }
+
+  @override
+  List<int> read(String deviceId) {
+    if (armed) {
+      _commitIfDue(deviceId);
+    }
+    return super.read(deviceId);
+  }
+
+  /// Commits the pending write into the register, but only once [applyDelay]
+  /// has actually elapsed since it went out — the one-write-behind lag a
+  /// read taken any sooner has to see.
+  void _commitIfDue(String deviceId) {
+    final data = _pendingData;
+    final since = _pendingSince;
+    if (data == null || since == null) {
+      return;
+    }
+    if (DateTime.now().difference(since) >= applyDelay) {
+      super.write(deviceId, data);
+      _pendingData = null;
+      _pendingSince = null;
+    }
+  }
+}
+
 /// A switching custom mode: base wire 1 (32 km/h + throttle), cap wire 4
 /// (EPAC 25). Switches up above 30 km/h, back down below 28.
 const tour30 =
@@ -2581,6 +2634,11 @@ void main() {
       final container = makeContainer();
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // The sweep now runs over several real seconds (Bike._probeSettle waits
+      // between every write and its readback), long enough for the bike's own
+      // real 2 s update debounce to fire mid-sweep otherwise — exactly what
+      // the wizard's calibration window exists to suppress in production.
+      bike.setCalibrating(true);
 
       final caps = await bike.probeCapabilities(bootA);
 
@@ -2604,6 +2662,10 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above: the sweep now runs long
+      // enough in real time for the bike's own update debounce to fire
+      // mid-sweep without this.
+      bike.setCalibrating(true);
 
       final caps = await bike.probeCapabilities(bootA);
 
@@ -2623,6 +2685,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       final caps =
           await bike.probeCapabilities(const LastSeen(assist: 2, light: false, wire: 5));
@@ -2641,6 +2705,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       final caps = await bike.probeCapabilities(bootA);
 
@@ -2656,6 +2722,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       final caps = await bike.probeCapabilities(bootA);
 
@@ -2675,6 +2743,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       await expectLater(bike.probeCapabilities(bootA), throwsException);
 
@@ -2868,6 +2938,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       await expectLater(bike.probeCapabilities(bootA), throwsException);
 
@@ -2891,6 +2963,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       await expectLater(bike.probeCapabilities(bootA), throwsException);
 
@@ -2911,6 +2985,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       final caps = await bike.probeCapabilities(
           const LastSeen(assist: 0, light: false, wire: 0));
@@ -2934,6 +3010,8 @@ void main() {
       addTearDown(container.dispose);
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
 
       final caps = await bike.probeCapabilities(
           const LastSeen(assist: 0, light: false, wire: 0));
@@ -2945,6 +3023,43 @@ void main() {
               '(and the resulting ambiguous classification) is the honest '
               'answer, not a bug to work around — the fix must never pick '
               'an unlimited wire just to differ from it');
+    });
+
+    test(
+        'waits out a register that lags one write behind, instead of '
+        'reading every step one write early', () async {
+      // A real device log caught this byte-for-byte: every single
+      // write-then-read step of the sweep came back showing the PREVIOUS
+      // write's value, because the bike's settings register needs real time
+      // to apply a write. Bike._probeSettle (the delay _probeWriteRead waits
+      // between its write and its read) is what fixes it — this store's own
+      // commit delay is shorter than that settle wait on purpose, so the
+      // fix's own wait is what makes the difference, not test timing luck.
+      final store = _LaggyFirmwareStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // Only the probe's own writes are laggy: the setup above must land
+      // normally, or bootA would not describe the register it actually
+      // seeded.
+      store.armed = true;
+      // See the first probeCapabilities test above: a several-second sweep
+      // needs the calibration window held open, matching how the wizard
+      // actually runs this in production.
+      bike.setCalibrating(true);
+
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, List.generate(8, (i) => i),
+          reason: 'a bike that accepts every wire must be reported that way '
+              'once the probe waits out the register lag — the real bug '
+              'read this back as accepting nothing at all');
+      expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
+      expect(caps.lightWritable, isTrue);
     });
   });
 }

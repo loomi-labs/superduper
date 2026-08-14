@@ -337,12 +337,18 @@ void main() {
               'through');
 
       // Let the rest of the flow settle so nothing is left pending for the
-      // test framework's own teardown check.
+      // test framework's own teardown check. The probe is already running by
+      // this point (readBoot1 moves straight into it), and Bike._probeSettle
+      // now makes the whole sweep take several seconds of virtual time to
+      // finish, so this waits for the wizard to actually pop rather than a
+      // fixed short pump.
       final cancel = find.byKey(const ValueKey('setupCancel'));
       if (cancel.evaluate().isNotEmpty) {
         await tester.tap(cancel);
       }
-      await pump(tester, const Duration(seconds: 2));
+      await pumpUntil(
+          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
+          maxTicks: 1000);
       container.dispose();
     });
 
@@ -438,14 +444,19 @@ void main() {
               "today's bug is zero further attempts at all");
 
       // Let the wait resolve and flush the poll timer, so nothing is left
-      // pending for the test framework's own teardown check.
+      // pending for the test framework's own teardown check. readBoot1 moves
+      // straight into the probe, and Bike._probeSettle now makes the whole
+      // sweep take several seconds of virtual time, so this waits for the
+      // wizard to actually pop rather than a fixed short pump.
       setConnection(container, SDBluetoothConnectionState.connected);
       await pump(tester, const Duration(seconds: 2));
       final cancel = find.byKey(const ValueKey('setupCancel'));
       if (cancel.evaluate().isNotEmpty) {
         await tester.tap(cancel);
       }
-      await pump(tester, const Duration(seconds: 2));
+      await pumpUntil(
+          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
+          maxTicks: 1000);
       container.dispose();
     });
 
@@ -548,12 +559,19 @@ void main() {
 
       bootBike(container, light: false, assist: 0, wire: 0);
       setConnection(container, SDBluetoothConnectionState.connected);
+      // readBoot1 moves straight into the probe, and Bike._probeSettle now
+      // makes the whole sweep take several seconds of virtual time, so this
+      // waits for the wizard to actually pop rather than a fixed short pump
+      // — otherwise a probe step's Timer is still pending when the test
+      // disposes the container below.
       await pump(tester, const Duration(seconds: 2));
       final cancel = find.byKey(const ValueKey('setupCancel'));
       if (cancel.evaluate().isNotEmpty) {
         await tester.tap(cancel);
       }
-      await pump(tester, const Duration(seconds: 2));
+      await pumpUntil(
+          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
+          maxTicks: 1000);
       container.dispose();
     });
   });
@@ -668,9 +686,17 @@ void main() {
           reason: 'the page must not have popped yet either');
 
       // Let the sweep run to completion, exactly as if the tap had never
-      // happened.
+      // happened. Bike._probeSettle now puts a real pause between every
+      // write and its readback, so the remaining steps of the sweep (most
+      // of the wire loop, the whole assist loop, the light test) need
+      // several seconds of virtual time to finish — pumpUntil's small ticks
+      // are used rather than one large pump(duration): the pop's own route
+      // transition needs several discrete frames of its own to settle, which
+      // a single big time jump followed by one frame does not give it.
       slowHandler.resume.complete();
-      await pump(tester, const Duration(seconds: 1));
+      await pumpUntil(
+          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
+          maxTicks: 1000);
 
       expect(find.byKey(const ValueKey('setupTitle')), findsNothing,
           reason: 'once the sweep actually finishes, the deferred cancel '
