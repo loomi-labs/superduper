@@ -1060,6 +1060,22 @@ class Bike extends _$Bike {
     });
   }
 
+  /// Logs a sweep that had to give up in [phase] because the link went down,
+  /// and returns the null [probeCapabilities] reports for "could not run".
+  ///
+  /// A dropped link is not a firmware that refuses a value, but it looks
+  /// exactly like one from here: [BluetoothRepository] swallows a failed read
+  /// (it returns null) and a failed write, so every probe after the drop reads
+  /// back "not what I wrote". Scoring those as rejected would hand the wizard
+  /// a measurement of the outage — all-empty capabilities, or a region
+  /// detected from whichever bank the outage happened to cover — and the
+  /// wizard saves what it gets as ground truth.
+  BikeCapabilities? _abortedProbe(String phase) {
+    _logCalibration('Probe aborted: the bike went out of range during the '
+        '$phase phase');
+    return null;
+  }
+
   /// Sweeps every wire (0-7), every assist level (0-4) and the light,
   /// writing each raw and reading back what stuck, against [bootA] — the
   /// fresh-boot read the caller took just before calling this. Refuses while
@@ -1083,9 +1099,11 @@ class Bike extends _$Bike {
   /// does nothing for the sweep's own writes, which is exactly why refusing
   /// to run while one is open bought nothing.
   ///
-  /// Returns null only when the probe could not run at all — not when it ran
-  /// and found nothing writable. A bike that refuses every write is still a
-  /// valid, useful result: see the return below.
+  /// Returns null only when the probe could not run, or could not finish —
+  /// never when it ran and found nothing writable. A bike that refuses every
+  /// write is still a valid, useful result: see the return below. The link is
+  /// checked again before every single write, not only once at the start: see
+  /// [_abortedProbe].
   ///
   /// [onProgress], when given, is called once per wire/assist/light test with
   /// the phase name, how many tests of that phase are done, and how many
@@ -1117,12 +1135,18 @@ class Bike extends _$Bike {
       // time this loop reaches bootA.wire the bike has already been moved
       // through the seven others, so the test is not vacuous.
       for (var wire = 0; wire < firmwareProfiles.length; wire++) {
+        if (!_isConnected) {
+          return _abortedProbe('mode');
+        }
         final data = await _probeWriteRead(handler,
             light: bootA.light, assist: bootA.assist, wire: wire);
         if (data != null && isSettingsPacket(data) && data[5] == wire) {
           acceptedWires.add(wire);
         }
         onProgress?.call('mode', wire + 1, total);
+      }
+      if (!_isConnected) {
+        return _abortedProbe('mode');
       }
       final safeWire = _safeWireAfterSweep(acceptedWires, bootA.wire);
       await _probeWriteRead(handler,
@@ -1134,6 +1158,9 @@ class Bike extends _$Bike {
       // bike rejects a candidate.
       var partingAssist = bootA.assist;
       for (var assist = 0; assist <= 4; assist++) {
+        if (!_isConnected) {
+          return _abortedProbe('assist');
+        }
         final data = await _probeWriteRead(handler,
             light: bootA.light, assist: assist, wire: safeWire);
         if (data != null && isSettingsPacket(data)) {
@@ -1158,6 +1185,9 @@ class Bike extends _$Bike {
         }
       }
 
+      if (!_isConnected) {
+        return _abortedProbe('light');
+      }
       final lightData = await _probeWriteRead(handler,
           light: !bootA.light, assist: partingAssist, wire: safeWire);
       final lightWritable = lightData != null &&

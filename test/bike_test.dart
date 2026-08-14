@@ -3025,6 +3025,39 @@ void main() {
       expect(await bike.probeCapabilities(bootA), isNull);
     });
 
+    test('a mid-sweep disconnect aborts the sweep instead of scoring every '
+        'remaining value as rejected', () async {
+      // BluetoothRepository swallows a failed read (it returns null) and a
+      // failed write, so once the link is down every remaining probe reads
+      // back "not what I wrote" — indistinguishable from a firmware that
+      // refuses the value. A sweep that kept going would hand the wizard
+      // capabilities built from a dropped link, and the wizard saves those as
+      // ground truth.
+      final store = _ReentrantReadStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+      // The link drops from inside the sweep's very first readback.
+      store.onRead = () {
+        // ignore: invalid_use_of_protected_member
+        container.read(connectionHandlerProvider(id).notifier).state =
+            SDBluetoothConnectionState.disconnected;
+      };
+
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNull,
+          reason: 'a probe that could not finish must report that it could '
+              'not run, which the wizard already treats as a failure');
+      expect(container.read(bikeProvider(id)).capabilities, isNull,
+          reason: 'nothing measured across a dropped link may be saved');
+    });
+
     test(
         'an exception during the assist phase restores the full boot triple, '
         'not just the wire', () async {
