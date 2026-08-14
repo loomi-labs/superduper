@@ -499,6 +499,17 @@ void main() {
 
       expect(find.byKey(const ValueKey('setupTitle')), findsOneWidget,
           reason: 'the row now opens SetupPage, not the old CalibrationPage');
+
+      // The wizard starts its flow as it opens, so it has to be stopped here:
+      // a probe step's Timer left pending fails the framework's own teardown
+      // check.
+      await tester.tap(find.byKey(const ValueKey('setupCancel')));
+      for (var i = 0; i < 300 &&
+              find.byKey(const ValueKey('setupTitle')).evaluate().isNotEmpty;
+          i++) {
+        await tester.pump(const Duration(milliseconds: 10));
+      }
+      await tester.pump(const Duration(seconds: 2));
       container.dispose();
     });
   });

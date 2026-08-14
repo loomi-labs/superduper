@@ -431,7 +431,7 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
   /// measurement from today's. Reads [BikeState.capabilities], not
   /// [BikeState.bootSignature]: capabilities is the setup gate's own field,
   /// and the more meaningful status to show here — a bike with capabilities
-  /// but an unusable signature (nothing reset across the two boots) is still
+  /// but an unusable signature (nothing reset across the power cycle) is still
   /// set up, just undetectable.
   String get _calibrationSubtitle {
     final capabilities = widget.bike.capabilities;

@@ -7,17 +7,25 @@ import 'package:superduper/repository.dart';
 import 'package:superduper/theme.dart';
 import 'package:superduper/utils/logger.dart';
 
-/// The short explanation of what the setup flow is about and why it takes
-/// two power cycles.
+/// The short explanation of what the setup flow is about and what it asks of
+/// the rider.
 ///
-/// Shared between the gate's own intro card ([SetupGateCard] in `bike.dart`)
-/// and [SetupStep.intro] here, so the two screens the rider sees back to back
-/// — the gate that offers the wizard, then the wizard's own first screen —
-/// never say the same thing two different ways.
+/// The gate's own card ([SetupGateCard] in `bike.dart`) is the one start
+/// screen: the wizard starts its flow as it opens, so it never repeats this.
 const setupIntroBody =
     'The app finds out what your bike accepts, and what it forgets when you '
-    'switch it off.\n\nPark the bike. You switch it off and on two times. '
-    'This takes about two minutes.';
+    'switch it off.\n\nPark the bike. You switch it off and on one time. '
+    'This takes about one minute.';
+
+/// The steps of the flow, in the order the rider walks them. Shown as a
+/// checklist, so the rider can see what is done and what is next.
+const setupChecklist = [
+  'Read the bike',
+  'Test the bike',
+  'Switch the bike off',
+  'Switch the bike on',
+  'Read the bike',
+];
 
 /// The date a capability record was measured, as the settings sheet shows it.
 String calibrationDate(DateTime at) => '${at.year}-'
@@ -88,7 +96,7 @@ String _resetLine(BootSignature signature, BikeRegion? region) {
   final assist = signature.bootAssist;
   final light = signature.bootLight;
   if (wire == null && assist == null && light == null) {
-    return 'Automatic power-cycle detection is not possible on this bike. '
+    return 'The app cannot detect a power cycle on this bike by itself. '
         'Your locks and your startup values still work when you connect it '
         'yourself.';
   }
@@ -122,44 +130,49 @@ String setupSummary(BikeCapabilities capabilities, BootSignature signature,
 /// Where the wizard is. One screen per step, and every one of them before
 /// [done] can be left with nothing measured kept.
 enum SetupStep {
-  /// What the wizard is about to do, with Start and no way to skip it.
-  intro,
-
-  /// Waiting for the rider to switch the bike off, the first time.
-  turnOff1,
-
-  /// Waiting for the bike to come back, the first time.
-  turnOn1,
-
-  /// The first boot read.
-  readBoot1,
+  /// The read of the settled connection, before anything is written. It stands
+  /// in for the boot default the probe measures against.
+  readBefore,
 
   /// The capability probe is running.
   probing,
 
-  /// Waiting for the rider to switch the bike off, the second time.
-  turnOff2,
+  /// Waiting for the rider to switch the bike off.
+  turnOff,
 
-  /// Waiting for the bike to come back, the second time.
-  turnOn2,
+  /// Waiting for the bike to come back.
+  turnOn,
 
-  /// The second boot read.
-  readBoot2,
+  /// The read after the power cycle.
+  readBoot,
 
   /// Everything was measured and saved.
   done,
 
   /// The wizard gave up, with a reason.
-  failed,
+  failed;
+
+  /// The line of [setupChecklist] this step is on. [done] is past the last
+  /// line; [failed] has no line, and shows its reason instead.
+  int get checklistIndex => switch (this) {
+        readBefore => 0,
+        probing => 1,
+        turnOff => 2,
+        turnOn => 3,
+        readBoot => 4,
+        done => setupChecklist.length,
+        failed => 0,
+      };
 }
 
-/// Measures what a bike accepts and what it forgets on a power cycle, across
-/// two power cycles, and gates the bike's controls until it has run once.
+/// Measures what a bike accepts and what it forgets on a power cycle, and
+/// gates the bike's controls until it has run once. It starts as it opens: the
+/// gate card is the screen that asks.
 ///
-/// A pushed page and not a sheet: the flow spans two power cycles of the
-/// bike, so it lives for minutes, and a sheet is one stray drag away from
-/// being dismissed in the middle of it — which would leave the rider halfway
-/// through a power cycle with no result.
+/// A pushed page and not a sheet: the flow spans a power cycle of the bike, so
+/// it lives for minutes, and a sheet is one stray drag away from being
+/// dismissed in the middle of it — which would leave the rider halfway through
+/// a power cycle with no result.
 class SetupPage extends ConsumerStatefulWidget {
   const SetupPage({super.key, required this.bikeID});
 
@@ -175,7 +188,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   static const _offHint = Duration(seconds: 30);
   static const _onHint = Duration(seconds: 45);
 
-  var _step = SetupStep.intro;
+  var _step = SetupStep.readBefore;
 
   /// The extra line a step shows when it has waited long enough to suspect
   /// something went wrong. Never a failure — the rider may just be slow.
@@ -188,14 +201,14 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   /// on yet.
   ProbeProgress? _progress;
 
-  /// The first boot read, the probe's parting state and the second boot
+  /// The read before the probe, the probe's parting state and the boot
   /// read — held in LOCAL widget state only, thrown away with the widget on
   /// every exit before [SetupStep.done]. Nothing here reaches
   /// [BikeState.capabilities] or [BikeState.bootSignature] until the very
   /// last step calls [Bike.saveCapabilities] — that is the whole point of
   /// keeping them here rather than saving as each one arrives: a rider who
   /// cancels after the probe succeeds must still see an ungated bike.
-  LastSeen? _bootA;
+  LastSeen? _baseline;
   LastSeen? _parting;
   LastSeen? _bootB;
   BikeCapabilities? _capabilities;
@@ -259,6 +272,14 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         waiter.complete(true);
       }
     });
+    // The gate card is the start screen, so this page has nothing left to ask:
+    // it runs. After the first frame, so the flow's own setState calls always
+    // have a mounted element to rebuild.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _run();
+      }
+    });
   }
 
   @override
@@ -298,10 +319,10 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       return;
     }
     _finished = true;
-    final bootA = _bootA;
-    if (_probeParked && bootA != null) {
+    final baseline = _baseline;
+    if (_probeParked && baseline != null) {
       _probeParked = false;
-      unawaited(_bike.restoreAfterProbe(bootA));
+      unawaited(_bike.restoreAfterProbe(baseline));
     }
     _releaseGuard();
   }
@@ -435,72 +456,62 @@ class _SetupPageState extends ConsumerState<SetupPage> {
 
   /// The whole flow, in the order the rider walks it. Every await is
   /// followed by the same question: is this page still the one the rider is
-  /// looking at. Re-entered from the top by both the intro's Start and a
-  /// retry after [SetupStep.failed] — a full restart is the only safe choice
-  /// once anything has failed: a [_bootA] or [_capabilities] left over from
-  /// an earlier, incomplete attempt must never be trusted for a fresh probe
-  /// or a fresh second boot.
+  /// looking at. Re-entered from the top by the first frame and by a retry
+  /// after [SetupStep.failed] — a full restart is the only safe choice once
+  /// anything has failed: a [_baseline] or [_capabilities] left over from an
+  /// earlier, incomplete attempt must never be trusted for a fresh probe or a
+  /// fresh boot read.
   Future<void> _runSteps() async {
+    // First, before any await: the page runs from its own first frame, and
+    // nothing may reach the bike before the write-suppression window is open.
+    _bike.setCalibrating(true);
+    _guardOpen = true;
     _cancelled = false;
     _finished = false;
     _cancelPending = false;
     _probeParked = false;
-    _bootA = null;
+    _baseline = null;
     _parting = null;
     _bootB = null;
     _capabilities = null;
     _signature = null;
-    // Opened right away: unlike the old one-boot guide, nothing is staged on
-    // the bike first — this flow simply reads whatever the bike naturally
-    // boots into, so there is nothing to write before the window opens.
-    _bike.setCalibrating(true);
-    _guardOpen = true;
     setState(() {
-      _step = SetupStep.turnOff1;
+      _step = SetupStep.readBefore;
       _hint = null;
       _failure = null;
       _progress = null;
     });
-    final off1 = await _waitForConnection(
-        connected: false, hintAfter: _offHint, hint: _offHintText);
-    if (!off1 || !_alive) {
-      return;
-    }
-    setState(() {
-      _step = SetupStep.turnOn1;
-      _hint = null;
-    });
-    final on1 = await _waitForConnection(
+    // The bike is normally connected already — the rider came here from its
+    // own page. A bike that is away is waited for, with the same fast poll and
+    // the same Connect button the step after the power cycle uses.
+    final wasConnected = ref.read(connectionHandlerProvider(widget.bikeID)) ==
+        SDBluetoothConnectionState.connected;
+    final ready = await _waitForConnection(
         connected: true, hintAfter: _onHint, hint: _onHintText);
-    if (!on1 || !_alive) {
+    if (!ready || !_alive) {
       return;
     }
-    setState(() {
-      _step = SetupStep.readBoot1;
-      _hint = null;
-    });
-    // Let the transport's own post-connect handshake finish first. A real
-    // device log caught the race this avoids: right after a reconnect, the
-    // transport asks the bike for ride data as part of becoming ready, and
-    // that request selects a different register than the read below needs —
-    // a read this early can come back with ride data instead of settings and
-    // fail outright. See [Bike.connectSettle] and [Bike._reassertAfterReconnect],
-    // which waits out the exact same race on the control loop's own reconnect
-    // path.
-    await Future<void>.delayed(Bike.connectSettle);
+    if (!wasConnected) {
+      // The link came back just now, so the transport's own post-connect
+      // handshake is still running: it selects a different register than the
+      // read below needs. See [Bike.connectSettle]. A connection that was
+      // already up has settled long ago, and waiting again would only make the
+      // rider wait.
+      await Future<void>.delayed(Bike.connectSettle);
+      if (!_alive) {
+        return;
+      }
+    }
+    final baseline = await _bike.readBikeState();
     if (!_alive) {
       return;
     }
-    final bootA = await _bike.readBikeState();
-    if (!_alive) {
-      return;
-    }
-    if (bootA == null) {
+    if (baseline == null) {
       _fail('The app could not read the bike. Make sure it is on, standing '
           'still and in range, then try again.');
       return;
     }
-    _bootA = bootA;
+    _baseline = baseline;
     setState(() {
       _step = SetupStep.probing;
       _hint = null;
@@ -513,7 +524,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     // writes — it protects everything else from the probe, not the other
     // way round.
     final capabilities =
-        await _bike.probeCapabilities(bootA, onProgress: (progress) {
+        await _bike.probeCapabilities(baseline, onProgress: (progress) {
       if (!mounted) {
         return;
       }
@@ -523,7 +534,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       // Recorded before any of the exits below is reached, so every one of
       // them — the cancel just below, a failed read of the parting state, the
       // back gesture, a cancel at either of the two steps that follow — puts
-      // the bike back where it booted. See [_probeParked].
+      // the bike back where it started. See [_probeParked].
       _probeParked = true;
     }
     if (_cancelPending) {
@@ -548,7 +559,9 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     // The probe's own parting state — what it left on the bus — is not
     // handed back by probeCapabilities itself, so it is captured with one
     // more plain read, right after: the window never closed between the two
-    // calls, so nothing else touched the bike in between.
+    // calls, so nothing else touched the bike in between. This read is one
+    // half of the boot signature: the power cycle below is measured against
+    // it.
     final parting = await _bike.readBikeState();
     if (!_alive) {
       return;
@@ -560,31 +573,30 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     }
     _parting = parting;
     setState(() {
-      _step = SetupStep.turnOff2;
+      _step = SetupStep.turnOff;
       _hint = null;
       _progress = null;
     });
-    final off2 = await _waitForConnection(
+    final off = await _waitForConnection(
         connected: false, hintAfter: _offHint, hint: _offHintText);
-    if (!off2 || !_alive) {
+    if (!off || !_alive) {
       return;
     }
     setState(() {
-      _step = SetupStep.turnOn2;
+      _step = SetupStep.turnOn;
       _hint = null;
     });
-    final on2 = await _waitForConnection(
+    final on = await _waitForConnection(
         connected: true, hintAfter: _onHint, hint: _onHintText);
-    if (!on2 || !_alive) {
+    if (!on || !_alive) {
       return;
     }
     setState(() {
-      _step = SetupStep.readBoot2;
+      _step = SetupStep.readBoot;
       _hint = null;
     });
-    // Same wait as after the first reconnect above, and for the same reason:
-    // the transport's post-connect handshake needs to finish before the read
-    // below can trust the register it selects.
+    // Always waited out here: the bike just came back, so the transport's
+    // post-connect handshake is running for certain.
     await Future<void>.delayed(Bike.connectSettle);
     if (!_alive) {
       return;
@@ -619,11 +631,10 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   }
 
   String get _title => switch (_step) {
-        SetupStep.intro => 'Set up this bike',
-        SetupStep.turnOff1 || SetupStep.turnOff2 => 'Switch the bike off',
-        SetupStep.turnOn1 || SetupStep.turnOn2 => 'Switch the bike on',
-        SetupStep.readBoot1 || SetupStep.readBoot2 => 'Reading the bike',
+        SetupStep.readBefore || SetupStep.readBoot => 'Reading the bike',
         SetupStep.probing => 'Testing the bike',
+        SetupStep.turnOff => 'Switch the bike off',
+        SetupStep.turnOn => 'Switch the bike on',
         SetupStep.done => 'Setup complete',
         SetupStep.failed => 'Setup stopped',
       };
@@ -646,15 +657,14 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   }
 
   String _bodyFor(BikeState bike) => switch (_step) {
-        SetupStep.intro => setupIntroBody,
-        SetupStep.turnOff1 || SetupStep.turnOff2 =>
+        SetupStep.readBefore || SetupStep.readBoot => 'The app reads the bike.',
+        SetupStep.probing => _probingBody,
+        SetupStep.turnOff =>
           'Switch the bike off with its power button. Do not ride it and do '
               'not change anything on the handlebar.',
-        SetupStep.turnOn1 || SetupStep.turnOn2 =>
+        SetupStep.turnOn =>
           'Switch the bike on again. The app connects again by itself, '
               'usually in 5 to 30 seconds.',
-        SetupStep.readBoot1 || SetupStep.readBoot2 => 'The app reads the bike.',
-        SetupStep.probing => _probingBody,
         SetupStep.done => _summaryFor(bike.region) ?? 'Nothing was measured.',
         SetupStep.failed => _failure ?? 'The setup stopped.',
       };
@@ -679,15 +689,13 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   }
 
   bool get _busy => switch (_step) {
-        SetupStep.turnOff1 ||
-        SetupStep.turnOn1 ||
-        SetupStep.readBoot1 ||
+        SetupStep.readBefore ||
         SetupStep.probing ||
-        SetupStep.turnOff2 ||
-        SetupStep.turnOn2 ||
-        SetupStep.readBoot2 =>
+        SetupStep.turnOff ||
+        SetupStep.turnOn ||
+        SetupStep.readBoot =>
           true,
-        SetupStep.intro || SetupStep.done || SetupStep.failed => false,
+        SetupStep.done || SetupStep.failed => false,
       };
 
   @override
@@ -695,6 +703,10 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     // Watched, not read: it holds the notifier alive for as long as the
     // wizard is on screen, whatever happens to the page below it.
     final bike = ref.watch(bikeProvider(widget.bikeID));
+    // Watched too: the first step offers Connect only while the bike is away,
+    // so this screen has to follow the link.
+    final connected = ref.watch(connectionHandlerProvider(widget.bikeID)) ==
+        SDBluetoothConnectionState.connected;
     final theme = Theme.of(context);
     return PopScope(
       // The back gesture is a cancel like any other, and it has to undo the
@@ -705,11 +717,11 @@ class _SetupPageState extends ConsumerState<SetupPage> {
           _finish();
         }
       },
-      child: _scaffold(theme, bike),
+      child: _scaffold(theme, bike, connected),
     );
   }
 
-  Widget _scaffold(ThemeData theme, BikeState bike) {
+  Widget _scaffold(ThemeData theme, BikeState bike, bool connected) {
     return Scaffold(
       backgroundColor: SDSurface.page,
       appBar: AppBar(
@@ -768,7 +780,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                   ),
                 ),
               ),
-              ..._actions(),
+              ..._actions(connected),
             ],
           ),
         ),
@@ -776,15 +788,15 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     );
   }
 
-  List<Widget> _actions() => switch (_step) {
-        SetupStep.intro => [
-            _primary('Start', const ValueKey('setupStart'), _run),
+  List<Widget> _actions(bool connected) => switch (_step) {
+        // The first step waits for the bike as well, so a rider whose bike is
+        // away needs the same manual way back the step after the power cycle
+        // gives them.
+        SetupStep.readBefore => [
+            if (!connected) ...[_connectButton(), const SizedBox(height: 8)],
+            _secondary('Cancel', const ValueKey('setupCancel'), _cancel),
           ],
-        SetupStep.turnOff1 ||
-        SetupStep.turnOff2 ||
-        SetupStep.readBoot1 ||
-        SetupStep.readBoot2 =>
-          [
+        SetupStep.turnOff || SetupStep.readBoot => [
             _secondary('Cancel', const ValueKey('setupCancel'), _cancel),
           ],
         SetupStep.probing => [
@@ -797,15 +809,8 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                 const ValueKey('setupCancel'),
                 _cancelPending ? null : _requestCancel),
           ],
-        SetupStep.turnOn1 || SetupStep.turnOn2 => [
-            // The manual connect never consults the auto-reconnect setting,
-            // so this is the way back for a bike the app is not allowed to
-            // chase.
-            _primary('Connect', const ValueKey('setupConnect'), () {
-              ref
-                  .read(connectionHandlerProvider(widget.bikeID).notifier)
-                  .connect();
-            }),
+        SetupStep.turnOn => [
+            _connectButton(),
             const SizedBox(height: 8),
             _secondary('Cancel', const ValueKey('setupCancel'), _cancel),
           ],
@@ -819,6 +824,13 @@ class _SetupPageState extends ConsumerState<SetupPage> {
             _secondary('Close', const ValueKey('setupClose'), _cancel),
           ],
       };
+
+  /// The manual connect. It never consults the auto-reconnect setting, so it
+  /// is the way back for a bike the app is not allowed to chase.
+  Widget _connectButton() =>
+      _primary('Connect', const ValueKey('setupConnect'), () {
+        ref.read(connectionHandlerProvider(widget.bikeID).notifier).connect();
+      });
 
   Widget _primary(String label, Key key, VoidCallback onPressed) =>
       ElevatedButton(

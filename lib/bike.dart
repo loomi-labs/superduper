@@ -239,7 +239,7 @@ class Bike extends _$Bike {
   /// until the readback actually matches sidesteps the alignment question
   /// entirely — the same shape the old one-boot calibration's
   /// `recordBootWindow` used to settle a value across a real device's own
-  /// timing, before the two-boot setup wizard replaced it.
+  /// timing, before the setup wizard replaced it.
   ///
   /// 250 ms x 6 = 1.5 s worst case per write that is genuinely rejected —
   /// negligible next to the already multi-second capability sweep, but short
@@ -958,11 +958,11 @@ class Bike extends _$Bike {
       }
       usable = true;
     }
-    // The light's register value was untrustworthy under the old one-boot
+    // The light's register value was untrustworthy under the old boot
     // guide — a boot transient, measured against nothing that deliberately
-    // moved it — which is why a one-boot signature never populates
-    // [BootSignature.bootLight]. The two-boot setup wizard deliberately drives
-    // light away from its boot value before the second boot (see
+    // moved it — which is why such a signature never populates
+    // [BootSignature.bootLight]. The setup wizard deliberately drives light
+    // away from its parked value before the boot (see
     // [classifyCapabilityBoot]), which makes a populated bootLight field
     // exactly as usable as the other two bytes.
     final bootLight = signature.bootLight;
@@ -1056,7 +1056,7 @@ class Bike extends _$Bike {
       // already booted on: parking there compares a byte against itself,
       // which classifyCapabilityBoot can only read as "unusable/ambiguous".
       // Mirrors the assist sweep's own coincidence check a few lines below —
-      // any other accepted, non-unlimited wire lets the second boot actually
+      // any other accepted, non-unlimited wire lets the boot actually
       // learn something. Which one it is still matters, so the same
       // most-limited rule decides again over what is left: taking the first
       // by wire index instead would park an accepted [2, 4, 5] booted on 4 on
@@ -1257,7 +1257,7 @@ class Bike extends _$Bike {
         // The sweep's own last value coincides with the boot value — which the
         // boot-last order above makes the normal case, not the exception — so
         // write one more accepted value that does not coincide, and give a
-        // later second boot something to compare against. At least one such
+        // later boot something to compare against. At least one such
         // value exists: more than one was accepted, and baseline.assist can
         // equal at most one of them.
         final differing =

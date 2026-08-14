@@ -39,12 +39,9 @@ class _ThrowingReadStore extends FakeBikeStore {
   }
 }
 
-/// Counts calls to [read], standing in for the settings read
-/// [SetupStep.readBoot1] and [SetupStep.readBoot2] take right after a
-/// reconnect — the moment a real device log showed racing the transport's
-/// own post-connect ride-data request (see [Bike.connectSettle]). The count
-/// is enough to prove the wizard waits: a read before the settle period has
-/// elapsed would show up here too early.
+/// Counts calls to [read], standing in for the settings reads the wizard
+/// takes — the one before the probe and the one after the power cycle. The
+/// count says when a read happened, which is what the timing tests need.
 class _CountingReadStore extends FakeBikeStore {
   int readCount = 0;
 
@@ -92,8 +89,7 @@ class _SlowConnectionHandler extends ConnectionHandler {
 }
 
 /// Counts calls to [connect], standing in for the wizard's fast reconnect
-/// poll while [SetupStep.turnOn1]/[SetupStep.turnOn2] wait for the bike to
-/// come back.
+/// poll while a step waits for the bike to come back.
 ///
 /// [respondToConnect] is false by default, so a call only counts and does
 /// nothing else: a fake bike's own connect() flips it straight to connected
@@ -118,8 +114,8 @@ class _CountingConnectionHandler extends ConnectionHandler {
   }
 }
 
-/// The setup wizard: the ten-step flow (stage, two power cycles, probe,
-/// save), the gate it feeds on [BikePage], and the two entries that reach it.
+/// The setup wizard: the flow (read, probe, one power cycle, read, save), the
+/// gate it feeds on [BikePage], and the two entries that reach it.
 ///
 /// Driven exactly the way a rider drives it — buttons, and the link going
 /// down and coming back — so a step that only works when a test calls the
@@ -209,8 +205,12 @@ void main() {
 
   /// Pushes the wizard over an empty page, so its own pop has a route to land
   /// on — the way both entries reach it.
-  Future<void> openWizard(
-      WidgetTester tester, ProviderContainer container) async {
+  ///
+  /// The wizard starts its flow on its first frame, so [settle] says how much
+  /// of that flow a test wants to let run before it looks: a timing test opens
+  /// with [Duration.zero] and steps the clock itself.
+  Future<void> openWizard(WidgetTester tester, ProviderContainer container,
+      {Duration settle = const Duration(seconds: 1)}) async {
     await tester.pumpWidget(UncontrolledProviderScope(
       container: container,
       child: const MaterialApp(home: Scaffold(body: SizedBox.expand())),
@@ -218,12 +218,28 @@ void main() {
     Navigator.of(tester.element(find.byType(SizedBox))).push(
         MaterialPageRoute<void>(builder: (_) => const SetupPage(bikeID: id)));
     await tester.pump();
-    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(settle);
   }
 
   Future<void> tap(WidgetTester tester, String key) async {
     await tester.tap(find.byKey(ValueKey(key)));
     await pump(tester);
+  }
+
+  /// Ends a test that stops in the middle of the flow: stops the wizard and
+  /// waits for it to pop, so no timer of the sweep is left for the test
+  /// framework's own teardown check.
+  Future<void> closeWizard(WidgetTester tester) async {
+    for (final key in ['setupCancel', 'setupClose', 'setupDone']) {
+      final button = find.byKey(ValueKey(key));
+      if (button.evaluate().isNotEmpty) {
+        await tester.tap(button);
+        break;
+      }
+    }
+    await pumpUntil(
+        tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
+        maxTicks: 1000);
   }
 
   /// Stands in for the bike reporting a fresh boot: the settings register as
@@ -233,44 +249,119 @@ void main() {
       container.read(fakeBikeStoreProvider).write(
           id, [0, 209, light ? 1 : 0, assist, wire, 0, 0, 0, 0, 0]);
 
-  group('the intro', () {
-    testWidgets('has no Later, only Start', (tester) async {
+  group('starting immediately', () {
+    testWidgets('the flow runs with no button to press', (tester) async {
       final container = ProviderContainer();
-      openBike(container);
-      await openWizard(tester, container);
+      final bike = openBike(container);
+      await openWizard(tester, container, settle: Duration.zero);
 
-      expect(find.byKey(const ValueKey('setupStart')), findsOneWidget);
-      expect(find.text('Later'), findsNothing);
-      expect(find.byType(TextButton), findsNothing,
-          reason: 'the intro has no secondary button of any kind');
+      expect(find.byKey(const ValueKey('setupStart')), findsNothing,
+          reason: 'the gate card is the one start screen');
+      expect(bike.debugCalibrating, isTrue,
+          reason: 'the window opens before the wizard touches the bike');
+      expect(find.byKey(const ValueKey('setupTitle')), findsOneWidget);
+      expect(find.text(setupIntroBody), findsNothing,
+          reason: 'the wizard never repeats what the gate card said');
+
+      await pumpUntil(tester, () => textShown('Testing the bike'));
+      expect(find.text('Testing the bike'), findsOneWidget,
+          reason: 'the flow walked on by itself, with no tap');
+
+      await closeWizard(tester);
       container.dispose();
     });
 
-    testWidgets('Start opens the write-suppression window and moves on',
+    testWidgets('a connected bike is read without waiting for a settle',
         (tester) async {
-      final container = ProviderContainer();
-      final bike = openBike(container);
-      await openWizard(tester, container);
+      final store = _CountingReadStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      // Seeded directly rather than through openBike(): that helper's own
+      // writeStateData call arms the ordinary 2 s update debounce, which would
+      // call read() on its own and be mistaken for the read under test.
+      container.read(bikesDBProvider.notifier).debugMarkLoaded();
+      container.read(bikesDBProvider.notifier).saveBike(freshBike());
+      container.listen(bikeProvider(id), (previous, next) {});
+      container.read(bikeProvider(id).notifier);
+      store.readCount = 0;
 
-      await tap(tester, 'setupStart');
+      await openWizard(tester, container, settle: Duration.zero);
+      await tester.pump(const Duration(milliseconds: 10));
 
-      expect(bike.debugCalibrating, isTrue);
-      expect(find.text('Switch the bike off'), findsOneWidget);
+      expect(store.readCount, greaterThan(0),
+          reason: 'the connection is settled already, so nothing is waited '
+              'out before the first read');
+
+      await closeWizard(tester);
+      container.dispose();
+    });
+
+    testWidgets(
+        'a bike that is away is polled for, and read only after the settle',
+        (tester) async {
+      final store = _CountingReadStore();
+      final handler = _CountingConnectionHandler();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+        connectionHandlerProvider(id).overrideWith(() => handler),
+      ]);
+      container.read(bikesDBProvider.notifier).debugMarkLoaded();
+      container.read(bikesDBProvider.notifier).saveBike(freshBike());
+      container.listen(bikeProvider(id), (previous, next) {});
+      container.read(bikeProvider(id).notifier);
+      setConnection(container, SDBluetoothConnectionState.disconnected);
+
+      await openWizard(tester, container, settle: Duration.zero);
+      await pump(tester);
+      expect(find.byKey(const ValueKey('setupConnect')), findsOneWidget,
+          reason: 'a rider whose bike is away needs the manual way back');
+      final afterArming = handler.connectCount;
+      expect(afterArming, greaterThanOrEqualTo(1),
+          reason: 'the step asks for the bike the instant it starts waiting');
+
+      await tester.pump(const Duration(seconds: 6));
+      expect(handler.connectCount, greaterThan(afterArming + 1),
+          reason: 'the fast poll asks again while the rider waits');
+
+      store.readCount = 0;
+      setConnection(container, SDBluetoothConnectionState.connected);
+      await tester.pump();
+      await tester.pump(Bike.connectSettle - const Duration(milliseconds: 1));
+      expect(store.readCount, 0,
+          reason: 'a read this soon after connecting could still land on the '
+              "transport's own re-selected register");
+
+      await tester.pump(const Duration(milliseconds: 2));
+      expect(store.readCount, greaterThan(0),
+          reason: 'once Bike.connectSettle has elapsed, the read goes through');
+
+      await closeWizard(tester);
       container.dispose();
     });
   });
 
   group('the connection-wait steps', () {
+    /// Runs the wizard as far as the power cycle: the probe is done, and the
+    /// bike waits to be switched off.
+    Future<void> reachTurnOff(
+        WidgetTester tester, ProviderContainer container) async {
+      await openWizard(tester, container);
+      await pumpUntil(tester, () => textShown('Switch the bike off'));
+    }
+
     testWidgets('the off hint appears only after its timeout', (tester) async {
       final container = ProviderContainer();
       openBike(container);
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
+      await reachTurnOff(tester, container);
 
-      await tester.pump(const Duration(seconds: 29));
+      // Not the full 30 s of the timeout: reaching this step already consumed
+      // a couple of seconds of the fake clock.
+      await tester.pump(const Duration(seconds: 25));
       expect(find.byKey(const ValueKey('setupHint')), findsNothing);
-      await tester.pump(const Duration(seconds: 2));
+      await tester.pump(const Duration(seconds: 6));
       expect(find.byKey(const ValueKey('setupHint')), findsOneWidget);
+      await closeWizard(tester);
       container.dispose();
     });
 
@@ -285,8 +376,7 @@ void main() {
             .overrideWith(() => _CountingConnectionHandler()),
       ]);
       openBike(container);
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
+      await reachTurnOff(tester, container);
       setConnection(container, SDBluetoothConnectionState.disconnected);
       await pump(tester);
       expect(find.text('Switch the bike on'), findsOneWidget);
@@ -295,46 +385,33 @@ void main() {
       expect(find.byKey(const ValueKey('setupHint')), findsNothing);
       await tester.pump(const Duration(seconds: 2));
       expect(find.byKey(const ValueKey('setupHint')), findsOneWidget);
+      await closeWizard(tester);
       container.dispose();
     });
 
     testWidgets(
-        'readBoot1 does not read the bike until Bike.connectSettle has '
-        'elapsed', (tester) async {
+        'the boot read waits until Bike.connectSettle has elapsed',
+        (tester) async {
       // A real device log caught this exact race: a settings read taken the
       // instant the wizard sees the reconnect can land while the transport's
       // own post-connect handshake has already re-selected a different
       // register for its own ride-data request, so the read comes back with
       // ride data instead of settings and the wizard fails outright.
-      final store = _CountingReadStore();
       // The connection handler is swapped out for the same reason as in
       // 'the on hint appears only after its timeout' above: the wizard's own
-      // fast reconnect poll fires a connect() the instant turnOn1 starts
-      // waiting, and a fake bike's real connect() would otherwise reconnect
-      // it right there — before this test's own controlled setConnection(
-      // connected) call below, which is what actually drives the timing
-      // this test cares about.
+      // fast reconnect poll fires a connect() the instant the wait starts,
+      // and a fake bike's real connect() would otherwise reconnect it right
+      // there — before this test's own controlled setConnection(connected)
+      // call below, which is what drives the timing this test cares about.
       final container = ProviderContainer(overrides: [
-        fakeBikeStoreProvider.overrideWithValue(store),
         connectionHandlerProvider(id)
             .overrideWith(() => _CountingConnectionHandler()),
       ]);
-      // Seeded directly rather than through openBike(): that helper's own
-      // writeStateData call arms the ordinary 2 s update debounce, which
-      // would otherwise call read() on its own somewhere in the middle of
-      // the window this test checks, and be mistaken for the read under
-      // test.
-      container.read(bikesDBProvider.notifier).saveBike(freshBike());
-      container.listen(bikeProvider(id), (previous, next) {});
-      container.read(bikeProvider(id).notifier);
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
+      openBike(container);
+      await reachTurnOff(tester, container);
       setConnection(container, SDBluetoothConnectionState.disconnected);
       await pump(tester);
       bootBike(container, light: false, assist: 0, wire: 0);
-      // Only the reconnect below is under test; a read triggered by anything
-      // earlier must not be blamed on it.
-      store.readCount = 0;
       setConnection(container, SDBluetoothConnectionState.connected);
       // Flushes the microtask that carries the flow from "connected" into
       // the wait for Bike.connectSettle, without advancing the fake clock
@@ -342,46 +419,34 @@ void main() {
       await tester.pump();
 
       await tester.pump(Bike.connectSettle - const Duration(milliseconds: 1));
-      expect(store.readCount, 0,
-          reason: 'a read this soon after reconnecting could still land on '
-              "the transport's own re-selected register, exactly as the "
-              'real device log showed');
+      expect(textShown('Reading the bike'), isTrue,
+          reason: 'the read has not been taken yet: this soon after '
+              "reconnecting it could still land on the transport's own "
+              're-selected register, exactly as the real device log showed');
 
       await tester.pump(const Duration(milliseconds: 2));
-      expect(store.readCount, greaterThan(0),
-          reason: 'once Bike.connectSettle has elapsed, the read must go '
-              'through');
+      await pump(tester);
+      expect(textShown('Setup complete'), isTrue,
+          reason: 'once Bike.connectSettle has elapsed, the read goes through '
+              'and finishes the flow');
 
-      // Let the rest of the flow settle so nothing is left pending for the
-      // test framework's own teardown check. The probe is already running by
-      // this point (readBoot1 moves straight into it), and Bike._probeSettle
-      // now makes the whole sweep take several seconds of virtual time to
-      // finish, so this waits for the wizard to actually pop rather than a
-      // fixed short pump.
-      final cancel = find.byKey(const ValueKey('setupCancel'));
-      if (cancel.evaluate().isNotEmpty) {
-        await tester.tap(cancel);
-      }
-      await pumpUntil(
-          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
-          maxTicks: 1000);
+      await closeWizard(tester);
       container.dispose();
     });
 
     testWidgets('Connect calls the connection handler\'s manual connect',
         (tester) async {
       // The wizard's own fast reconnect poll also calls connect() the
-      // instant turnOn1 starts waiting, and on a fake bike that call would
-      // succeed immediately too — leaving nothing left for a manual tap to
-      // prove. The handler is swapped out so only the tap's own call is let
+      // instant the wait starts, and on a fake bike that call would succeed
+      // immediately too — leaving nothing left for a manual tap to prove.
+      // The handler is swapped out so only the tap's own call is let
       // through, isolating exactly what this test means to check.
       final handler = _CountingConnectionHandler();
       final container = ProviderContainer(overrides: [
         connectionHandlerProvider(id).overrideWith(() => handler),
       ]);
       openBike(container);
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
+      await reachTurnOff(tester, container);
       setConnection(container, SDBluetoothConnectionState.disconnected);
       await pump(tester);
 
@@ -393,26 +458,16 @@ void main() {
       expect(container.read(connectionHandlerProvider(id)),
           SDBluetoothConnectionState.connected);
 
-      // Pumping now carries the flow on to the next connection wait — the
-      // probe and a fake read have no real delay either. Cancel there
-      // (rather than drive a second power cycle this test has no stake in)
-      // and flush the connect-settle timer the reconnect above armed, so
-      // nothing is left pending for the test framework's own teardown check.
       await pump(tester);
-      final cancel = find.byKey(const ValueKey('setupCancel'));
-      if (cancel.evaluate().isNotEmpty) {
-        await tester.tap(cancel);
-      }
-      await pump(tester, const Duration(seconds: 2));
+      await closeWizard(tester);
       container.dispose();
     });
 
-    testWidgets('Cancel at the first off step closes the window and pops',
+    testWidgets('Cancel at the off step closes the window and pops',
         (tester) async {
       final container = ProviderContainer();
       final bike = openBike(container);
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
+      await reachTurnOff(tester, container);
 
       await tap(tester, 'setupCancel');
       await pump(tester, const Duration(seconds: 1));
@@ -433,6 +488,15 @@ void main() {
     // deliberately slow, and stops entirely with Auto-reconnect off. These
     // tests guard the fix: a dedicated fast retry, local to the wizard.
 
+    /// Runs the wizard as far as the power cycle, then switches the bike off.
+    Future<void> reachTurnOn(
+        WidgetTester tester, ProviderContainer container) async {
+      await openWizard(tester, container);
+      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      setConnection(container, SDBluetoothConnectionState.disconnected);
+      await pump(tester);
+    }
+
     testWidgets(
         'keeps retrying roughly every 1.5s while stuck waiting for the '
         'bike to come back on', (tester) async {
@@ -441,10 +505,7 @@ void main() {
         connectionHandlerProvider(id).overrideWith(() => handler),
       ]);
       openBike(container);
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
+      await reachTurnOn(tester, container);
       expect(find.text('Switch the bike on'), findsOneWidget);
 
       final afterArming = handler.connectCount;
@@ -460,19 +521,11 @@ void main() {
               "today's bug is zero further attempts at all");
 
       // Let the wait resolve and flush the poll timer, so nothing is left
-      // pending for the test framework's own teardown check. readBoot1 moves
-      // straight into the probe, and Bike._probeSettle now makes the whole
-      // sweep take several seconds of virtual time, so this waits for the
-      // wizard to actually pop rather than a fixed short pump.
+      // pending for the test framework's own teardown check.
+      bootBike(container, light: false, assist: 0, wire: 0);
       setConnection(container, SDBluetoothConnectionState.connected);
-      await pump(tester, const Duration(seconds: 2));
-      final cancel = find.byKey(const ValueKey('setupCancel'));
-      if (cancel.evaluate().isNotEmpty) {
-        await tester.tap(cancel);
-      }
-      await pumpUntil(
-          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
-          maxTicks: 1000);
+      await pumpUntil(tester, () => textShown('Setup complete'));
+      await closeWizard(tester);
       container.dispose();
     });
 
@@ -484,10 +537,7 @@ void main() {
         connectionHandlerProvider(id).overrideWith(() => handler),
       ]);
       openBike(container);
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
+      await reachTurnOn(tester, container);
       expect(find.text('Switch the bike on'), findsOneWidget);
 
       await tester.pump(const Duration(seconds: 3));
@@ -498,54 +548,16 @@ void main() {
 
       bootBike(container, light: false, assist: 0, wire: 0);
       setConnection(container, SDBluetoothConnectionState.connected);
-      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      await pumpUntil(tester, () => textShown('Setup complete'));
 
       expect(handler.connectCount, beforeConnect,
           reason: 'the poll must stop the instant the connection is seen '
-              'as connected, not keep ticking through readBoot1 and the '
-              'probe');
+              'as connected, not keep ticking through the boot read');
 
       // A clean end with the widget disposed: if _reconnectPollTimer were
       // not cancelled, flutter_test's own teardown check would fail here
       // with a leaked Timer.
-      await tap(tester, 'setupCancel');
-      await pump(tester, const Duration(seconds: 1));
-      container.dispose();
-    });
-
-    testWidgets(
-        'polls again during the second reconnect (turnOn2), not just the '
-        'first', (tester) async {
-      final handler = _CountingConnectionHandler();
-      final container = ProviderContainer(overrides: [
-        connectionHandlerProvider(id).overrideWith(() => handler),
-      ]);
-      openBike(container);
-      await openWizard(tester, container);
-
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
-      bootBike(container, light: false, assist: 0, wire: 0);
-      setConnection(container, SDBluetoothConnectionState.connected);
-      await pumpUntil(tester, () => textShown('Switch the bike off'));
-
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
-      expect(find.text('Switch the bike on'), findsOneWidget);
-
-      final afterArming = handler.connectCount;
-      await tester.pump(const Duration(seconds: 6));
-
-      expect(handler.connectCount, greaterThan(afterArming + 1),
-          reason: 'the fast retry poll must run again on the second '
-              'reconnect wait, exactly as it did on the first — this is '
-              'not a first-reconnect-only behavior');
-
-      bootBike(container, light: false, assist: 0, wire: 0);
-      setConnection(container, SDBluetoothConnectionState.connected);
-      await pumpUntil(tester, () => textShown('Setup complete'));
-      await tap(tester, 'setupDone');
+      await closeWizard(tester);
       container.dispose();
     });
 
@@ -557,10 +569,7 @@ void main() {
         connectionHandlerProvider(id).overrideWith(() => handler),
       ]);
       openBike(container, freshBike().copyWith(autoReconnect: false));
-      await openWizard(tester, container);
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
+      await reachTurnOn(tester, container);
       expect(find.text('Switch the bike on'), findsOneWidget);
       expect(handler.debugAutoReconnect, isFalse,
           reason: 'sanity check: the bike record really did carry the '
@@ -575,19 +584,8 @@ void main() {
 
       bootBike(container, light: false, assist: 0, wire: 0);
       setConnection(container, SDBluetoothConnectionState.connected);
-      // readBoot1 moves straight into the probe, and Bike._probeSettle now
-      // makes the whole sweep take several seconds of virtual time, so this
-      // waits for the wizard to actually pop rather than a fixed short pump
-      // — otherwise a probe step's Timer is still pending when the test
-      // disposes the container below.
-      await pump(tester, const Duration(seconds: 2));
-      final cancel = find.byKey(const ValueKey('setupCancel'));
-      if (cancel.evaluate().isNotEmpty) {
-        await tester.tap(cancel);
-      }
-      await pumpUntil(
-          tester, () => find.byKey(const ValueKey('setupTitle')).evaluate().isEmpty,
-          maxTicks: 1000);
+      await pumpUntil(tester, () => textShown('Setup complete'));
+      await closeWizard(tester);
       container.dispose();
     });
   });
@@ -598,18 +596,12 @@ void main() {
         (tester) async {
       final container = ProviderContainer();
       openBike(container);
-      await openWizard(tester, container);
-
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
-      bootBike(container, light: false, assist: 0, wire: 0);
-      setConnection(container, SDBluetoothConnectionState.connected);
+      await openWizard(tester, container, settle: Duration.zero);
 
       // Somewhere in the middle of the probe: the bike is still ungated.
       await pump(tester, const Duration(milliseconds: 50));
       expect(container.read(bikeProvider(id)).capabilities, isNull,
-          reason: 'nothing is saved before the second power cycle');
+          reason: 'nothing is saved before the power cycle');
 
       await pumpUntil(tester, () => textShown('Switch the bike off'));
       expect(container.read(bikeProvider(id)).capabilities, isNull,
@@ -645,14 +637,12 @@ void main() {
                   capabilities: null,
                   bootSignature: null)
               .withSelectedMode(seededChModeId));
+      // Wire 4 is EPAC: 25 km/h, or '16 mph' for a bike of unknown region.
+      // The bike sits on it before the probe as well, so the sweep parks
+      // somewhere else and the boot below really does say something.
+      bootBike(container, light: false, assist: 0, wire: 4);
       await openWizard(tester, container);
 
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
-      // Wire 4 is EPAC: 25 km/h, or '16 mph' for a bike of unknown region.
-      bootBike(container, light: false, assist: 0, wire: 4);
-      setConnection(container, SDBluetoothConnectionState.connected);
       await pumpUntil(tester, () => textShown('Switch the bike off'));
       setConnection(container, SDBluetoothConnectionState.disconnected);
       await pump(tester);
@@ -680,14 +670,12 @@ void main() {
         fakeBikeStoreProvider.overrideWithValue(store),
       ]);
       final bike = openBike(container);
+      // The bike sits on its own boot triple before the probe starts: light
+      // off, assist 0, wire 0 — the baseline the wizard has to put back.
+      bootBike(container, light: false, assist: 0, wire: 0);
       await openWizard(tester, container);
 
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
-      bootBike(container, light: false, assist: 0, wire: 0);
-      setConnection(container, SDBluetoothConnectionState.connected);
-      // Mid-way through the second power cycle: the probe already ran once.
+      // The probe already ran; the rider is asked for the power cycle.
       await pumpUntil(tester, () => textShown('Switch the bike off'));
 
       final beforeCancel = store.writes.length;
@@ -732,18 +720,11 @@ void main() {
         connectionHandlerProvider(id).overrideWith(() => slowHandler),
       ]);
       final bike = openBike(container);
-      await openWizard(tester, container);
-
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
       bootBike(container, light: false, assist: 0, wire: 0);
       // Pauses on the sweep's own third write — part-way through the wire
       // loop (wires 0 and 1 already tried), genuinely still running.
       slowHandler.pauseOnWrite = 3;
-      setConnection(container, SDBluetoothConnectionState.connected);
-      // readBoot1 waits out Bike.connectSettle before it reads at all.
-      await tester.pump(Bike.connectSettle);
+      await openWizard(tester, container, settle: Duration.zero);
       await pump(tester);
 
       expect(textShown('Testing the bike'), isTrue,
@@ -798,18 +779,14 @@ void main() {
       ]);
       openBike(container);
       await openWizard(tester, container);
-
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
-      setConnection(container, SDBluetoothConnectionState.connected);
       await pumpUntil(tester, () => textShown('Setup stopped'));
 
       expect(find.byKey(const ValueKey('setupRetry')), findsOneWidget);
       expect(find.byKey(const ValueKey('setupClose')), findsOneWidget);
-      // readBoot2 shares the exact same call ([Bike.readBikeState]) and the
-      // exact same failure branch as readBoot1 — a bad read at either point
-      // reaches [SetupStep.failed] through identical code.
+      // The boot read shares the exact same call ([Bike.readBikeState]) and
+      // the exact same failure branch as the read before the probe — a bad
+      // read at either point reaches [SetupStep.failed] through identical
+      // code.
       container.dispose();
     });
 
@@ -817,17 +794,11 @@ void main() {
         (tester) async {
       final container = ProviderContainer();
       openBike(container);
-      await openWizard(tester, container);
-
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
       bootBike(container, light: false, assist: 0, wire: 0);
-      setConnection(container, SDBluetoothConnectionState.connected);
-      // The bike is still "moving" when the probe would start: probeCapabilities
-      // refuses outright and returns null.
+      // The bike is moving when the wizard opens: probeCapabilities refuses
+      // outright and returns null.
       container.read(fakeBikeStoreProvider).setSpeed(id, 20);
-      await pump(tester);
+      await openWizard(tester, container);
 
       await pumpUntil(tester, () => textShown('Setup stopped'));
 
@@ -849,20 +820,16 @@ void main() {
       // in, and reaching probing instead of failed. Bike.connectSettle's
       // wait (the fix under test elsewhere in this file) is exactly what
       // pushes readBoot1's own read late enough to lose that race.
+      container.read(bikesDBProvider.notifier).debugMarkLoaded();
       container.read(bikesDBProvider.notifier).saveBike(freshBike());
       container.listen(bikeProvider(id), (previous, next) {});
       final bike = container.read(bikeProvider(id).notifier);
-      await openWizard(tester, container);
 
-      await tap(tester, 'setupStart');
-      setConnection(container, SDBluetoothConnectionState.disconnected);
-      await pump(tester);
-      // readBoot1's Bike.readBikeState() call throws outright here, instead
-      // of returning null the way _GarbageReadStore's read above does.
-      // Without a try/catch around the whole flow this is an unhandled
-      // Future error: _step gets stuck on readBoot1 forever, with the
-      // calibration guard held open.
-      setConnection(container, SDBluetoothConnectionState.connected);
+      // The first read of the flow throws outright here, instead of returning
+      // null the way _GarbageReadStore's read above does. Without a try/catch
+      // around the whole flow this is an unhandled Future error: _step gets
+      // stuck on the read forever, with the calibration guard held open.
+      await openWizard(tester, container);
       await pumpUntil(tester, () => textShown('Setup stopped'));
 
       expect(find.textContaining('Something went wrong'), findsOneWidget,
@@ -898,6 +865,8 @@ void main() {
 
       expect(find.byKey(const ValueKey('setupTitle')), findsOneWidget,
           reason: 'Start pushed the wizard');
+
+      await closeWizard(tester);
       container.dispose();
     });
 
