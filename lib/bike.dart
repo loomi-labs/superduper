@@ -1138,24 +1138,35 @@ class Bike extends _$Bike {
     var fullyParked = false;
     try {
       final acceptedWires = <int>[];
-      // Every wire is tested, including bootA.wire: only a real
-      // write-then-readback proves the bike accepted THAT write, and by the
-      // time this loop reaches bootA.wire the bike has already been moved
-      // through the seven others, so the test is not vacuous.
-      for (var wire = 0; wire < firmwareProfiles.length; wire++) {
+      // Every wire is tested, including bootA.wire — but that one LAST, which
+      // is why the loop starts one past it and wraps. Writing the value the
+      // bike already holds proves nothing: the readback shows that value
+      // whether the firmware took the write or refused it, so a locked
+      // firmware would score its own boot wire as accepted. Probed at the end,
+      // the boot wire is the one wire the bike has provably been moved away
+      // from first.
+      for (var step = 0; step < firmwareProfiles.length; step++) {
         if (!_isConnected) {
           return _abortedProbe('mode');
         }
+        final wire = (bootA.wire + 1 + step) % firmwareProfiles.length;
         final data = await _probeWriteRead(handler,
             light: bootA.light, assist: bootA.assist, wire: wire);
         if (data != null && isSettingsPacket(data) && data[5] == wire) {
           acceptedWires.add(wire);
         }
-        onProgress?.call('mode', wire + 1, total);
+        // The loop counter, not the wire: the wire is no longer the count of
+        // tests done.
+        onProgress?.call('mode', step + 1, total);
       }
       if (!_isConnected) {
         return _abortedProbe('mode');
       }
+      // Probe order is not report order. The list is persisted in bikes.json
+      // and compared as a set by [BikeCapabilities.detectedRegion], and the
+      // tie-break in [_safeWireAfterSweep] keeps the first candidate it finds,
+      // so it has to be ascending whatever order the sweep happened to use.
+      acceptedWires.sort();
       final safeWire = _safeWireAfterSweep(acceptedWires, bootA.wire);
       await _probeWriteRead(handler,
           light: bootA.light, assist: bootA.assist, wire: safeWire);
@@ -1165,10 +1176,14 @@ class Bike extends _$Bike {
       // not from what was intended — so it stays correct even where the
       // bike rejects a candidate.
       var partingAssist = bootA.assist;
-      for (var assist = 0; assist <= 4; assist++) {
+      // bootA.assist last, wrapping, for the same reason the wire loop keeps
+      // bootA.wire for last: a write of the level the bike already holds
+      // cannot be told from a write it refused.
+      for (var step = 0; step < 5; step++) {
         if (!_isConnected) {
           return _abortedProbe('assist');
         }
+        final assist = (bootA.assist + 1 + step) % 5;
         final data = await _probeWriteRead(handler,
             light: bootA.light, assist: assist, wire: safeWire);
         if (data != null && isSettingsPacket(data)) {
@@ -1177,12 +1192,15 @@ class Bike extends _$Bike {
             acceptedAssist.add(assist);
           }
         }
-        onProgress?.call('assist', firmwareProfiles.length + assist + 1, total);
+        onProgress?.call('assist', firmwareProfiles.length + step + 1, total);
       }
+      // Ascending, for the same reasons as [acceptedWires] above.
+      acceptedAssist.sort();
       if (acceptedAssist.length > 1 && partingAssist == bootA.assist) {
-        // The sweep's own last value happened to coincide with the boot
-        // value — write one more accepted value that does not, so a later
-        // second boot has something to compare against. At least one such
+        // The sweep's own last value coincides with the boot value — which the
+        // boot-last order above makes the normal case, not the exception — so
+        // write one more accepted value that does not coincide, and give a
+        // later second boot something to compare against. At least one such
         // value exists: more than one was accepted, and bootA.assist can
         // equal at most one of them.
         final differing = acceptedAssist.firstWhere((a) => a != bootA.assist);

@@ -2903,14 +2903,14 @@ void main() {
           const LastSeen(assist: 2, light: false, wire: 5));
 
       // A boot signature left by an earlier setup run: this bike resets to
-      // wire 0 on power-on. The probe's own wire sweep tries wire 0 first
-      // (with bootA's own assist/light held, unchanged) — the exact
-      // transient the old bug let the poll misread as a real second power
-      // cycle.
+      // wire 6 on power-on. The probe's own wire sweep tries wire 6 first —
+      // it starts one past the boot wire it is given (5) — with bootA's own
+      // assist/light held, unchanged: the exact transient the old bug let the
+      // poll misread as a real second power cycle.
       final signature = classifyCapabilityBoot(
-          bootA: (light: false, assist: 2, wire: 0),
+          bootA: (light: false, assist: 2, wire: 6),
           parting: (light: false, assist: 2, wire: 5),
-          bootB: (light: false, assist: 2, wire: 0),
+          bootB: (light: false, assist: 2, wire: 6),
           measuredAt: DateTime(2026, 8, 11));
       bike.writeStateData(
           container.read(bikeProvider(id)).copyWith(
@@ -2948,12 +2948,12 @@ void main() {
               'own readback');
       expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
       expect(caps.lightWritable, isTrue);
-      expect(store.writes.length, 15,
+      expect(store.writes.length, 16,
           reason: 'the interleaved poll must add no write of its own: with '
               "the window still open, writeStateData drops it — 8 wire + 1 "
-              'safe-wire settle + 5 assist + 1 light is the sweep\'s own '
-              'total for a bike that accepts everything, so any extra write '
-              'means the poll leaked one onto the bike');
+              'safe-wire settle + 5 assist + 1 parting assist + 1 light is '
+              "the sweep's own total for a bike that accepts everything, so "
+              'any extra write means the poll leaked one onto the bike');
       expect(selectedId(container), nativeModeId(5),
           reason: 'the startup pin must not have fired mid-probe: the bike '
               'is still on the mode it started the probe with');
@@ -3086,9 +3086,12 @@ void main() {
     test(
         'an exception during the light phase restores the full boot triple, '
         'not just the wire', () async {
-      // 8 wire + 1 safe-wire settle + 5 assist lands write 15 on the light
-      // test itself, the sweep's very last step.
-      final store = _CountingFlakyStore(failOnWrite: 15);
+      // 8 wire + 1 safe-wire settle + 5 assist + 1 parting assist lands write
+      // 16 on the light test itself, the sweep's very last step. The parting
+      // assist write is always made now: the assist loop probes bootA.assist
+      // last, so the value the sweep ends on always coincides with the boot
+      // value.
+      final store = _CountingFlakyStore(failOnWrite: 16);
       final container = ProviderContainer(overrides: [
         fakeBikeStoreProvider.overrideWithValue(store),
       ]);
@@ -3265,6 +3268,97 @@ void main() {
               'device log');
       expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
       expect(caps.lightWritable, isTrue);
+    });
+
+    test('probes the boot wire and the boot assist last of all', () async {
+      final store = _CountingFlakyStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+      // Only the sweep's own writes are counted below, not the setup write.
+      store.writes.clear();
+
+      final caps = await bike.probeCapabilities(
+          const LastSeen(assist: 0, light: false, wire: 0));
+
+      expect(caps, isNotNull);
+      expect(
+          store.writes
+              .take(firmwareProfiles.length)
+              .map((write) => write[4])
+              .toList(),
+          [1, 2, 3, 4, 5, 6, 7, 0],
+          reason: 'a write of the value the bike already holds proves nothing: '
+              'the readback shows that value whether the firmware took the '
+              'write or refused it. Probed last, the boot wire is the one wire '
+              'the bike has provably been moved away from first');
+      expect(
+          store.writes
+              .skip(firmwareProfiles.length + 1)
+              .take(5)
+              .map((write) => write[3])
+              .toList(),
+          [1, 2, 3, 4, 0],
+          reason: 'the assist loop has the same vacuous first step, and skips '
+              'it the same way — the safe-wire park write sits between the two '
+              'loops');
+      expect(caps!.acceptedWires, [0, 1, 2, 3, 4, 5, 6, 7],
+          reason: 'the result stays sorted whatever order it was probed in: '
+              'it goes into bikes.json and into detectedRegion set '
+              'comparisons');
+      expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
+    });
+
+    test('a bike locked onto its own boot wire claims no other wire',
+        () async {
+      // The one case a per-wire probe cannot tell apart: a firmware that
+      // refuses every write, on a bike that booted on the very wire being
+      // written, reads back exactly what a firmware that took the write reads
+      // back. What has to stay honest is everything around it — no OTHER wire
+      // may be reported as accepted, and the mode picker stays hidden.
+      final store = _LockedByteStore(fixedWire: 0);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+
+      final caps = await bike.probeCapabilities(
+          const LastSeen(assist: 0, light: false, wire: 0));
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, [0]);
+      expect(caps.modeWritable, isFalse,
+          reason: 'one wire is no choice at all, and this bike never proved '
+              'even that one');
+    });
+
+    test('a bike locked onto its own boot assist claims no other level',
+        () async {
+      final store = _LockedByteStore(fixedAssist: 0);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+
+      final caps = await bike.probeCapabilities(
+          const LastSeen(assist: 0, light: false, wire: 5));
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedAssist, [0]);
+      expect(caps.assistWritable, isFalse);
     });
 
     test(
