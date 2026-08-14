@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:superduper/bike.dart';
+import 'package:superduper/colors.dart';
 import 'package:superduper/repository.dart';
 import 'package:superduper/theme.dart';
 import 'package:superduper/utils/logger.dart';
@@ -639,26 +640,11 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         SetupStep.failed => 'Setup stopped',
       };
 
-  /// A simple `▓▓▓░░░` readout of [_progress], [width] characters wide.
-  String _progressBar(int done, int total, {int width = 10}) {
-    final filled = total <= 0 ? 0 : (done / total * width).round().clamp(0, width);
-    return '${'▓' * filled}${'░' * (width - filled)}';
-  }
-
-  String get _probingBody {
-    const base = 'The app tries every mode, every assist level and the '
-        'light. Do not touch the bike or the phone.';
-    final progress = _progress;
-    if (progress == null) {
-      return base;
-    }
-    return '$base\n\n${_progressBar(progress.done, progress.total)} '
-        '${progress.phase} ${progress.done} of ${progress.total}';
-  }
-
   String _bodyFor(BikeState bike) => switch (_step) {
         SetupStep.readBefore || SetupStep.readBoot => 'The app reads the bike.',
-        SetupStep.probing => _probingBody,
+        SetupStep.probing =>
+          'The app tries every mode, every assist level and the light. Do not '
+              'touch the bike or the phone.',
         SetupStep.turnOff =>
           'Switch the bike off with its power button. Do not ride it and do '
               'not change anything on the handlebar.',
@@ -688,16 +674,6 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     return setupSummary(capabilities, signature, region: region);
   }
 
-  bool get _busy => switch (_step) {
-        SetupStep.readBefore ||
-        SetupStep.probing ||
-        SetupStep.turnOff ||
-        SetupStep.turnOn ||
-        SetupStep.readBoot =>
-          true,
-        SetupStep.done || SetupStep.failed => false,
-      };
-
   @override
   Widget build(BuildContext context) {
     // Watched, not read: it holds the notifier alive for as long as the
@@ -722,6 +698,9 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   }
 
   Widget _scaffold(ThemeData theme, BikeState bike, bool connected) {
+    final accent = getColor(bike.color).accent();
+    // The failure screen carries its reason, not a place in the flow.
+    final walking = _step != SetupStep.failed;
     return Scaffold(
       backgroundColor: SDSurface.page,
       appBar: AppBar(
@@ -744,6 +723,14 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                 ),
               ),
               const SizedBox(height: 16),
+              if (walking) ...[
+                _SegmentedProgressBar(
+                  key: const ValueKey('setupProgress'),
+                  value: _progressValue,
+                  accent: accent,
+                ),
+                const SizedBox(height: 20),
+              ],
               Expanded(
                 child: SingleChildScrollView(
                   child: Column(
@@ -766,21 +753,27 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                           ),
                         ),
                       ],
-                      if (_busy) ...[
+                      if (_step == SetupStep.probing && _progress != null) ...[
+                        const SizedBox(height: 20),
+                        _ProbeReadout(
+                          key: const ValueKey('setupReadout'),
+                          progress: _progress!,
+                        ),
+                      ],
+                      if (walking) ...[
                         const SizedBox(height: 24),
-                        const Center(
-                          child: SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
+                        _SetupChecklist(
+                          key: const ValueKey('setupChecklist'),
+                          current: _step.checklistIndex,
+                          accent: accent,
+                          onAccent: getColor(bike.color).onAccent(),
                         ),
                       ],
                     ],
                   ),
                 ),
               ),
-              ..._actions(connected),
+              ..._actions(accent, connected),
             ],
           ),
         ),
@@ -788,12 +781,27 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     );
   }
 
-  List<Widget> _actions(bool connected) => switch (_step) {
+  /// How far the whole flow is, from 0 to 1. The probe is the one step that
+  /// takes long enough to need a reading of its own; every other step moves the
+  /// bar by one line of [setupChecklist].
+  double get _progressValue {
+    final progress = _progress;
+    if (_step == SetupStep.probing && progress != null && progress.total > 0) {
+      final line = SetupStep.probing.checklistIndex;
+      return (line + progress.done / progress.total) / setupChecklist.length;
+    }
+    return _step.checklistIndex / setupChecklist.length;
+  }
+
+  List<Widget> _actions(Color accent, bool connected) => switch (_step) {
         // The first step waits for the bike as well, so a rider whose bike is
         // away needs the same manual way back the step after the power cycle
         // gives them.
         SetupStep.readBefore => [
-            if (!connected) ...[_connectButton(), const SizedBox(height: 8)],
+            if (!connected) ...[
+              _connectButton(accent),
+              const SizedBox(height: 8)
+            ],
             _secondary('Cancel', const ValueKey('setupCancel'), _cancel),
           ],
         SetupStep.turnOff || SetupStep.readBoot => [
@@ -810,16 +818,16 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                 _cancelPending ? null : _requestCancel),
           ],
         SetupStep.turnOn => [
-            _connectButton(),
+            _connectButton(accent),
             const SizedBox(height: 8),
             _secondary('Cancel', const ValueKey('setupCancel'), _cancel),
           ],
         SetupStep.done => [
-            _primary('Done', const ValueKey('setupDone'),
+            _primary('Done', const ValueKey('setupDone'), accent,
                 () => Navigator.of(context).maybePop()),
           ],
         SetupStep.failed => [
-            _primary('Try again', const ValueKey('setupRetry'), _run),
+            _primary('Try again', const ValueKey('setupRetry'), accent, _run),
             const SizedBox(height: 8),
             _secondary('Close', const ValueKey('setupClose'), _cancel),
           ],
@@ -827,18 +835,19 @@ class _SetupPageState extends ConsumerState<SetupPage> {
 
   /// The manual connect. It never consults the auto-reconnect setting, so it
   /// is the way back for a bike the app is not allowed to chase.
-  Widget _connectButton() =>
-      _primary('Connect', const ValueKey('setupConnect'), () {
+  Widget _connectButton(Color accent) =>
+      _primary('Connect', const ValueKey('setupConnect'), accent, () {
         ref.read(connectionHandlerProvider(widget.bikeID).notifier).connect();
       });
 
-  Widget _primary(String label, Key key, VoidCallback onPressed) =>
+  Widget _primary(
+          String label, Key key, Color accent, VoidCallback onPressed) =>
       ElevatedButton(
         key: key,
         onPressed: onPressed,
         style: ElevatedButton.styleFrom(
-          backgroundColor: const Color(0xff441DFC).withAlpha(51),
-          foregroundColor: const Color(0xff441DFC),
+          backgroundColor: accent.withAlpha(51),
+          foregroundColor: accent,
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
@@ -855,4 +864,178 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         ),
         child: Text(label),
       );
+}
+
+/// The steps of the flow as a list of marks: what is done, what runs now, and
+/// what is still to come. The rider can see the whole job at once, so a wizard
+/// that asks them to wait says what it is waiting for.
+class _SetupChecklist extends StatelessWidget {
+  const _SetupChecklist({
+    super.key,
+    required this.current,
+    required this.accent,
+    required this.onAccent,
+  });
+
+  /// The line the wizard is on. [setupChecklist].length means every line is
+  /// done.
+  final int current;
+  final Color accent;
+  final Color onAccent;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < setupChecklist.length; i++)
+          Padding(
+            key: ValueKey('setupChecklistRow:$i'),
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(
+              children: [
+                _mark(i, theme),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    setupChecklist[i],
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: i <= current ? SDSurface.text : SDSurface.muted,
+                      fontWeight:
+                          i == current ? FontWeight.w600 : FontWeight.w400,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// The round mark in front of a line: a check for a step that is done, the
+  /// step number for the one that runs and for the ones still to come.
+  Widget _mark(int index, ThemeData theme) {
+    final done = index < current;
+    final now = index == current;
+    return Container(
+      width: 22,
+      height: 22,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: done || now ? accent : Colors.transparent,
+        border: done || now ? null : Border.all(color: SDSurface.border),
+      ),
+      child: done
+          ? Icon(Icons.check, size: 14, color: onAccent)
+          : Text(
+              '${index + 1}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontSize: 12,
+                color: now ? onAccent : SDSurface.muted,
+              ),
+            ),
+    );
+  }
+}
+
+/// How far the whole flow is, as a row of segments. Segments rather than one
+/// bar: the flow moves in steps, and a rider can count what is left.
+class _SegmentedProgressBar extends StatelessWidget {
+  const _SegmentedProgressBar({
+    super.key,
+    required this.value,
+    required this.accent,
+  });
+
+  /// From 0 to 1.
+  final double value;
+  final Color accent;
+
+  static const _segments = 10;
+
+  @override
+  Widget build(BuildContext context) {
+    final filled = (value.clamp(0, 1) * _segments).round();
+    return Row(
+      children: [
+        for (var i = 0; i < _segments; i++) ...[
+          if (i > 0) const SizedBox(width: 3),
+          Expanded(
+            child: Container(
+              height: 4,
+              decoration: BoxDecoration(
+                color: i < filled ? accent : SDSurface.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// What the probe has accepted so far, one line per control. Monospace with
+/// tabular figures: the numbers change several times a second, and a line that
+/// moves sideways while it does is hard to read.
+class _ProbeReadout extends StatelessWidget {
+  const _ProbeReadout({super.key, required this.progress});
+
+  final ProbeProgress progress;
+
+  String get _modeLine {
+    final values = _values(progress.acceptedWires);
+    if (progress.phase != 'mode') {
+      return 'mode $values';
+    }
+    return 'mode $values · testing ${progress.done} of '
+        '${firmwareProfiles.length}';
+  }
+
+  String get _assistLine {
+    final values = _values(progress.acceptedAssist);
+    if (progress.phase != 'assist') {
+      return 'assist $values';
+    }
+    final done = progress.done - firmwareProfiles.length;
+    return 'assist $values · testing $done of 5';
+  }
+
+  String get _lightLine => switch (progress.lightAccepted) {
+        null => 'light testing',
+        true => 'light accepted',
+        false => 'light refused',
+      };
+
+  static String _values(List<int> values) =>
+      values.isEmpty ? '—' : values.join(' ');
+
+  @override
+  Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodySmall?.copyWith(
+      color: SDSurface.label,
+      fontFamily: 'monospace',
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: SDSurface.card,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(_modeLine, style: style),
+          const SizedBox(height: 4),
+          Text(_assistLine, style: style),
+          const SizedBox(height: 4),
+          Text(_lightLine, style: style),
+        ],
+      ),
+    );
+  }
 }

@@ -2560,6 +2560,8 @@ class SetupGateCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // The bike's own colour, like every other control on this page.
+    final accent = getColor(bike.color).accent();
     return Padding(
       key: const ValueKey('setupGate'),
       padding: const EdgeInsets.symmetric(vertical: 24),
@@ -2584,8 +2586,8 @@ class SetupGateCard extends StatelessWidget {
             onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
                 builder: (_) => SetupPage(bikeID: bike.id))),
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xff441DFC).withAlpha(51),
-              foregroundColor: const Color(0xff441DFC),
+              backgroundColor: accent.withAlpha(51),
+              foregroundColor: accent,
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),

@@ -203,6 +203,17 @@ void main() {
 
   bool textShown(String text) => find.text(text).evaluate().isNotEmpty;
 
+  /// Whether the step title reads [text]. The checklist shows the same words
+  /// for two of the steps, so a plain find.text would match a line the rider
+  /// has not reached.
+  bool titleIs(String text) {
+    final finder = find.byKey(const ValueKey('setupTitle'));
+    if (finder.evaluate().isEmpty) {
+      return false;
+    }
+    return (finder.evaluate().single.widget as Text).data == text;
+  }
+
   /// Pushes the wizard over an empty page, so its own pop has a route to land
   /// on — the way both entries reach it.
   ///
@@ -341,13 +352,92 @@ void main() {
     });
   });
 
+  group('the running screen', () {
+    Finder rowMark(int index, String text) => find.descendant(
+        of: find.byKey(ValueKey('setupChecklistRow:$index')),
+        matching: find.text(text));
+
+    testWidgets('shows every step of the checklist, and the mark advances',
+        (tester) async {
+      final container = ProviderContainer();
+      openBike(container);
+      await openWizard(tester, container);
+
+      final checklist = find.byKey(const ValueKey('setupChecklist'));
+      expect(checklist, findsOneWidget);
+      for (var i = 0; i < setupChecklist.length; i++) {
+        expect(find.byKey(ValueKey('setupChecklistRow:$i')), findsOneWidget);
+      }
+      expect(find.byKey(const ValueKey('setupProgress')), findsOneWidget);
+
+      await pumpUntil(tester, () => textShown('Testing the bike'));
+      expect(
+          find.descendant(
+              of: find.byKey(const ValueKey('setupChecklistRow:0')),
+              matching: find.byIcon(Icons.check)),
+          findsOneWidget,
+          reason: 'the read is done');
+      expect(rowMark(1, '2'), findsOneWidget,
+          reason: 'and the test is the line the rider is on');
+
+      await pumpUntil(tester, () => titleIs('Switch the bike off'));
+      expect(
+          find.descendant(
+              of: find.byKey(const ValueKey('setupChecklistRow:1')),
+              matching: find.byIcon(Icons.check)),
+          findsOneWidget);
+      expect(rowMark(2, '3'), findsOneWidget);
+
+      await closeWizard(tester);
+      container.dispose();
+    });
+
+    testWidgets('reads out what the probe accepted so far', (tester) async {
+      final slowHandler = _SlowConnectionHandler();
+      final container = ProviderContainer(overrides: [
+        connectionHandlerProvider(id).overrideWith(() => slowHandler),
+      ]);
+      openBike(container);
+      bootBike(container, light: false, assist: 0, wire: 0);
+      // Holds the sweep part-way through the wire loop, so the readout is read
+      // while the probe is genuinely still running.
+      slowHandler.pauseOnWrite = 8;
+      await openWizard(tester, container, settle: Duration.zero);
+
+      // Ticks up to the first report and stops there: pumpUntil's own trailing
+      // pump would carry the sweep past the frame this test is about.
+      final readout = find.byKey(const ValueKey('setupReadout'));
+      for (var i = 0; i < 1000 && readout.evaluate().isEmpty; i++) {
+        await tester.pump(const Duration(milliseconds: 10));
+      }
+      expect(readout, findsOneWidget);
+      expect(
+          find.descendant(of: readout, matching: find.textContaining('testing')),
+          findsWidgets,
+          reason: 'the rider sees which value the app is on');
+      expect(
+          find.descendant(of: readout, matching: find.textContaining('mode')),
+          findsOneWidget);
+      expect(
+          find.descendant(of: readout, matching: find.textContaining('assist')),
+          findsOneWidget);
+      expect(
+          find.descendant(of: readout, matching: find.textContaining('light')),
+          findsOneWidget);
+
+      slowHandler.resume.complete();
+      await closeWizard(tester);
+      container.dispose();
+    });
+  });
+
   group('the connection-wait steps', () {
     /// Runs the wizard as far as the power cycle: the probe is done, and the
     /// bike waits to be switched off.
     Future<void> reachTurnOff(
         WidgetTester tester, ProviderContainer container) async {
       await openWizard(tester, container);
-      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      await pumpUntil(tester, () => titleIs('Switch the bike off'));
     }
 
     testWidgets('the off hint appears only after its timeout', (tester) async {
@@ -379,7 +469,7 @@ void main() {
       await reachTurnOff(tester, container);
       setConnection(container, SDBluetoothConnectionState.disconnected);
       await pump(tester);
-      expect(find.text('Switch the bike on'), findsOneWidget);
+      expect(titleIs('Switch the bike on'), isTrue);
 
       await tester.pump(const Duration(seconds: 44));
       expect(find.byKey(const ValueKey('setupHint')), findsNothing);
@@ -492,7 +582,7 @@ void main() {
     Future<void> reachTurnOn(
         WidgetTester tester, ProviderContainer container) async {
       await openWizard(tester, container);
-      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      await pumpUntil(tester, () => titleIs('Switch the bike off'));
       setConnection(container, SDBluetoothConnectionState.disconnected);
       await pump(tester);
     }
@@ -506,7 +596,7 @@ void main() {
       ]);
       openBike(container);
       await reachTurnOn(tester, container);
-      expect(find.text('Switch the bike on'), findsOneWidget);
+      expect(titleIs('Switch the bike on'), isTrue);
 
       final afterArming = handler.connectCount;
       expect(afterArming, greaterThanOrEqualTo(1),
@@ -538,7 +628,7 @@ void main() {
       ]);
       openBike(container);
       await reachTurnOn(tester, container);
-      expect(find.text('Switch the bike on'), findsOneWidget);
+      expect(titleIs('Switch the bike on'), isTrue);
 
       await tester.pump(const Duration(seconds: 3));
       final beforeConnect = handler.connectCount;
@@ -570,7 +660,7 @@ void main() {
       ]);
       openBike(container, freshBike().copyWith(autoReconnect: false));
       await reachTurnOn(tester, container);
-      expect(find.text('Switch the bike on'), findsOneWidget);
+      expect(titleIs('Switch the bike on'), isTrue);
       expect(handler.debugAutoReconnect, isFalse,
           reason: 'sanity check: the bike record really did carry the '
               'setting through to the connection handler');
@@ -603,7 +693,7 @@ void main() {
       expect(container.read(bikeProvider(id)).capabilities, isNull,
           reason: 'nothing is saved before the power cycle');
 
-      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      await pumpUntil(tester, () => titleIs('Switch the bike off'));
       expect(container.read(bikeProvider(id)).capabilities, isNull,
           reason: 'the probe finished, but nothing is saved until done');
 
@@ -643,7 +733,7 @@ void main() {
       bootBike(container, light: false, assist: 0, wire: 4);
       await openWizard(tester, container);
 
-      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      await pumpUntil(tester, () => titleIs('Switch the bike off'));
       setConnection(container, SDBluetoothConnectionState.disconnected);
       await pump(tester);
       bootBike(container, light: false, assist: 0, wire: 4);
@@ -676,7 +766,7 @@ void main() {
       await openWizard(tester, container);
 
       // The probe already ran; the rider is asked for the power cycle.
-      await pumpUntil(tester, () => textShown('Switch the bike off'));
+      await pumpUntil(tester, () => titleIs('Switch the bike off'));
 
       final beforeCancel = store.writes.length;
       await tap(tester, 'setupCancel');
