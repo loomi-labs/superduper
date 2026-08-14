@@ -1004,24 +1004,32 @@ class Bike extends _$Bike {
           'boot wire $fallback');
       return fallback;
     }
+    final best = _mostLimitedWire(candidates);
+    if (best == fallback && candidates.length > 1) {
+      // The most-limited accepted wire happens to be the one the bike
+      // already booted on: parking there compares a byte against itself,
+      // which classifyCapabilityBoot can only read as "unusable/ambiguous".
+      // Mirrors the assist sweep's own coincidence check a few lines below —
+      // any other accepted, non-unlimited wire lets the second boot actually
+      // learn something. Which one it is still matters, so the same
+      // most-limited rule decides again over what is left: taking the first
+      // by wire index instead would park an accepted [2, 4, 5] booted on 4 on
+      // wire 2 (45 km/h) although wire 5 (35 km/h) is the safer of the two.
+      return _mostLimitedWire(
+          [for (final wire in candidates) if (wire != fallback) wire]);
+    }
+    return best;
+  }
+
+  /// The wire of [candidates] with the smallest [FirmwareProfile.capKmh].
+  /// Every candidate is a limited wire, so every cap is non-null.
+  int _mostLimitedWire(List<int> candidates) {
     var best = profileByWire(candidates.first);
     for (final wire in candidates.skip(1)) {
       final profile = profileByWire(wire);
       if (profile.capKmh! < best.capKmh!) {
         best = profile;
       }
-    }
-    if (best.wire == fallback && candidates.length > 1) {
-      // The most-limited accepted wire happens to be the one the bike
-      // already booted on: parking there compares a byte against itself,
-      // which classifyCapabilityBoot can only read as "unusable/ambiguous".
-      // Mirrors the assist sweep's own coincidence check a few lines below —
-      // any other accepted, non-unlimited wire lets the second boot actually
-      // learn something. Which one does not matter here: the loop above
-      // already chose "most limited" for safety, and this tie-break is
-      // purely about maximizing what the two-boot comparison can learn, a
-      // secondary concern to safety.
-      return candidates.firstWhere((wire) => wire != fallback);
     }
     return best.wire;
   }

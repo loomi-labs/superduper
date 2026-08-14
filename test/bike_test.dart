@@ -3133,6 +3133,36 @@ void main() {
     });
 
     test(
+        'the safe wire tie-break takes the next-most-limited wire, not the '
+        'lowest one', () async {
+      final store = _LimitedWireStore(const {2, 4, 5});
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // The register has to start on the boot wire the probe is told about:
+      // this store keeps the wire it already holds when a write names a wire
+      // it refuses, so a register left on wire 0 would make the sweep's own
+      // wire-0 step read back as accepted.
+      setBikeWire(container, 4);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+
+      final caps = await bike.probeCapabilities(
+          const LastSeen(assist: 0, light: false, wire: 4));
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, [2, 4, 5]);
+      expect(bikeWire(container), 5,
+          reason: 'wire 4 (25 km/h) is the most limited accepted wire, but it '
+              'is also the boot wire, so the sweep has to park somewhere '
+              'else. Wire 5 caps at 35 km/h and wire 2 at 45, so wire 5 is '
+              'the safer of the two for a bike the rider switches on next');
+    });
+
+    test(
         'the safe wire stays on the boot wire when there is no other '
         'accepted wire to prefer', () async {
       final store = _LimitedWireStore(const {0});
