@@ -138,69 +138,42 @@ typedef ProbeProgress = ({
   bool? lightAccepted,
 });
 
-/// What a two-boot capability probe says a byte does on power-on.
+/// What a capability probe says a byte does on power-on.
 ///
-/// The setup wizard drives three points on each byte: [bootA] (the first
-/// boot read), [parting] (where the probe's own sweep left the byte) and
-/// [bootB] (the second boot read). A boot that disagrees with [bootA] might
-/// mean "the firmware reset this byte" or it might just mean "the probe's
-/// own write survived the power cycle" — telling those apart needs
-/// [parting], which is why this comparison needs three points and not two.
+/// The setup wizard drives two points on each byte: [parting] (where the
+/// probe's own sweep left the byte, read on the settled connection) and [bootB]
+/// (the read after the one power cycle). The rider is told not to touch the
+/// bike between the two, so every difference belongs to the firmware.
 ///
 /// A byte classifies as follows:
-/// - [bootA] and [bootB] agree, and differ from [parting]: the firmware
-///   resets it to that fixed value on every boot, independent of what was
-///   last written — that value enters the signature.
-/// - [bootA], [bootB] and [parting] all agree: ambiguous. Either the byte
-///   always resets to a value that happens to equal what the probe left
-///   there, or it never resets at all. Treated as unusable, `null` — the
-///   same conservative reading a one-boot measurement would give
-///   "unusable, never unknown". This is also the outcome for a byte the
-///   probe never moved away from [bootA] at all (`parting == bootA`), which
-///   is exactly what "not writable" looks like here.
-/// - [bootA] and [bootB] disagree: should not happen on real firmware — the
-///   fixed reset value would have to have changed between the two boots.
-///   Treated as unusable rather than picking one of the two arbitrarily, and
-///   logged at warning level as evidence something is off.
+/// - [parting] and [bootB] differ: the firmware reset the byte, and the value
+///   it came up with enters the signature.
+/// - [parting] and [bootB] agree: ambiguous. Either the byte kept the probe's
+///   own value, or it reset onto exactly that value — the two cannot be told
+///   apart from one boot. Treated as unusable, `null`, which is the
+///   conservative reading: a missing byte costs power-cycle detection, a wrong
+///   one would cost a rider their pins. This is also the outcome for a byte the
+///   probe could never move, which is what "not writable" looks like here.
 ///
 /// The returned signature's [BootSignature.preOffWire]/
-/// [BootSignature.preOffAssist] name [bootA] — the FIRST boot, not the
-/// probe's parting state. Callers should read `preOffWire`/`preOffAssist`
-/// as "what boot A reported", not "what was staged".
+/// [BootSignature.preOffAssist] name [parting] — where the probe left the bike,
+/// not a boot read.
 BootSignature classifyCapabilityBoot({
-  required ({bool light, int assist, int wire}) bootA,
   required ({bool light, int assist, int wire}) parting,
   required ({bool light, int assist, int wire}) bootB,
   required DateTime measuredAt,
 }) {
-  int? classifyByte(String name, int a, int p, int b) {
-    if (a != b) {
-      log.w(SDLogger.bike,
-          'Capability boot: $name disagreed between the two boots '
-          '($a then $b, parting was $p)');
-      return null;
-    }
-    return a == p ? null : a;
-  }
+  int? classifyByte(int p, int b) => p == b ? null : b;
 
-  bool? classifyLight(bool a, bool p, bool b) {
-    if (a != b) {
-      log.w(SDLogger.bike,
-          'Capability boot: light disagreed between the two boots '
-          '($a then $b, parting was $p)');
-      return null;
-    }
-    return a == p ? null : a;
-  }
+  bool? classifyLight(bool p, bool b) => p == b ? null : b;
 
   return BootSignature(
     measuredAt: measuredAt,
-    bootWire: classifyByte('wire', bootA.wire, parting.wire, bootB.wire),
-    bootAssist:
-        classifyByte('assist', bootA.assist, parting.assist, bootB.assist),
-    bootLight: classifyLight(bootA.light, parting.light, bootB.light),
-    preOffWire: bootA.wire,
-    preOffAssist: bootA.assist,
+    bootWire: classifyByte(parting.wire, bootB.wire),
+    bootAssist: classifyByte(parting.assist, bootB.assist),
+    bootLight: classifyLight(parting.light, bootB.light),
+    preOffWire: parting.wire,
+    preOffAssist: parting.assist,
   );
 }
 
@@ -1372,23 +1345,21 @@ class Bike extends _$Bike {
     }
   }
 
-  /// Classifies [bootA]/[parting]/[bootB] via [classifyCapabilityBoot],
-  /// applies the detected region if there is one, and saves [capabilities]
-  /// and the resulting [BootSignature] on this bike's record in one write —
-  /// never two separate saves, so a rider who quits the app between them
-  /// cannot end up with capabilities recorded but no signature, or the wrong
-  /// region applied without the capabilities that justified it.
+  /// Classifies [parting]/[bootB] via [classifyCapabilityBoot], applies the
+  /// detected region if there is one, and saves [capabilities] and the
+  /// resulting [BootSignature] on this bike's record in one write — never two
+  /// separate saves, so a rider who quits the app between them cannot end up
+  /// with capabilities recorded but no signature, or the wrong region applied
+  /// without the capabilities that justified it.
   ///
   /// App data, not bike data: it goes out through the same `saveToBike:
   /// false` path a padlock takes, so nothing here reaches the bike.
   BootSignature saveCapabilities({
     required BikeCapabilities capabilities,
-    required LastSeen bootA,
     required LastSeen parting,
     required LastSeen bootB,
   }) {
     final signature = classifyCapabilityBoot(
-      bootA: (light: bootA.light, assist: bootA.assist, wire: bootA.wire),
       parting: (light: parting.light, assist: parting.assist, wire: parting.wire),
       bootB: (light: bootB.light, assist: bootB.assist, wire: bootB.wire),
       measuredAt: DateTime.now(),

@@ -1193,15 +1193,14 @@ void main() {
     });
 
     /// Gives the bike the signature the setup wizard leaves behind on the
-    /// 2026-08-11 hardware: the wire byte resets to [bootWire] on both boots,
-    /// and the assist byte comes back exactly as the probe's own parting
-    /// value, so it is unusable. Built through [classifyCapabilityBoot]
-    /// rather than a direct [BootSignature], so this stays a faithful stand-in
-    /// for what the real two-boot wizard would save.
+    /// 2026-08-11 hardware: the wire byte comes back as [bootWire] whatever the
+    /// probe parked it on, and the assist byte comes back exactly as the probe's
+    /// own parting value, so it is unusable. Built through
+    /// [classifyCapabilityBoot] rather than a direct [BootSignature], so this
+    /// stays a faithful stand-in for what the real wizard would save.
     Future<void> calibrate(Bike bike, ProviderContainer container,
         {required int preOffWire, required int bootWire}) async {
       final signature = classifyCapabilityBoot(
-          bootA: (light: false, assist: 2, wire: bootWire),
           parting: (light: false, assist: 2, wire: preOffWire),
           bootB: (light: false, assist: 2, wire: bootWire),
           measuredAt: DateTime(2026, 8, 11));
@@ -2615,56 +2614,45 @@ void main() {
             {bool light = false, int assist = 0, int wire = 0}) =>
         (light: light, assist: assist, wire: wire);
 
-    test('a byte that resets to a fixed value enters the signature', () {
+    test('a byte the boot moves off the parting value enters the signature',
+        () {
       final signature = classifyCapabilityBoot(
-          bootA: triple(wire: 4, assist: 0, light: false),
           parting: triple(wire: 2, assist: 3, light: true),
           bootB: triple(wire: 4, assist: 0, light: false),
           measuredAt: at);
       expect(signature.bootWire, 4);
       expect(signature.bootAssist, 0);
       expect(signature.bootLight, isFalse);
-      expect(signature.preOffWire, 4,
-          reason: 'preOffWire names boot A, the first boot');
-      expect(signature.preOffAssist, 0);
+      expect(signature.preOffWire, 2,
+          reason: 'preOffWire names the parting state');
+      expect(signature.preOffAssist, 3);
     });
 
-    test('a byte that keeps the probe value persists, so it stays null', () {
+    test('a byte that comes back on the parting value stays null', () {
       final signature = classifyCapabilityBoot(
-          bootA: triple(wire: 4, assist: 0, light: false),
           parting: triple(wire: 2, assist: 3, light: true),
           bootB: triple(wire: 2, assist: 3, light: true),
           measuredAt: at);
       expect(signature.bootWire, isNull);
       expect(signature.bootAssist, isNull);
       expect(signature.bootLight, isNull);
+      expect(signature.preOffWire, 2);
+      expect(signature.preOffAssist, 3);
     });
 
-    test('all three points equal is ambiguous, so it stays null', () {
+    test('one byte can reset while another keeps its value', () {
       final signature = classifyCapabilityBoot(
-          bootA: triple(wire: 4, assist: 0, light: false),
-          parting: triple(wire: 4, assist: 0, light: false),
-          bootB: triple(wire: 4, assist: 0, light: false),
-          measuredAt: at);
-      expect(signature.bootWire, isNull);
-      expect(signature.bootAssist, isNull);
-      expect(signature.bootLight, isNull);
-    });
-
-    test('the two boots disagreeing is unusable too', () {
-      final signature = classifyCapabilityBoot(
-          bootA: triple(wire: 4, assist: 0, light: false),
           parting: triple(wire: 2, assist: 3, light: true),
-          bootB: triple(wire: 5, assist: 1, light: true),
+          bootB: triple(wire: 4, assist: 3, light: true),
           measuredAt: at);
-      expect(signature.bootWire, isNull);
-      expect(signature.bootAssist, isNull);
+      expect(signature.bootWire, 4);
+      expect(signature.bootAssist, isNull,
+          reason: 'the assist came back as the probe left it');
       expect(signature.bootLight, isNull);
     });
   });
 
   group('saveCapabilities', () {
-    const bootA = LastSeen(assist: 0, light: false, wire: 0);
     const parting = LastSeen(assist: 3, light: true, wire: 2);
     const bootB = LastSeen(assist: 0, light: false, wire: 0);
 
@@ -2693,10 +2681,7 @@ void main() {
       await settle();
 
       bike.saveCapabilities(
-          capabilities: euCapabilities,
-          bootA: bootA,
-          parting: parting,
-          bootB: bootB);
+          capabilities: euCapabilities, parting: parting, bootB: bootB);
       await settle();
 
       final saved = container.read(bikeProvider(id));
@@ -2726,10 +2711,7 @@ void main() {
       await settle();
 
       bike.saveCapabilities(
-          capabilities: euCapabilities,
-          bootA: bootA,
-          parting: parting,
-          bootB: bootB);
+          capabilities: euCapabilities, parting: parting, bootB: bootB);
       await settle();
 
       final saved = container.read(bikeProvider(id));
@@ -2793,7 +2775,7 @@ void main() {
   });
 
   group('probeCapabilities', () {
-    const bootA = LastSeen(assist: 0, light: false, wire: 5);
+    const baseline = LastSeen(assist: 0, light: false, wire: 5);
 
     test('a bike that accepts everything reports full capabilities',
         () async {
@@ -2806,7 +2788,7 @@ void main() {
       // the wizard's calibration window exists to suppress in production.
       bike.setCalibrating(true);
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNotNull);
       expect(caps!.acceptedWires, List.generate(8, (i) => i));
@@ -2827,7 +2809,7 @@ void main() {
       bike.setCalibrating(true);
 
       final reports = <ProbeProgress>[];
-      final caps = await bike.probeCapabilities(bootA, onProgress: reports.add);
+      final caps = await bike.probeCapabilities(baseline, onProgress: reports.add);
 
       expect(caps, isNotNull);
       expect(reports, hasLength(firmwareProfiles.length + 5 + 1),
@@ -2876,7 +2858,7 @@ void main() {
       // mid-sweep without this.
       bike.setCalibrating(true);
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNotNull);
       expect(caps!.acceptedWires, [5]);
@@ -2917,7 +2899,7 @@ void main() {
       // See the first probeCapabilities test above.
       bike.setCalibrating(true);
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNotNull);
       expect(caps!.lightWritable, isFalse);
@@ -2934,7 +2916,7 @@ void main() {
       // See the first probeCapabilities test above.
       bike.setCalibrating(true);
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNotNull);
       final lastWire = store.writes.last[4];
@@ -2955,12 +2937,12 @@ void main() {
       // See the first probeCapabilities test above.
       bike.setCalibrating(true);
 
-      await expectLater(bike.probeCapabilities(bootA), throwsException);
+      await expectLater(bike.probeCapabilities(baseline), throwsException);
 
       final lastWire = store.writes.last[4];
       expect(lastWire, isNot(3));
       expect(lastWire, isNot(7));
-      expect(lastWire, bootA.wire,
+      expect(lastWire, baseline.wire,
           reason: 'the finally block parks on the boot wire it started from');
     });
 
@@ -2978,7 +2960,7 @@ void main() {
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
       bike.setCalibrating(true);
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNotNull);
       expect(caps!.acceptedWires, List.generate(8, (i) => i));
@@ -3014,11 +2996,10 @@ void main() {
 
       // A boot signature left by an earlier setup run: this bike resets to
       // wire 6 on power-on. The probe's own wire sweep tries wire 6 first —
-      // it starts one past the boot wire it is given (5) — with bootA's own
-      // assist/light held, unchanged: the exact transient the old bug let the
-      // poll misread as a real second power cycle.
+      // it starts one past the baseline wire it is given (5) — with the
+      // baseline's own assist/light held, unchanged: the exact transient the
+      // old bug let the poll misread as a real second power cycle.
       final signature = classifyCapabilityBoot(
-          bootA: (light: false, assist: 2, wire: 6),
           parting: (light: false, assist: 2, wire: 5),
           bootB: (light: false, assist: 2, wire: 6),
           measuredAt: DateTime(2026, 8, 11));
@@ -3121,7 +3102,7 @@ void main() {
       container.read(fakeBikeStoreProvider).setSpeed(id, 20);
       await settle();
 
-      expect(await bike.probeCapabilities(bootA), isNull);
+      expect(await bike.probeCapabilities(baseline), isNull);
     });
 
     test('refuses while disconnected', () async {
@@ -3132,7 +3113,7 @@ void main() {
       container.read(connectionHandlerProvider(id).notifier).state =
           SDBluetoothConnectionState.disconnected;
 
-      expect(await bike.probeCapabilities(bootA), isNull);
+      expect(await bike.probeCapabilities(baseline), isNull);
     });
 
     test('a mid-sweep disconnect aborts the sweep instead of scoring every '
@@ -3159,7 +3140,7 @@ void main() {
             SDBluetoothConnectionState.disconnected;
       };
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNull,
           reason: 'a probe that could not finish must report that it could '
@@ -3183,14 +3164,14 @@ void main() {
       // See the first probeCapabilities test above.
       bike.setCalibrating(true);
 
-      await expectLater(bike.probeCapabilities(bootA), throwsException);
+      await expectLater(bike.probeCapabilities(baseline), throwsException);
 
-      expect(bikeWire(container), bootA.wire,
+      expect(bikeWire(container), baseline.wire,
           reason: 'the old wire-only safety net already covered this');
-      expect(bikeAssist(container), bootA.assist,
+      expect(bikeAssist(container), baseline.assist,
           reason: 'the assist level the sweep left behind must be restored '
               'too, not just the wire');
-      expect(bikeLight(container), bootA.light ? 1 : 0);
+      expect(bikeLight(container), baseline.light ? 1 : 0);
     });
 
     test(
@@ -3198,7 +3179,7 @@ void main() {
         'not just the wire', () async {
       // 8 wire + 1 safe-wire settle + 5 assist + 1 parting assist lands write
       // 16 on the light test itself, the sweep's very last step. The parting
-      // assist write is always made now: the assist loop probes bootA.assist
+      // assist write is always made now: the assist loop probes baseline.assist
       // last, so the value the sweep ends on always coincides with the boot
       // value.
       final store = _CountingFlakyStore(failOnWrite: 16);
@@ -3211,11 +3192,11 @@ void main() {
       // See the first probeCapabilities test above.
       bike.setCalibrating(true);
 
-      await expectLater(bike.probeCapabilities(bootA), throwsException);
+      await expectLater(bike.probeCapabilities(baseline), throwsException);
 
-      expect(bikeWire(container), bootA.wire);
-      expect(bikeAssist(container), bootA.assist);
-      expect(bikeLight(container), bootA.light ? 1 : 0,
+      expect(bikeWire(container), baseline.wire);
+      expect(bikeAssist(container), baseline.assist);
+      expect(bikeLight(container), baseline.light ? 1 : 0,
           reason: 'the light the sweep flipped for its own test must be '
               'restored too, not just the wire');
     });
@@ -3320,7 +3301,7 @@ void main() {
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
       // Only the probe's own writes are laggy: the setup above must land
-      // normally, or bootA would not describe the register it actually
+      // normally, or baseline would not describe the register it actually
       // seeded.
       store.armed = true;
       // See the first probeCapabilities test above: a several-second sweep
@@ -3328,7 +3309,7 @@ void main() {
       // actually runs this in production.
       bike.setCalibrating(true);
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNotNull);
       expect(caps!.acceptedWires, List.generate(8, (i) => i),
@@ -3362,13 +3343,13 @@ void main() {
       final bike = await openBike(container,
           region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
       // Only the probe's own writes ride the store's own schedule: the setup
-      // above must land normally, or bootA would not describe the register
+      // above must land normally, or baseline would not describe the register
       // it actually seeded.
       store.armed = true;
       // See the first probeCapabilities test above.
       bike.setCalibrating(true);
 
-      final caps = await bike.probeCapabilities(bootA);
+      final caps = await bike.probeCapabilities(baseline);
 
       expect(caps, isNotNull);
       expect(caps!.acceptedWires, List.generate(8, (i) => i),
@@ -3492,7 +3473,7 @@ void main() {
       bike.setCalibrating(true);
 
       final caps = await bike
-          .probeCapabilities(bootA)
+          .probeCapabilities(baseline)
           .timeout(const Duration(seconds: 20));
 
       expect(caps, isNotNull);

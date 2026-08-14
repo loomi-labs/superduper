@@ -603,10 +603,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     // quits between two separate saves could never end up with capabilities
     // recorded but no signature, or vice-versa.
     final signature = _bike.saveCapabilities(
-        capabilities: _capabilities!,
-        bootA: _bootA!,
-        parting: _parting!,
-        bootB: _bootB!);
+        capabilities: _capabilities!, parting: _parting!, bootB: _bootB!);
     // The result is kept, so the parking values are not something to undo: the
     // rider power-cycled the bike after them anyway, and the ordinary control
     // loop takes the bike from here the moment the window closes.

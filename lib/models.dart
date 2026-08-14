@@ -611,17 +611,21 @@ abstract class LastSeen with _$LastSeen {
 /// Measured once, per bike: the firmware decides which bytes reset and which
 /// come back unchanged, and that answer differs by region and by version. A
 /// null byte here is a byte that came back unchanged during calibration —
-/// it carries no boot news, so detection must ignore it. The staged pre-off
-/// values stay so a later audit can tell what the measurement compared
-/// against.
+/// it carries no boot news, so detection must ignore it.
 ///
-/// [bootLight] is populated only by the two-boot setup wizard's own
-/// classifier (`classifyCapabilityBoot` in `bike.dart`), which deliberately
-/// drives light away from its boot value before the second boot, making a
-/// real measurement possible. The old one-boot guide this superseded never
-/// moved light on purpose, so a single boot read of it proved nothing, and
-/// its register value was untrustworthy on its own — [bootLight] simply
-/// stayed null for every bike that flow measured.
+/// [preOffWire] and [preOffAssist] hold what the bike carried into the power
+/// cycle — the state the setup probe parked it on — so a later audit can tell
+/// what the measurement compared against. Construction data only: nothing in
+/// the app reads them, and only [bootWire], [bootAssist] and [bootLight] answer
+/// whether a bike was power-cycled.
+///
+/// [bootLight] is populated only by the setup wizard's own classifier
+/// (`classifyCapabilityBoot` in `bike.dart`), which deliberately drives light
+/// away from its parked value before the boot, making a real measurement
+/// possible. The old one-boot guide this superseded never moved light on
+/// purpose, so a single boot read of it proved nothing, and its register value
+/// was untrustworthy on its own — [bootLight] simply stayed null for every bike
+/// that flow measured.
 @freezed
 abstract class BootSignature with _$BootSignature {
   const factory BootSignature({
