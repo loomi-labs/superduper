@@ -120,34 +120,87 @@ Future<List<BikeState>> _readBikes() async {
 
 @Riverpod(keepAlive: true)
 class BikesDB extends _$BikesDB {
+  /// Completes when bikes.json has landed in [state].
+  final Completer<void> _load = Completer<void>();
+
+  /// The mutations the app made before bikes.json landed.
+  ///
+  /// [state] is empty until the file lands, and a save persists the whole list.
+  /// So a mutation in that window would write the file from an incomplete list
+  /// and drop every bike the file still holds. The app queues the mutation here
+  /// and replays it on top of the loaded list instead.
+  final List<void Function(List<BikeState>)> _pending = [];
+
+  /// True after bikes.json has landed. Until then the list is incomplete.
+  bool get isLoaded => _load.isCompleted;
+
+  /// Completes when bikes.json has landed.
+  Future<void> get ready => _load.future;
+
   @override
   List<BikeState> build() {
     _readBikes().then((bikes) {
-      if (ref.mounted) state = bikes;
+      final merged = [...bikes];
+      for (final op in _pending) {
+        op(merged);
+      }
+      final replayed = _pending.length;
+      _pending.clear();
+      if (ref.mounted) state = merged;
+      if (!_load.isCompleted) _load.complete();
+      // One write for the whole replay: the queued mutations were never
+      // persisted, because the list they ran on was incomplete.
+      if (replayed > 0) {
+        log.i(SDLogger.db, 'Replayed $replayed mutations on the loaded bikes');
+        _writeBikes(merged);
+      }
     });
     return [];
   }
 
-  void saveBike(BikeState bike) {
+  /// Marks the load as done. For tests that seed [state] by hand.
+  @visibleForTesting
+  void debugMarkLoaded() {
+    if (!_load.isCompleted) _load.complete();
+  }
+
+  /// Applies [op] to the bike list and persists the result.
+  ///
+  /// Before bikes.json lands, the app queues [op] for the replay in [build]
+  /// instead of persisting an incomplete list.
+  void _mutate(void Function(List<BikeState>) op) {
     // Assign a new list: riverpod compares by identity, so mutating the
     // current list in place would not notify watchers.
     final bikes = [...state];
-    final index = bikes.indexWhere((element) => element.id == bike.id);
-    if (index == -1) {
-      bikes.add(bike);
-      log.i(SDLogger.db, 'Added new bike: ${bike.name}');
-    } else {
-      bikes[index] = bike;
-      log.d(SDLogger.db, 'Updated bike: ${bike.name}');
-    }
+    op(bikes);
     state = bikes;
-    _writeBikes(state);
+    if (isLoaded) {
+      _writeBikes(state);
+    } else {
+      _pending.add(op);
+    }
+  }
+
+  void saveBike(BikeState bike) {
+    // Logged out here, not in the operation: a replay must not log twice.
+    if (state.any((element) => element.id == bike.id)) {
+      log.d(SDLogger.db, 'Updated bike: ${bike.name}');
+    } else {
+      log.i(SDLogger.db, 'Added new bike: ${bike.name}');
+    }
+    _mutate((bikes) {
+      final index = bikes.indexWhere((element) => element.id == bike.id);
+      if (index == -1) {
+        bikes.add(bike);
+      } else {
+        bikes[index] = bike;
+      }
+    });
   }
 
   void deleteBike(BikeState bike) {
-    state = [...state]..removeWhere((element) => element.id == bike.id);
     log.i(SDLogger.db, 'Deleted bike: ${bike.name}');
-    _writeBikes(state);
+    _mutate((bikes) => bikes.removeWhere((element) => element.id == bike.id));
   }
 
   BikeState? getBike(String id) {

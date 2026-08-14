@@ -129,6 +129,69 @@ void main() {
             'the next save would persist that over every bike');
   });
 
+  /// Writes [bikes] to bikes.json, as a previous run left them.
+  void seedBikes(List<BikeState> bikes) {
+    File('${tempDir.path}/bikes.json').writeAsStringSync(jsonEncode(bikes));
+  }
+
+  test('a delete before the load keeps the other bike', () async {
+    final one = BikeState.defaultState('fa:ke:01:02:03:04');
+    final two = BikeState.defaultState('fa:ke:05:06:07:08');
+    seedBikes([one, two]);
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    // The first read starts the file read. The delete lands before the file
+    // does, so the list the delete works on is still empty.
+    final db = container.read(bikesDBProvider.notifier);
+    expect(container.read(bikesDBProvider), isEmpty);
+    db.deleteBike(one);
+
+    await db.ready;
+    expect(container.read(bikesDBProvider), [two],
+        reason: 'a delete before the load must not drop the other bike');
+
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(await readBikes(), [two],
+        reason: 'the file must keep the other bike too');
+  });
+
+  test('a save before the load keeps the bike the file holds', () async {
+    final stored = BikeState.defaultState('fa:ke:01:02:03:04');
+    final fresh = BikeState.defaultState('fa:ke:05:06:07:08');
+    seedBikes([stored]);
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    final db = container.read(bikesDBProvider.notifier);
+    expect(container.read(bikesDBProvider), isEmpty);
+    db.saveBike(fresh);
+
+    await db.ready;
+    expect(container.read(bikesDBProvider), [stored, fresh],
+        reason: 'a save before the load must not drop the stored bike');
+
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(await readBikes(), [stored, fresh],
+        reason: 'the file must hold both bikes');
+  });
+
+  test('isLoaded turns true when the file lands', () async {
+    seedBikes([BikeState.defaultState('fa:ke:01:02:03:04')]);
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    final db = container.read(bikesDBProvider.notifier);
+    expect(db.isLoaded, isFalse,
+        reason: 'the file read has not landed on the first read');
+
+    await db.ready;
+    expect(db.isLoaded, isTrue);
+  });
+
   test('overlapping saves do not race each other through the temp file',
       () async {
     final container = ProviderContainer();
