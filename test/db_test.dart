@@ -69,8 +69,7 @@ void main() {
   Future<List<BikeState>> readBikes() async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
-    container.read(bikesDBProvider);
-    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await container.read(bikesDBProvider.notifier).ready;
     return container.read(bikesDBProvider);
   }
 
@@ -100,7 +99,11 @@ void main() {
     addTearDown(container.dispose);
 
     final bike = BikeState.defaultState('fa:ke:01:02:03:04');
-    container.read(bikesDBProvider.notifier).saveBike(bike);
+    final db = container.read(bikesDBProvider.notifier);
+    db.saveBike(bike);
+    // A save made before the file has landed is replayed on the loaded list,
+    // and only then written. So the write starts once the load is done.
+    await db.ready;
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     expect(await readBikes(), [bike]);
@@ -119,7 +122,9 @@ void main() {
     addTearDown(container.dispose);
 
     final bike = BikeState.defaultState('fa:ke:01:02:03:04');
-    container.read(bikesDBProvider.notifier).saveBike(bike);
+    final db = container.read(bikesDBProvider.notifier);
+    db.saveBike(bike);
+    await db.ready;
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     expect(await readBikes(), [bike]);
@@ -204,6 +209,7 @@ void main() {
     final second = first.copyWith(name: 'Second');
     db.saveBike(first);
     db.saveBike(second);
+    await db.ready;
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     expect(await readBikes(), [second],
