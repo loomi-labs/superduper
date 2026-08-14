@@ -259,6 +259,14 @@ class Bike extends _$Bike {
   static const _probeSettle = Duration(milliseconds: 250);
   static const _probeMaxAttempts = 6;
 
+  /// How long after a settings write the register can still answer with the
+  /// value that write replaced. See [_withoutStaleEcho].
+  ///
+  /// Derived from the probe's own budget instead of a second constant: that
+  /// budget is what a real device needed to show a write (see [_probeSettle]),
+  /// so the app cannot assume the register is any faster here either.
+  static final _registerLag = _probeSettle * _probeMaxAttempts;
+
   Timer? _updateDebounce;
   Timer? _updateTimer;
 
@@ -291,6 +299,18 @@ class Bike extends _$Bike {
   /// valid settings read and from every successful write (the bike echoes a
   /// write into the register). Fallback when a compose read fails.
   ({bool light, int assist})? _lastKnown;
+
+  /// The last settings packet this notifier put on the bike: what the register
+  /// held [before] it (null while the app had never read or written the bike),
+  /// what it [wrote], and [at] which time. Null until the first write.
+  ///
+  /// Kept for [_withoutStaleEcho], which needs all three to tell a stale
+  /// readback from a handlebar change.
+  ({
+    ({bool light, int assist})? before,
+    ({bool light, int assist}) wrote,
+    DateTime at
+  })? _lastWrite;
 
   /// Whether the one-off work of entering a speed-switching mode has been done
   /// for the mode that is active now, so rebuilds and repeated writes do not
@@ -1250,6 +1270,41 @@ class Bike extends _$Bike {
     return pin != PinState.locked;
   }
 
+  /// [fresh] with every field the register can only be echoing back replaced
+  /// by the value the app itself last wrote.
+  ///
+  /// The bike applies a settings write on its own internal cycle, up to about
+  /// a second after the BLE ack — the same lag [_probeWriteRead] polls out. A
+  /// read taken inside [_registerLag] can still return the value that write
+  /// replaced, and composing from it reverts the rider: toggle the light, tap
+  /// an assist level inside the window, and the assist write puts the old
+  /// light back on the bike.
+  ///
+  /// Per field, and only for the exact value the last write replaced. A
+  /// handlebar change made in the same window shows a third value, so it still
+  /// reaches the packet — that is what the read is for. Skipping the read
+  /// altogether while the window is open would be worse than the bug it fixes:
+  /// a speed-switching mode writes every few hundred ms, which would hold the
+  /// window open for a whole ride and undo every handlebar change.
+  ({bool light, int assist}) _withoutStaleEcho(
+      ({bool light, int assist}) fresh) {
+    final last = _lastWrite;
+    final before = last?.before;
+    if (last == null ||
+        before == null ||
+        DateTime.now().difference(last.at) > _registerLag) {
+      return fresh;
+    }
+    return (
+      light: fresh.light == before.light && before.light != last.wrote.light
+          ? last.wrote.light
+          : fresh.light,
+      assist: fresh.assist == before.assist && before.assist != last.wrote.assist
+          ? last.wrote.assist
+          : fresh.assist,
+    );
+  }
+
   /// Rider-owned packet fields, per the priority in [writeStateData].
   ({bool light, int assist}) _composePacket(BikeState bike,
       Set<PacketField> authoritative, ({bool light, int assist})? fresh) {
@@ -1355,7 +1410,7 @@ class Bike extends _$Bike {
           if (needsFreshRead) {
             final read = await repo.read();
             if (read != null && isSettingsPacket(read)) {
-              fresh = (light: read[4] == 1, assist: read[2]);
+              fresh = _withoutStaleEcho((light: read[4] == 1, assist: read[2]));
               _lastKnown = fresh;
             } else {
               _logW('Composing from cache, bad read: $read');
@@ -1383,8 +1438,12 @@ class Bike extends _$Bike {
         _writing = false;
         return;
       }
-      // The bike echoes a write into its register, so this is bike truth too.
-      _lastKnown = (light: newState.light, assist: newState.assist);
+      // The bike echoes a write into its register, so this is bike truth too —
+      // but only once the register has applied the write, which is why the
+      // value it replaced is kept alongside it. See [_withoutStaleEcho].
+      final wrote = (light: newState.light, assist: newState.assist);
+      _lastWrite = (before: _lastKnown, wrote: wrote, at: DateTime.now());
+      _lastKnown = wrote;
       // The bike may have been deleted while the write was in flight; saving
       // now would bring it back.
       if (!ref.mounted || _deleted) {

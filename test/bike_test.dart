@@ -1913,6 +1913,38 @@ void main() {
       expect(container.read(bikeProvider(id)).light, isTrue);
     });
 
+    test('an assist tap right after a light toggle keeps the new light',
+        () async {
+      // The bike's settings register applies a write on its own internal
+      // cycle, up to about a second after the BLE ack — see
+      // _OwnScheduleFirmwareStore and the device log it comes from. The assist
+      // write below composes its light byte from a read taken inside that
+      // window, so that read still shows the light the toggle just replaced,
+      // and writing it back reverts the rider's own previous tap.
+      final store = _OwnScheduleFirmwareStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container, region: BikeRegion.ch);
+      // Only the two taps below ride the store's own schedule: the setup write
+      // has to land at once, or the light the toggle flips is not known.
+      store.armed = true;
+
+      bike.toggleLight();
+      await settle();
+      bike.setAssist(1);
+      await settle();
+      // Long enough for the store's own tick to commit the last write.
+      await Future<void>.delayed(store.tick * 2);
+
+      expect(bikeAssist(container), 1, reason: 'the tap the rider just made');
+      expect(bikeLight(container), 1,
+          reason: 'the light the rider set one tap earlier has to survive: '
+              'the assist write must not compose it from a read the register '
+              'has not applied the toggle into yet');
+    });
+
     test('setAssist writes nothing when the level is already set', () async {
       final container = makeContainer();
       final bike = await openBike(container,
