@@ -276,12 +276,12 @@ void main() {
       expect(handler.debugReconnectAllowed, isFalse);
     });
 
-    test('an unknown bike reconnects like it always did', () {
+    test('an unknown bike does not reconnect on its own', () {
       final container = makeContainer();
       final handler = openHandler(container);
 
-      expect(handler.debugAutoReconnect, isTrue);
-      expect(handler.debugReconnectAllowed, isTrue);
+      expect(handler.debugAutoReconnect, isFalse);
+      expect(handler.debugReconnectAllowed, isFalse);
     });
 
     test('saving the bike updates a handler that is already running', () {
@@ -301,19 +301,19 @@ void main() {
           reason: 'and turning it back on has to reach it as well');
     });
 
-    test('the bikes.json load corrects the permissive seed', () async {
-      seedBikesFile([staticBike(autoReconnect: false)]);
+    test('the bikes.json load corrects the conservative seed', () async {
+      seedBikesFile([staticBike(autoReconnect: true)]);
       final container = makeContainer();
 
       final handler = openHandler(container);
-      expect(handler.debugAutoReconnect, isTrue,
+      expect(handler.debugAutoReconnect, isFalse,
           reason: 'the file has not landed yet, so the seed is the default');
 
       await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      expect(handler.debugAutoReconnect, isFalse,
+      expect(handler.debugAutoReconnect, isTrue,
           reason: 'the listener has to correct the seed once the file lands');
-      expect(handler.debugReconnectAllowed, isFalse);
+      expect(handler.debugReconnectAllowed, isTrue);
     });
 
     test('a speed-switching mode overrides the setting on a live handler', () {
@@ -334,31 +334,32 @@ void main() {
 
     test('the adapter gate is composed on top of the rider setting', () {
       final container = makeContainer();
+      final db = container.read(bikesDBProvider.notifier);
+      db.saveBike(staticBike(autoReconnect: true));
+
       final handler = openHandler(container);
       expect(handler.debugShouldAttemptConnect, isTrue,
-          reason: 'a fresh handler has seen no adapter event yet, and that is '
-              'not a reason to stay away from the bike');
+          reason: 'this handler has seen no adapter event yet, and that is '
+              'not a reason to stay away from a bike the rider asked for');
 
-      container
-          .read(bikesDBProvider.notifier)
-          .saveBike(staticBike(autoReconnect: false));
+      db.saveBike(staticBike(autoReconnect: false));
       expect(handler.debugReconnectAllowed, isFalse);
       expect(handler.debugShouldAttemptConnect, isFalse,
           reason: 'the gate the three automatic paths read has to carry the '
               'setting too, not only the radio state');
     });
 
-    test('deleting the bike does not leave the handler gated', () async {
+    test('deleting the bike returns the handler to the default', () async {
       final container = makeContainer();
       final db = container.read(bikesDBProvider.notifier);
-      final bike = staticBike(autoReconnect: false);
+      final bike = staticBike(autoReconnect: true);
       db.saveBike(bike);
 
       final handler = openHandler(container);
-      expect(handler.debugReconnectAllowed, isFalse);
+      expect(handler.debugReconnectAllowed, isTrue);
 
       db.deleteBike(bike);
-      expect(handler.debugReconnectAllowed, isTrue,
+      expect(handler.debugReconnectAllowed, isFalse,
           reason: 'a bike with no record is treated as an unknown one');
 
       // Let the fire-and-forget file IO settle before tearDown removes the dir.

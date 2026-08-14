@@ -958,14 +958,17 @@ void main() {
     expect(b.legacyMode, 0);
   });
 
-  test('autoReconnect persists, defaults to true, tolerates legacy files', () {
-    expect(BikeState.defaultState('id').autoReconnect, isTrue);
+  test('autoReconnect persists, defaults to false, tolerates legacy files', () {
+    expect(BikeState.defaultState('id').autoReconnect, isFalse);
     final off = bike(region: BikeRegion.ch).copyWith(autoReconnect: false);
     expect(BikeState.fromJson(off.toJson()).autoReconnect, isFalse);
-    // bikes.json written by an older build has no such key.
-    final legacy = Map<String, Object?>.from(off.toJson())
+    final on = bike(region: BikeRegion.ch).copyWith(autoReconnect: true);
+    expect(BikeState.fromJson(on.toJson()).autoReconnect, isTrue);
+    // bikes.json written by an older build has no such key. It reads as off,
+    // which is the chosen default: the app connects when the rider asks.
+    final legacy = Map<String, Object?>.from(on.toJson())
       ..remove('autoReconnect');
-    expect(BikeState.fromJson(legacy).autoReconnect, isTrue);
+    expect(BikeState.fromJson(legacy).autoReconnect, isFalse);
   });
 
   group('profile lookup', () {

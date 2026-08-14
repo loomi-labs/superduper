@@ -51,7 +51,7 @@ final class BikesDBProvider
   }
 }
 
-String _$bikesDBHash() => r'48b105d80cfd55289ea8baebf5fca10ac5428e7f';
+String _$bikesDBHash() => r'801465a2b68acc8ded37eb58db061b9127e5e3e7';
 
 abstract class _$BikesDB extends $Notifier<List<BikeState>> {
   List<BikeState> build();

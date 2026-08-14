@@ -107,7 +107,7 @@ _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
       : BikeCapabilities.fromJson(json['capabilities'] as Map<String, dynamic>),
   name: json['name'] as String,
   region: $enumDecodeNullable(_$BikeRegionEnumMap, json['region']),
-  autoReconnect: json['autoReconnect'] as bool? ?? true,
+  autoReconnect: json['autoReconnect'] as bool? ?? false,
   color: (json['color'] as num?)?.toInt() ?? 0,
 );
 

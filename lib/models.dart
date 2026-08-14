@@ -745,7 +745,10 @@ abstract class BikeState with _$BikeState {
       required String name,
       BikeRegion? region,
       // Whether the app keeps trying to reconnect to this bike on its own.
-      @Default(true) bool autoReconnect,
+      // Off by default: the app connects when the rider opens the bike, and
+      // reaching for the radio on its own costs battery. A record written by an
+      // older build has no such key, so it reads as off too.
+      @Default(false) bool autoReconnect,
       @Default(0) int color}) = _BikeState;
 
   factory BikeState.fromJson(Map<String, Object?> json) =>

@@ -298,13 +298,36 @@ void main() {
     expect(saved.needsSpeedSwitching, isTrue);
   });
 
+  testWidgets('a fresh bike opens with auto-reconnect off', (tester) async {
+    final container = ProviderContainer();
+    container.listen(bikeProvider(id), (previous, next) {});
+    // A fresh CH bike: the setting is off, and its mode switches by speed, so
+    // the note that says the app still reconnects for it is there from the
+    // start.
+    await openFromBikePage(tester, container, BikeState.defaultState(id));
+
+    final unchecked = renderedAutoReconnect(tester);
+    final warning = find.byKey(const ValueKey('autoReconnectWarning'));
+    final found = warning.evaluate().length;
+    container.dispose();
+    expect(unchecked, isFalse,
+        reason: 'the app must not connect to a bike on its own until the '
+            'rider asks for it');
+    expect(found, 1);
+  });
+
   testWidgets('Save carries the auto-reconnect checkbox', (tester) async {
     final container = ProviderContainer();
     container.listen(bikeProvider(id), (previous, next) {});
     // Off-road: a static selection, so the setting takes full effect and the
-    // sheet shows no override note.
-    await openFromBikePage(tester, container,
-        BikeState.defaultState(id).withSelectedMode(nativeModeId(chWireOffroad)));
+    // sheet shows no override note. The setting is on, because the point here
+    // is what a rider who turns it off gets saved.
+    await openFromBikePage(
+        tester,
+        container,
+        BikeState.defaultState(id)
+            .copyWith(autoReconnect: true)
+            .withSelectedMode(nativeModeId(chWireOffroad)));
 
     await tapAutoReconnect(tester);
     expect(renderedAutoReconnect(tester), isFalse,
@@ -327,7 +350,9 @@ void main() {
     final container = ProviderContainer();
     container.listen(bikeProvider(id), (previous, next) {});
     // A fresh CH bike rides the seeded 25 km/h mode, which switches by speed.
-    await openFromBikePage(tester, container, BikeState.defaultState(id));
+    // The setting starts on, so the note has something to appear for.
+    await openFromBikePage(tester, container,
+        BikeState.defaultState(id).copyWith(autoReconnect: true));
     final warning = find.byKey(const ValueKey('autoReconnectWarning'));
     expect(warning, findsNothing,
         reason: 'nothing to warn about while the setting is still on');
@@ -931,7 +956,7 @@ void main() {
       final container =
           await openWith(tester, const [race45, seededChMode], race45.id);
 
-      await tapKey(tester, 'autoReconnectCheckbox');
+      // Auto-reconnect is off on a fresh bike, so the note is already in play.
       expect(find.byKey(const ValueKey('autoReconnectWarning')), findsNothing);
 
       // Deleting it hands the bike the seeded mode, which does switch — the

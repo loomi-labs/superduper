@@ -542,7 +542,9 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                     contentPadding: EdgeInsets.zero,
                     onChanged: (value) {
                       setState(() {
-                        _autoReconnect = value ?? true;
+                        // The stored value, never a constant: a null here means
+                        // the box said nothing, not that the rider chose.
+                        _autoReconnect = value ?? widget.bike.autoReconnect;
                       });
                     },
                   ),
@@ -762,8 +764,8 @@ class _CompleteFormState extends ConsumerState<CompleteForm> {
                             color: _selectedColorIndex,
                             region: values['region'] as BikeRegion?,
                             customModes: _draftModes,
-                            autoReconnect:
-                                values['autoReconnect'] as bool? ?? true),
+                            autoReconnect: values['autoReconnect'] as bool? ??
+                                widget.bike.autoReconnect),
                         saveToBike: false);
                     Navigator.pop(context);
                   }

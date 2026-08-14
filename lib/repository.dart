@@ -200,8 +200,9 @@ class ConnectionHandler extends _$ConnectionHandler {
   bool _readyAgain = false;
 
   /// Mirrors of this bike's record, kept current by [_trackReconnectSetting].
-  /// Seeded permissively: an unknown bike reconnects like it always did.
-  bool _autoReconnect = true;
+  /// Seeded conservatively, like the record default: an unknown bike is not one
+  /// the app reaches for on its own.
+  bool _autoReconnect = false;
   bool _needsSpeedSwitching = false;
 
   /// Whether the automatic connect paths may run right now.
@@ -353,9 +354,10 @@ class ConnectionHandler extends _$ConnectionHandler {
   /// keepAlive with no dependencies of its own, so listening cannot cycle back.
   ///
   /// Accepted race: a handler built before bikes.json finished loading sees an
-  /// empty list and seeds `true`; the listener corrects it as soon as the file
-  /// lands. In practice the select page has loaded the DB long before a bike
-  /// can be opened.
+  /// empty list and seeds `false`; the listener corrects it as soon as the file
+  /// lands. The race is conservative — at worst the app waits a moment longer
+  /// before it reconnects on its own — and the `connect()` a page open calls is
+  /// not gated by this setting at all.
   void _trackReconnectSetting(String deviceId) {
     _applyBikeRecord(ref.read(bikesDBProvider.notifier).getBike(deviceId));
     ref.listen(bikesDBProvider, (previous, next) {
@@ -364,7 +366,7 @@ class ConnectionHandler extends _$ConnectionHandler {
   }
 
   void _applyBikeRecord(BikeState? bike) {
-    _autoReconnect = bike?.autoReconnect ?? true;
+    _autoReconnect = bike?.autoReconnect ?? false;
     _needsSpeedSwitching = bike?.needsSpeedSwitching ?? false;
   }
 
