@@ -191,16 +191,16 @@ class _CountingReentrantStore extends FakeBikeStore {
 }
 
 /// A bike whose settings register takes real time to apply a write, exactly
-/// like the real device a log caught this bug on: once [armed], a write's
-/// effect is not visible to a read until [applyDelay] has actually elapsed
-/// in real time since that write went out — a read taken any sooner sees
-/// whatever was already committed before it, never the write just sent.
-/// [applyDelay] is deliberately shorter than the production settle delay
-/// `Bike._probeWriteRead` waits between its write and its read, so a test
-/// asserting the fix works is proving the settle wait is what makes the
-/// difference, not a coincidence of test timing. Writes before [armed] is
-/// set land immediately, the same as the base class, so a test can seed its
-/// starting register without waiting out the lag itself.
+/// like the real device a log first caught this bug on: once [armed], a
+/// write's effect is not visible to a read until [applyDelay] has actually
+/// elapsed in real time since that write went out — a read taken any sooner
+/// sees whatever was already committed before it, never the write just
+/// sent. [applyDelay] is shorter than `Bike._probeSettle`, so this fake's
+/// lag is caught on the very first read attempt — it exercises the settle
+/// wait itself, not the retry loop a later log showed was also needed (see
+/// [_OwnScheduleFirmwareStore] for that). Writes before [armed] is set land
+/// immediately, the same as the base class, so a test can seed its starting
+/// register without waiting out the lag itself.
 class _LaggyFirmwareStore extends FakeBikeStore {
   final applyDelay = const Duration(milliseconds: 200);
   bool armed = false;
@@ -239,6 +239,73 @@ class _LaggyFirmwareStore extends FakeBikeStore {
       super.write(deviceId, data);
       _pendingData = null;
       _pendingSince = null;
+    }
+  }
+}
+
+/// A bike whose settings register commits the latest pending write only on
+/// its OWN fixed periodic tick, entirely independent of when that write
+/// arrived — the shape a later real device log revealed, distinct from
+/// [_LaggyFirmwareStore]'s constant per-write lag. Once [armed], reads and
+/// writes both check whether a tick boundary has passed since the store's
+/// first write; if so, whatever write is still pending gets committed, no
+/// matter how recently (or long ago) it was issued.
+///
+/// This reproduces the log's alternating stale/correct pattern purely from
+/// real wall-clock timing: with [tick] longer than one `Bike._probeSettle`
+/// wait but shorter than two, a write landing just after a boundary leaves
+/// the next boundary nearly a full tick away, so a single fixed-delay read
+/// still sees the stale value — while a write landing just before a
+/// boundary is caught by that same fixed delay. Which case a given step
+/// hits depends only on where its write falls in the store's cycle, not on
+/// anything the probe does — exactly the "coin flip" the real log showed.
+/// Polling for up to `Bike._probeMaxAttempts` closes the gap: two attempts
+/// span more real time than [tick], so a boundary is guaranteed to fall
+/// inside the budget no matter where the write landed.
+class _OwnScheduleFirmwareStore extends FakeBikeStore {
+  final tick = const Duration(milliseconds: 400);
+  bool armed = false;
+  DateTime? _anchor;
+  List<int>? _pending;
+  int _appliedTicks = 0;
+
+  @override
+  void write(String deviceId, List<int> data) {
+    if (!armed) {
+      super.write(deviceId, data);
+      return;
+    }
+    _anchor ??= DateTime.now();
+    _commitDueTicks(deviceId);
+    _pending = List.of(data);
+  }
+
+  @override
+  List<int> read(String deviceId) {
+    if (armed) {
+      _commitDueTicks(deviceId);
+    }
+    return super.read(deviceId);
+  }
+
+  /// Commits [_pending] once the store's own tick count (counted from
+  /// [_anchor], the first armed write — never from when [_pending] itself
+  /// was set) has advanced past the last commit. The tick schedule runs on
+  /// its own regardless of write timing, which is the whole point: it is
+  /// the bike's clock, not the app's.
+  void _commitDueTicks(String deviceId) {
+    final anchor = _anchor;
+    final pending = _pending;
+    if (anchor == null || pending == null) {
+      return;
+    }
+    final ticksElapsed =
+        DateTime.now().difference(anchor).inMicroseconds ~/
+            tick.inMicroseconds;
+    if (ticksElapsed > _appliedTicks) {
+      super.write(deviceId, pending);
+      _pending = null;
+      _appliedTicks = ticksElapsed;
     }
   }
 }
@@ -3028,13 +3095,15 @@ void main() {
     test(
         'waits out a register that lags one write behind, instead of '
         'reading every step one write early', () async {
-      // A real device log caught this byte-for-byte: every single
-      // write-then-read step of the sweep came back showing the PREVIOUS
-      // write's value, because the bike's settings register needs real time
-      // to apply a write. Bike._probeSettle (the delay _probeWriteRead waits
-      // between its write and its read) is what fixes it — this store's own
-      // commit delay is shorter than that settle wait on purpose, so the
-      // fix's own wait is what makes the difference, not test timing luck.
+      // The very first real device log caught this byte-for-byte: every
+      // single write-then-read step of the sweep came back showing the
+      // PREVIOUS write's value, because the bike's settings register needs
+      // real time to apply a write. This store's own commit delay is
+      // shorter than Bike._probeSettle on purpose, so this proves the
+      // settle wait between write and first read attempt is what makes the
+      // difference here, not test timing luck. See
+      // '_OwnScheduleFirmwareStore' below for the follow-up bug a SECOND
+      // log revealed, which needs the retry loop rather than just the wait.
       final store = _LaggyFirmwareStore();
       final container = ProviderContainer(overrides: [
         fakeBikeStoreProvider.overrideWithValue(store),
@@ -3060,6 +3129,78 @@ void main() {
               'read this back as accepting nothing at all');
       expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
       expect(caps.lightWritable, isTrue);
+    });
+
+    test(
+        'polls out a register that updates on its own schedule, not just a '
+        'fixed lag behind the write', () async {
+      // The regression test for the SECOND real device log, taken after the
+      // single-fixed-delay fix above had already shipped: sweeping wires
+      // 0-7 with that fix in place, write-to-read gaps of 439 ms and 437
+      // ms — essentially identical — came back stale and correct
+      // respectively, alternating almost perfectly across all 8 wires. That
+      // ruled out "wait longer" as a fix: the bike's register updates on
+      // its own internal cycle, and _OwnScheduleFirmwareStore reproduces
+      // exactly that shape (see its own doc comment). If the probe still
+      // trusted a single read after one fixed wait, this bike would report
+      // some wires/assist levels missing depending on where each step's
+      // write happened to land in the store's cycle; polling must catch
+      // every one of them regardless.
+      final store = _OwnScheduleFirmwareStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // Only the probe's own writes ride the store's own schedule: the setup
+      // above must land normally, or bootA would not describe the register
+      // it actually seeded.
+      store.armed = true;
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+
+      final caps = await bike.probeCapabilities(bootA);
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, List.generate(8, (i) => i),
+          reason: 'every wire is genuinely accepted, just on the store\'s '
+              'own cadence — a probe that gambled on one fixed-delay read '
+              'per step would miss some of them, exactly like the real '
+              'device log');
+      expect(caps.acceptedAssist, [0, 1, 2, 3, 4]);
+      expect(caps.lightWritable, isTrue);
+    });
+
+    test(
+        'gives up on a value the firmware genuinely never accepts, without '
+        'hanging', () async {
+      // Distinct from both fakes above: _LockedByteStore's fixedWire never
+      // changes no matter how long the probe waits or how many times it
+      // reads, standing in for a real, permanent rejection rather than lag.
+      // Only _probeWriteRead's own bounded attempt budget can end that
+      // loop — asserted here via a wrapping timeout, so a regression that
+      // turned the retry into an unconditional one would fail this test by
+      // hanging, not just by a wrong result.
+      final store = _LockedByteStore(fixedWire: 5);
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
+      addTearDown(container.dispose);
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+
+      final caps = await bike
+          .probeCapabilities(bootA)
+          .timeout(const Duration(seconds: 20));
+
+      expect(caps, isNotNull);
+      expect(caps!.acceptedWires, [5],
+          reason: 'every other wire genuinely never accepts, so the probe '
+              'must give up on each after its bounded attempt budget rather '
+              'than loop forever');
     });
   });
 }

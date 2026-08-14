@@ -234,15 +234,30 @@ class Bike extends _$Bike {
   /// second hardcoded literal, which would silently drift from this one.
   static const connectSettle = Duration(seconds: 1);
 
-  /// Grace period inside [_probeWriteRead] between its write and its
-  /// readback. A real device log caught the probe reading back one write
-  /// early on every single step, for all 8 wires, all 5 assist levels and
-  /// the light: the bike's own settings register takes real time to apply a
-  /// write, and a read issued right after ack sees the PREVIOUS write's
-  /// value, never the one just sent. The log's own write-to-read round trips
-  /// ran 90-190 ms and were still consistently stale, so 250 ms gives a
-  /// solid margin above the observed lag.
+  /// How long [_probeWriteRead] waits between read attempts, and how many
+  /// attempts it makes before giving up.
+  ///
+  /// A first fix waited one fixed 250 ms after the write, then read once. A
+  /// later real device log showed that was not enough — and revealed why no
+  /// fixed delay would be: two wires with essentially the same write-to-read
+  /// gap (439 ms and 437 ms) came back with opposite outcomes, one stale and
+  /// one correct, alternating almost perfectly across all 8 wires. The
+  /// bike's settings register updates on ITS OWN internal cycle, not
+  /// synchronously with the write — whether a read after a fixed delay
+  /// catches that update is a coin flip on where it lands in the cycle, and
+  /// a bigger constant only moves where the unlucky alignment falls. Polling
+  /// until the readback actually matches sidesteps the alignment question
+  /// entirely — the same shape the old one-boot calibration's
+  /// `recordBootWindow` used to settle a value across a real device's own
+  /// timing, before the two-boot setup wizard replaced it.
+  ///
+  /// 250 ms x 6 = 1.5 s worst case per write that is genuinely rejected —
+  /// negligible next to the already multi-second capability sweep, but short
+  /// enough that a bike which rejects every write does not make the sweep
+  /// feel hung. A write that succeeds typically matches after one or two
+  /// attempts, not the full budget.
   static const _probeSettle = Duration(milliseconds: 250);
+  static const _probeMaxAttempts = 6;
 
   Timer? _updateDebounce;
   Timer? _updateTimer;
@@ -991,17 +1006,37 @@ class Bike extends _$Bike {
     return best.wire;
   }
 
-  /// Writes one settings packet raw and reads back what stuck, in one queue
-  /// slot: write-then-read is a select-then-use sequence on the shared
-  /// register characteristic, exactly like the fresh read [writeStateData]
-  /// takes alongside its own write.
+  /// Writes one settings packet raw and polls the readback until it reflects
+  /// that write, in one queue slot: write-then-read is a select-then-use
+  /// sequence on the shared register characteristic, exactly like the fresh
+  /// read [writeStateData] takes alongside its own write.
+  ///
+  /// A single read after a fixed [_probeSettle] wait is not reliable — see
+  /// its doc comment. This reads up to [_probeMaxAttempts] times, waiting
+  /// [_probeSettle] before each, and returns as soon as one shows the wire,
+  /// assist and light this call just wrote. If none ever match, the LAST
+  /// read is returned rather than null or the first: a genuinely rejected
+  /// write should still report the bike's real, settled value, and the
+  /// sweep's own comparisons in [probeCapabilities] already read a
+  /// non-matching return as rejected.
   Future<List<int>?> _probeWriteRead(ConnectionHandler handler,
       {required bool light, required int assist, required int wire}) {
     return _withRegister(() async {
       await handler.write(
           state.copyWith(light: light, assist: assist).toWriteData(wire: wire));
-      await Future<void>.delayed(_probeSettle);
-      return handler.read();
+      List<int>? data;
+      for (var attempt = 0; attempt < _probeMaxAttempts; attempt++) {
+        await Future<void>.delayed(_probeSettle);
+        data = await handler.read();
+        if (data != null &&
+            isSettingsPacket(data) &&
+            data[5] == wire &&
+            data[2] == assist &&
+            (data[4] == 1) == light) {
+          return data;
+        }
+      }
+      return data;
     });
   }
 
