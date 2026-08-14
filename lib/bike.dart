@@ -228,7 +228,11 @@ class Bike extends _$Bike {
   /// The transport requests ride data itself as part of becoming ready, and that
   /// request selects a different register than a state read does — see
   /// [_withRegister].
-  static const _connectSettle = Duration(seconds: 1);
+  ///
+  /// Not private: [SetupPage] needs the exact same wait before its own boot
+  /// reads, right after the same kind of reconnect. Shared rather than a
+  /// second hardcoded literal, which would silently drift from this one.
+  static const connectSettle = Duration(seconds: 1);
 
   Timer? _updateDebounce;
   Timer? _updateTimer;
@@ -432,7 +436,7 @@ class Bike extends _$Bike {
   Future<void> _reassertAfterReconnect() async {
     // Let the transport's own connect-time ride data request finish first: it
     // leaves a different register selected than a read expects.
-    await Future<void>.delayed(_connectSettle);
+    await Future<void>.delayed(connectSettle);
     if (!ref.mounted || !_isConnected) {
       return;
     }

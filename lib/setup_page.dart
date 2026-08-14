@@ -220,6 +220,10 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   bool _wantConnected = false;
   Timer? _hintTimer;
 
+  /// Fires a fast, dedicated connect attempt while [_waitForConnection] waits
+  /// for the bike to come back on. See [_waitForConnection] for why.
+  Timer? _reconnectPollTimer;
+
   /// Taken once: the wizard has to release the write-suppression window even
   /// while the page is going away, and reading a provider there is too late.
   late final Bike _bike = ref.read(bikeProvider(widget.bikeID).notifier);
@@ -248,6 +252,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   @override
   void dispose() {
     _hintTimer?.cancel();
+    _reconnectPollTimer?.cancel();
     _cancelled = true;
     _waiter = null;
     _connectionSub?.close();
@@ -348,9 +353,28 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         setState(() => _hint = hint);
       }
     });
+    if (connected) {
+      // The rider is standing at the bike for a bounded couple of minutes,
+      // not leaving the app running for hours, so this step asks again on
+      // its own fast, fixed cadence — it does not wait for the bike's normal
+      // background reconnect ladder, and it does not care whether the rider
+      // has Auto-reconnect turned on for this bike.
+      _reconnectPollTimer?.cancel();
+      ref
+          .read(connectionHandlerProvider(widget.bikeID).notifier)
+          .connect(timeout: const Duration(seconds: 2));
+      _reconnectPollTimer =
+          Timer.periodic(const Duration(milliseconds: 1500), (_) {
+        ref
+            .read(connectionHandlerProvider(widget.bikeID).notifier)
+            .connect(timeout: const Duration(seconds: 2));
+      });
+    }
     return waiter.future.whenComplete(() {
       _hintTimer?.cancel();
       _hintTimer = null;
+      _reconnectPollTimer?.cancel();
+      _reconnectPollTimer = null;
       _waiter = null;
     });
   }
@@ -432,6 +456,18 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       _step = SetupStep.readBoot1;
       _hint = null;
     });
+    // Let the transport's own post-connect handshake finish first. A real
+    // device log caught the race this avoids: right after a reconnect, the
+    // transport asks the bike for ride data as part of becoming ready, and
+    // that request selects a different register than the read below needs —
+    // a read this early can come back with ride data instead of settings and
+    // fail outright. See [Bike.connectSettle] and [Bike._reassertAfterReconnect],
+    // which waits out the exact same race on the control loop's own reconnect
+    // path.
+    await Future<void>.delayed(Bike.connectSettle);
+    if (!_alive) {
+      return;
+    }
     final bootA = await _bike.readBikeState();
     if (!_alive) {
       return;
@@ -514,6 +550,13 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       _step = SetupStep.readBoot2;
       _hint = null;
     });
+    // Same wait as after the first reconnect above, and for the same reason:
+    // the transport's post-connect handshake needs to finish before the read
+    // below can trust the register it selects.
+    await Future<void>.delayed(Bike.connectSettle);
+    if (!_alive) {
+      return;
+    }
     final bootB = await _bike.readBikeState();
     if (!_alive) {
       return;
