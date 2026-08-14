@@ -2819,6 +2819,49 @@ void main() {
               'see models_test.dart for the clean-set cases');
     });
 
+    test('onProgress reports the accumulated results', () async {
+      final container = makeContainer();
+      final bike = await openBike(container,
+          region: BikeRegion.eu, modeId: nativeModeId(5), customModes: const []);
+      // See the first probeCapabilities test above.
+      bike.setCalibrating(true);
+
+      final reports = <ProbeProgress>[];
+      final caps = await bike.probeCapabilities(bootA, onProgress: reports.add);
+
+      expect(caps, isNotNull);
+      expect(reports, hasLength(firmwareProfiles.length + 5 + 1),
+          reason: 'one report per wire, per assist level and one for the light');
+
+      final firstMode = reports.first;
+      expect(firstMode.phase, 'mode');
+      expect(firstMode.done, 1);
+      expect(firstMode.total, firmwareProfiles.length + 5 + 1);
+      // The sweep starts one past the baseline wire, so wire 6 goes first.
+      expect(firstMode.acceptedWires, [6]);
+      expect(firstMode.acceptedAssist, isEmpty,
+          reason: 'the assist phase has not started');
+      expect(firstMode.lightAccepted, isNull,
+          reason: 'the light test has not run');
+
+      final firstAssist = reports[firmwareProfiles.length];
+      expect(firstAssist.phase, 'assist');
+      expect(firstAssist.acceptedWires, [0, 1, 2, 3, 4, 5, 6, 7],
+          reason: 'a later phase still reports what the earlier one found');
+      // One past the baseline assist, for the same reason as the wire above.
+      expect(firstAssist.acceptedAssist, [1]);
+      expect(firstAssist.lightAccepted, isNull);
+
+      final last = reports.last;
+      expect(last.phase, 'light');
+      expect(last.done, last.total);
+      expect(last.acceptedAssist, [0, 1, 2, 3, 4]);
+      expect(last.lightAccepted, isTrue);
+
+      expect(() => reports.first.acceptedWires.add(3), throwsUnsupportedError,
+          reason: 'a report is a snapshot, not the sweep own list');
+    });
+
     test('a bike locked onto one wire reports it as the only accepted wire',
         () async {
       final store = _LockedByteStore(fixedWire: 5);

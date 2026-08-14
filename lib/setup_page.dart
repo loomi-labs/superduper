@@ -186,7 +186,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   /// The live readout of [Bike.probeCapabilities]'s sweep, or null before it
   /// starts / when the caller chose not to pass a progress callback's result
   /// on yet.
-  ({String phase, int done, int total})? _progress;
+  ProbeProgress? _progress;
 
   /// The first boot read, the probe's parting state and the second boot
   /// read — held in LOCAL widget state only, thrown away with the widget on
@@ -512,12 +512,12 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     // writeStateData, so the window does nothing for the probe's own
     // writes — it protects everything else from the probe, not the other
     // way round.
-    final capabilities = await _bike.probeCapabilities(bootA,
-        onProgress: (phase, done, total) {
+    final capabilities =
+        await _bike.probeCapabilities(bootA, onProgress: (progress) {
       if (!mounted) {
         return;
       }
-      setState(() => _progress = (phase: phase, done: done, total: total));
+      setState(() => _progress = progress);
     });
     if (capabilities != null) {
       // Recorded before any of the exits below is reached, so every one of

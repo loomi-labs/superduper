@@ -121,6 +121,23 @@ String? backgroundStatusText(BackgroundStatus status, BikeState bike,
   };
 }
 
+/// One progress report of [Bike.probeCapabilities]'s sweep: which [phase] runs
+/// ('mode', 'assist' or 'light'), how many of the [total] tests are [done], and
+/// everything the sweep has accepted so far.
+///
+/// [acceptedWires] and [acceptedAssist] are ascending, unmodifiable snapshots,
+/// and [lightAccepted] is null until the light test itself reports. So a caller
+/// can hold a report and read it later: the sweep keeps writing to its own
+/// lists after the report is out.
+typedef ProbeProgress = ({
+  String phase,
+  int done,
+  int total,
+  List<int> acceptedWires,
+  List<int> acceptedAssist,
+  bool? lightAccepted,
+});
+
 /// What a two-boot capability probe says a byte does on power-on.
 ///
 /// The setup wizard drives three points on each byte: [bootA] (the first
@@ -1141,9 +1158,10 @@ class Bike extends _$Bike {
   }
 
   /// Sweeps every wire (0-7), every assist level (0-4) and the light,
-  /// writing each raw and reading back what stuck, against [bootA] — the
-  /// fresh-boot read the caller took just before calling this. Refuses while
-  /// moving.
+  /// writing each raw and reading back what stuck, against [baseline] — the
+  /// read the caller took on the settled connection just before calling this.
+  /// It stands in for the bike's boot default, and is not a fresh boot read.
+  /// Refuses while moving.
   ///
   /// Expected to run WHILE a calibration window is open, not outside one: the
   /// window is what stops the ordinary poll (see [updateStateDataNow]) from
@@ -1170,12 +1188,11 @@ class Bike extends _$Bike {
   /// [_abortedProbe].
   ///
   /// [onProgress], when given, is called once per wire/assist/light test with
-  /// the phase name, how many tests of that phase are done, and how many
-  /// tests the whole sweep has in total — enough for a caller to show a
-  /// `▓▓▓░░░` bar. Optional and additive: every existing call omits it, and
-  /// omitting it changes nothing about the sweep itself.
-  Future<BikeCapabilities?> probeCapabilities(LastSeen bootA,
-      {void Function(String phase, int done, int total)? onProgress}) async {
+  /// a [ProbeProgress] — the phase, how far the whole sweep is, and everything
+  /// the sweep has accepted so far. Optional and additive: every existing call
+  /// omits it, and omitting it changes nothing about the sweep itself.
+  Future<BikeCapabilities?> probeCapabilities(LastSeen baseline,
+      {void Function(ProbeProgress progress)? onProgress}) async {
     if (_deleted || !ref.mounted) {
       return null;
     }
@@ -1194,9 +1211,20 @@ class Bike extends _$Bike {
     var fullyParked = false;
     try {
       final acceptedWires = <int>[];
-      // Every wire is tested, including bootA.wire — but that one LAST, which
-      // is why the loop starts one past it and wraps. Writing the value the
-      // bike already holds proves nothing: the readback shows that value
+      final acceptedAssist = <int>[];
+      /// One report for [onProgress]. The lists are ascending copies, so the
+      /// caller can hold a report while the sweep writes to its own lists.
+      ProbeProgress report(String phase, int done, {bool? lightAccepted}) => (
+            phase: phase,
+            done: done,
+            total: total,
+            acceptedWires: List<int>.unmodifiable([...acceptedWires]..sort()),
+            acceptedAssist: List<int>.unmodifiable([...acceptedAssist]..sort()),
+            lightAccepted: lightAccepted,
+          );
+      // Every wire is tested, including baseline.wire — but that one LAST,
+      // which is why the loop starts one past it and wraps. Writing the value
+      // the bike already holds proves nothing: the readback shows that value
       // whether the firmware took the write or refused it, so a locked
       // firmware would score its own boot wire as accepted. Probed at the end,
       // the boot wire is the one wire the bike has provably been moved away
@@ -1205,15 +1233,15 @@ class Bike extends _$Bike {
         if (!_isConnected) {
           return _abortedProbe('mode');
         }
-        final wire = (bootA.wire + 1 + step) % firmwareProfiles.length;
+        final wire = (baseline.wire + 1 + step) % firmwareProfiles.length;
         final data = await _probeWriteRead(handler,
-            light: bootA.light, assist: bootA.assist, wire: wire);
+            light: baseline.light, assist: baseline.assist, wire: wire);
         if (data != null && isSettingsPacket(data) && data[5] == wire) {
           acceptedWires.add(wire);
         }
         // The loop counter, not the wire: the wire is no longer the count of
         // tests done.
-        onProgress?.call('mode', step + 1, total);
+        onProgress?.call(report('mode', step + 1));
       }
       if (!_isConnected) {
         return _abortedProbe('mode');
@@ -1223,45 +1251,46 @@ class Bike extends _$Bike {
       // tie-break in [_safeWireAfterSweep] keeps the first candidate it finds,
       // so it has to be ascending whatever order the sweep happened to use.
       acceptedWires.sort();
-      final safeWire = _safeWireAfterSweep(acceptedWires, bootA.wire);
+      final safeWire = _safeWireAfterSweep(acceptedWires, baseline.wire);
       await _probeWriteRead(handler,
-          light: bootA.light, assist: bootA.assist, wire: safeWire);
+          light: baseline.light, assist: baseline.assist, wire: safeWire);
 
-      final acceptedAssist = <int>[];
       // The physically-current assist value, updated from every readback —
       // not from what was intended — so it stays correct even where the
       // bike rejects a candidate.
-      var partingAssist = bootA.assist;
-      // bootA.assist last, wrapping, for the same reason the wire loop keeps
-      // bootA.wire for last: a write of the level the bike already holds
+      var partingAssist = baseline.assist;
+      // baseline.assist last, wrapping, for the same reason the wire loop keeps
+      // baseline.wire for last: a write of the level the bike already holds
       // cannot be told from a write it refused.
       for (var step = 0; step < 5; step++) {
         if (!_isConnected) {
           return _abortedProbe('assist');
         }
-        final assist = (bootA.assist + 1 + step) % 5;
+        final assist = (baseline.assist + 1 + step) % 5;
         final data = await _probeWriteRead(handler,
-            light: bootA.light, assist: assist, wire: safeWire);
+            light: baseline.light, assist: assist, wire: safeWire);
         if (data != null && isSettingsPacket(data)) {
           partingAssist = data[2];
           if (data[2] == assist) {
             acceptedAssist.add(assist);
           }
         }
-        onProgress?.call('assist', firmwareProfiles.length + step + 1, total);
+        onProgress
+            ?.call(report('assist', firmwareProfiles.length + step + 1));
       }
       // Ascending, for the same reasons as [acceptedWires] above.
       acceptedAssist.sort();
-      if (acceptedAssist.length > 1 && partingAssist == bootA.assist) {
+      if (acceptedAssist.length > 1 && partingAssist == baseline.assist) {
         // The sweep's own last value coincides with the boot value — which the
         // boot-last order above makes the normal case, not the exception — so
         // write one more accepted value that does not coincide, and give a
         // later second boot something to compare against. At least one such
-        // value exists: more than one was accepted, and bootA.assist can
+        // value exists: more than one was accepted, and baseline.assist can
         // equal at most one of them.
-        final differing = acceptedAssist.firstWhere((a) => a != bootA.assist);
+        final differing =
+            acceptedAssist.firstWhere((a) => a != baseline.assist);
         final data = await _probeWriteRead(handler,
-            light: bootA.light, assist: differing, wire: safeWire);
+            light: baseline.light, assist: differing, wire: safeWire);
         if (data != null && isSettingsPacket(data)) {
           partingAssist = data[2];
         }
@@ -1271,11 +1300,11 @@ class Bike extends _$Bike {
         return _abortedProbe('light');
       }
       final lightData = await _probeWriteRead(handler,
-          light: !bootA.light, assist: partingAssist, wire: safeWire);
+          light: !baseline.light, assist: partingAssist, wire: safeWire);
       final lightWritable = lightData != null &&
           isSettingsPacket(lightData) &&
-          (lightData[4] == 1) == !bootA.light;
-      onProgress?.call('light', total, total);
+          (lightData[4] == 1) == !baseline.light;
+      onProgress?.call(report('light', total, lightAccepted: lightWritable));
       fullyParked = true;
 
       _logCalibration('Probe: wires $acceptedWires, assist $acceptedAssist, '
@@ -1297,14 +1326,14 @@ class Bike extends _$Bike {
       // triple, not per-field: an exception can land during the wire loop,
       // the assist loop or the light test alike, and by the time it is
       // caught here there is no way to tell which fields the sweep already
-      // moved away from bootA, so every field is put back. Best-effort and
-      // swallowed: a failure here must never replace the exception the
+      // moved away from the baseline, so every field is put back. Best-effort
+      // and swallowed: a failure here must never replace the exception the
       // caller actually needs to see.
       if (!fullyParked) {
         try {
           await handler.write(state
-              .copyWith(light: bootA.light, assist: bootA.assist)
-              .toWriteData(wire: bootA.wire));
+              .copyWith(light: baseline.light, assist: baseline.assist)
+              .toWriteData(wire: baseline.wire));
         } catch (_) {
           // Nothing more to do if even the safety-net write fails.
         }
