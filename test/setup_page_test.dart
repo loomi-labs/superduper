@@ -55,6 +55,18 @@ class _CountingReadStore extends FakeBikeStore {
   }
 }
 
+/// Records every write, so a test can prove one specific packet reached the
+/// bike even where the app's own control loop writes again after it.
+class _RecordingStore extends FakeBikeStore {
+  final writes = <List<int>>[];
+
+  @override
+  void write(String deviceId, List<int> data) {
+    writes.add(List.of(data));
+    super.write(deviceId, data);
+  }
+}
+
 /// A [ConnectionHandler] whose [write] genuinely pauses on its
 /// [pauseOnWrite]-th call (1-indexed) until the test completes [resume].
 ///
@@ -620,7 +632,10 @@ void main() {
     testWidgets(
         'cancelling after the probe succeeds still leaves capabilities null',
         (tester) async {
-      final container = ProviderContainer();
+      final store = _RecordingStore();
+      final container = ProviderContainer(overrides: [
+        fakeBikeStoreProvider.overrideWithValue(store),
+      ]);
       final bike = openBike(container);
       await openWizard(tester, container);
 
@@ -632,6 +647,7 @@ void main() {
       // Mid-way through the second power cycle: the probe already ran once.
       await pumpUntil(tester, () => textShown('Switch the bike off'));
 
+      final beforeCancel = store.writes.length;
       await tap(tester, 'setupCancel');
       await pump(tester, const Duration(seconds: 1));
 
@@ -641,6 +657,25 @@ void main() {
               'widget state: a cancel this late must still leave the bike '
               'ungated');
       expect(container.read(bikeProvider(id)).bootSignature, isNull);
+      // The sweep parks the bike on values of its own (a safe wire, the
+      // parting assist, the flipped light) and restores the boot values itself
+      // only when it could not finish. A discarded result has to be undone
+      // here instead: with capabilities still null, the gate hides the very
+      // controls the rider would need to put the bike back by hand.
+      expect(
+          store.writes
+              .skip(beforeCancel)
+              .any((write) => write[2] == 0 && write[3] == 0 && write[4] == 0),
+          isTrue,
+          reason: 'the whole boot triple — light off, assist 0, wire 0 — goes '
+              'back on the bike as the wizard leaves');
+      // The register itself is only asserted for light and assist: once the
+      // window closes, the ordinary control loop heals the bike onto the wire
+      // the selected mode asserts, which is the app doing its job rather than
+      // a leftover of the probe.
+      final register = store.read(id);
+      expect(register[2], 0, reason: 'the assist is back on the boot level');
+      expect(register[4], 0, reason: 'and the light back off');
       container.dispose();
     });
   });

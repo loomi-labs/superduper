@@ -205,6 +205,18 @@ class _SetupPageState extends ConsumerState<SetupPage> {
   bool _cancelled = false;
   bool _finished = false;
 
+  /// Whether the sweep ran to its end — and so left the bike parked on values
+  /// of its own — with nothing saved yet.
+  ///
+  /// [Bike.probeCapabilities] restores the boot values only when it could NOT
+  /// finish; a sweep that finished parks the bike on the safe wire, the parting
+  /// assist and the flipped light, because the caller normally keeps that
+  /// result and power-cycles the bike anyway. Every exit of this flow that
+  /// keeps nothing has to undo it instead: with capabilities still null, the
+  /// gate hides the very controls the rider would need to put the bike back by
+  /// hand. Cleared the moment the result IS saved.
+  bool _probeParked = false;
+
   /// Set by a Cancel tap while [SetupStep.probing] is running. Dart cannot
   /// abort the in-flight [Bike.probeCapabilities] future, and its writes go
   /// straight to the bike below [Bike.setCalibrating]'s suppression — closing
@@ -273,14 +285,24 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     _bike.setCalibrating(false);
   }
 
-  /// Everything a wizard that did not save anything has to undo: just the
-  /// window. Unlike the old one-boot guide, nothing is staged on the bike
-  /// before the window opens, so there is no bike-side state to put back.
+  /// Everything a wizard that did not save anything has to undo: the window,
+  /// and the values a completed sweep parked the bike on ([_probeParked]).
+  /// Nothing is staged on the bike before the window opens, so there is
+  /// nothing else bike-side to put back.
+  ///
+  /// The restore goes out before the window closes, so no ordinary write can
+  /// race it, and it is not awaited: every caller here is already leaving, and
+  /// the write is best-effort by contract (see [Bike.restoreAfterProbe]).
   void _finish() {
     if (_finished) {
       return;
     }
     _finished = true;
+    final bootA = _bootA;
+    if (_probeParked && bootA != null) {
+      _probeParked = false;
+      unawaited(_bike.restoreAfterProbe(bootA));
+    }
     _releaseGuard();
   }
 
@@ -422,6 +444,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     _cancelled = false;
     _finished = false;
     _cancelPending = false;
+    _probeParked = false;
     _bootA = null;
     _parting = null;
     _bootB = null;
@@ -496,11 +519,20 @@ class _SetupPageState extends ConsumerState<SetupPage> {
       }
       setState(() => _progress = (phase: phase, done: done, total: total));
     });
+    if (capabilities != null) {
+      // Recorded before any of the exits below is reached, so every one of
+      // them — the cancel just below, a failed read of the parting state, the
+      // back gesture, a cancel at either of the two steps that follow — puts
+      // the bike back where it booted. See [_probeParked].
+      _probeParked = true;
+    }
     if (_cancelPending) {
       // The sweep ran to completion regardless of the tap (Dart cannot abort
       // it, and it writes below the calibration guard's own suppression —
       // see _cancelPending). Finish exactly as an ordinary cancel would,
       // whether the sweep succeeded or not: nothing measured here is saved.
+      // A completed sweep left the bike parked on values of its own, which
+      // _finish puts back — see [_probeParked].
       _finishCancelledProbe();
       return;
     }
@@ -575,6 +607,10 @@ class _SetupPageState extends ConsumerState<SetupPage> {
         bootA: _bootA!,
         parting: _parting!,
         bootB: _bootB!);
+    // The result is kept, so the parking values are not something to undo: the
+    // rider power-cycled the bike after them anyway, and the ordinary control
+    // loop takes the bike from here the moment the window closes.
+    _probeParked = false;
     _finish();
     if (!mounted) {
       return;

@@ -1230,6 +1230,37 @@ class Bike extends _$Bike {
     }
   }
 
+  /// Puts [bootA]'s light, assist and wire back on the bike, raw — the same
+  /// write [probeCapabilities]'s own `finally` makes, for the caller that
+  /// throws a FINISHED sweep away.
+  ///
+  /// A sweep that ran to the end parks the bike on values of its own (the safe
+  /// wire, the parting assist, the flipped light) and does not restore
+  /// anything, because the caller normally keeps the result. A caller that
+  /// discards it — the wizard, when the rider cancelled while the sweep was
+  /// still running — leaves the rider on those probe values with capabilities
+  /// still null, so the gate hides the very controls that could undo them.
+  ///
+  /// Raw and below [writeStateData], for the same reasons the sweep's own
+  /// writes are: none of this is a mode selection the app should remember.
+  /// Best-effort and swallowed, exactly like the `finally`: the caller is
+  /// already on its way out, and nothing it does next depends on this write.
+  Future<void> restoreAfterProbe(LastSeen bootA) async {
+    if (_deleted || !ref.mounted || !_isConnected) {
+      return;
+    }
+    _logCalibration('Restoring the boot values of a discarded probe: light '
+        '${bootA.light}, assist ${bootA.assist}, wire ${bootA.wire}');
+    final handler = ref.read(connectionHandlerProvider(id).notifier);
+    try {
+      await _withRegister(() => handler.write(state
+          .copyWith(light: bootA.light, assist: bootA.assist)
+          .toWriteData(wire: bootA.wire)));
+    } catch (e) {
+      _logE('Error restoring the boot values after a discarded probe', e);
+    }
+  }
+
   /// Classifies [bootA]/[parting]/[bootB] via [classifyCapabilityBoot],
   /// applies the detected region if there is one, and saves [capabilities]
   /// and the resulting [BootSignature] on this bike's record in one write —
