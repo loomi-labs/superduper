@@ -1,6 +1,6 @@
 # Privacy Policy for SuperDuper App
 
-**Effective Date: May 4th, 2025**
+**Effective Date: August 25, 2026**
 
 ## Introduction
 
@@ -31,8 +31,8 @@ SuperDuper stores the following information on your device:
 
 SuperDuper does not upload this information, and it sends none of it to us. The
 data leaves your device only when you start a transfer yourself. For example,
-the SHARE LOGS button transfers the log files you select to the app or the
-person you select. That transfer sends the data to the recipient you choose.
+the SHARE LOGS button transfers every log file that is on your device to the
+app or the person you select. You select the recipient, not the files.
 
 ### Required App Store Data
 
