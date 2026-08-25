@@ -49,11 +49,48 @@ android {
 
     buildTypes {
         release {
-            // Falls back to debug signing when key.properties is absent (local dev machines).
+            // Debug signing here is a local-build convenience only. The
+            // task-graph check below stops it reaching a real release artifact.
             signingConfig = if (keystorePropertiesFile.exists())
                 signingConfigs.getByName("release")
             else
                 signingConfigs.getByName("debug")
+        }
+    }
+}
+
+// A distributed artifact must never carry the debug certificate. Checked on the
+// task graph, not in the buildTypes block above: that block configures on every
+// Gradle invocation, so a failure there would break debug builds too.
+//
+// Both values are read now, at configuration time. Reading them inside the
+// callback would touch `project` at execution time, which the configuration
+// cache forbids.
+val allowDebugSigning = project.hasProperty("allowDebugSigning")
+val buildLogger = logger
+
+if (!keystorePropertiesFile.exists()) {
+    // No lambda parameter: the Kotlin DSL takes a TaskExecutionGraph receiver,
+    // so `allTasks` is read off `this`. A parameter here would bind to the
+    // Groovy Closure overload instead, which does not compile.
+    gradle.taskGraph.whenReady {
+        val buildsRelease = allTasks.any { task ->
+            task.name.contains("Release") &&
+                listOf("assemble", "bundle", "package").any { task.name.startsWith(it) }
+        }
+        if (buildsRelease) {
+            if (allowDebugSigning) {
+                buildLogger.warn(
+                    "WARNING: signing the release build with the DEBUG certificate. " +
+                        "This artifact is for local testing only. Do not distribute it."
+                )
+            } else {
+                throw GradleException(
+                    "key.properties is missing, so the release build would be signed " +
+                        "with the debug certificate. Add key.properties, or set " +
+                        "ORG_GRADLE_PROJECT_allowDebugSigning=true for a local build."
+                )
+            }
         }
     }
 }
