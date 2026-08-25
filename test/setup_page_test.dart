@@ -569,6 +569,36 @@ void main() {
           reason: 'the wizard popped off the stack');
       container.dispose();
     });
+
+    testWidgets('a teardown that bypasses Cancel unwinds the waiting flow',
+        (tester) async {
+      // Guards the unwind, not the leak itself: a waiter dropped instead of
+      // completed leaves a suspended continuation, which no test can see from
+      // outside — [_waiter] is private and the State is gone. What this does
+      // catch is the resumed flow touching a disposed State on its way out.
+      //
+      // The wizard's own poll would reconnect the bike and resolve the wait
+      // before the teardown, so the handler is swapped for one that does not.
+      final container = ProviderContainer(overrides: [
+        connectionHandlerProvider(id)
+            .overrideWith(() => _CountingConnectionHandler()),
+      ]);
+      openBike(container);
+      await reachTurnOff(tester, container);
+      expect(titleIs('Switch the bike off'), isTrue,
+          reason: 'sanity check: the flow must be parked on a wait, so that '
+              'a waiter is pending when the page goes away');
+
+      // Straight to a bare tree instead of through closeWizard: this is the
+      // container-teardown path, and it never reaches _cancel.
+      await tester.pumpWidget(const SizedBox());
+      await pump(tester);
+
+      expect(tester.takeException(), isNull,
+          reason: 'the flow must unwind through its own !_alive returns, '
+              'not call setState on a disposed State');
+      container.dispose();
+    });
   });
 
   group('the fast reconnect poll while waiting for the bike to come back',

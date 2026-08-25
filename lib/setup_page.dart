@@ -288,7 +288,16 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     _hintTimer?.cancel();
     _reconnectPollTimer?.cancel();
     _cancelled = true;
+    // Completed, not just dropped: the subscription that would otherwise
+    // complete it closes on the next line, so a waiter left pending here stays
+    // pending for the life of the isolate, and with it the suspended
+    // [_runSteps] continuation and everything it holds. False is the value
+    // [_cancel] uses, so the flow unwinds through its own !_alive returns.
+    final waiter = _waiter;
     _waiter = null;
+    if (waiter != null && !waiter.isCompleted) {
+      waiter.complete(false);
+    }
     _connectionSub?.close();
     // A backstop only, and deliberately just the window: the page can be
     // disposed with its whole container, where a write would have nothing to
