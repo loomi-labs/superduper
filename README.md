@@ -126,8 +126,8 @@ Every other limit is the app switching between two firmware profiles at your lim
 way the old Swiss dynamic mode did. While the mode is selected, the app watches your speed
 over Bluetooth. Below the limit the bike runs the closest faster profile with the throttle
 setting you picked, so you get your throttle if you asked for one. Above the limit the app
-switches to the fastest profile that caps at or under your limit. When you slow back down, it
-switches back.
+switches to the fastest profile that caps at or under your limit. When you slow to about
+2 km/h below the limit, it switches back, so the mode does not flip-flop at the limit.
 
 The honest cost of that: if Bluetooth drops while you are riding *below* the limit, the bike
 stays in that first profile, and that profile's own cap can be as high as 45 km/h, until the
@@ -141,19 +141,6 @@ without you selecting anything. It stops when you leave the mode, unless one of 
 needs it. On iOS there is no background service, so if the app is closed or the phone is locked
 the switching stops and the bike stays in the profile that was written last. A mode that exactly
 matches a firmware profile needs none of this.
-
-#### Coming from an older version
-
-The switch up to the 25 km/h profile now happens at 25 km/h instead of at 23 km/h, because the
-switching point is simply the mode's limit. It still switches back down below about 23 km/h, so
-it doesn't flip-flop around the limit. In practice you keep the throttle between 23 and
-25 km/h, where the old version had already cut over.
-
-The old static CH mode 2 (US Class 2, 20 mph / 32 km/h with throttle) is gone. Bikes that were
-left on it move to the pre-made "25 km/h" mode, which is a lower cap than before, though the
-throttle still works below the limit. To get the old behavior back, add a custom mode with a
-32 km/h limit and throttle on: that is an exact firmware match, so the bike rides US Class 2 on
-its own and the app doesn't have to be connected.
 
 ### Assist
 
