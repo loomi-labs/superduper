@@ -38,16 +38,61 @@ android {
 
     signingConfigs {
         create("release") {
-             keyAlias = keystoreProperties["keyAlias"] as String
-             keyPassword = keystoreProperties["keyPassword"] as String
-             storeFile = keystoreProperties["storeFile"]?.let { file(it) }
-             storePassword = keystoreProperties["storePassword"] as String
-         }
+            if (keystorePropertiesFile.exists()) {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = keystoreProperties["storeFile"]?.let { file(it) }
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            // Debug signing here is a local-build convenience only. The
+            // task-graph check below stops it reaching a real release artifact.
+            signingConfig = if (keystorePropertiesFile.exists())
+                signingConfigs.getByName("release")
+            else
+                signingConfigs.getByName("debug")
+        }
+    }
+}
+
+// A distributed artifact must never carry the debug certificate. The check runs
+// when a release task runs, not while the project configures: the buildTypes
+// block above configures on every Gradle invocation, so failing there would
+// break debug builds too.
+//
+// A task action rather than gradle.taskGraph.whenReady: whenReady is a
+// configuration-phase callback that the configuration cache rejects, and
+// Gradle 9 drops it. Only the captured Boolean crosses into the action, so this
+// form stays cache-safe.
+//
+// Compared against "true", not just tested for presence: hasProperty() is
+// satisfied by -PallowDebugSigning=false as well.
+val allowDebugSigning = project.findProperty("allowDebugSigning")?.toString() == "true"
+
+if (!keystorePropertiesFile.exists()) {
+    tasks.configureEach {
+        val signsRelease = name.contains("Release") &&
+            listOf("assemble", "bundle", "package", "signingConfigWriter")
+                .any { name.startsWith(it) }
+        if (signsRelease) {
+            doFirst {
+                if (allowDebugSigning) {
+                    logger.warn(
+                        "WARNING: signing the release build with the DEBUG certificate. " +
+                            "This artifact is for local testing only. Do not distribute it."
+                    )
+                } else {
+                    throw GradleException(
+                        "key.properties is missing, so the release build would be signed " +
+                            "with the debug certificate. Add key.properties, or set " +
+                            "ORG_GRADLE_PROJECT_allowDebugSigning=true for a local build."
+                    )
+                }
+            }
         }
     }
 }

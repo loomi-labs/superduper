@@ -13,6 +13,10 @@ import 'package:superduper/utils/logger.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+  // Start the ride log as early as possible: it records debug-level lines
+  // (including BLE traffic) to a rotating file even in release builds. Never
+  // throws — file logging just stays off if the directory is unavailable.
+  await log.attachFileSink();
   runApp(const ProviderScope(child: SuperDuper()));
 }
 
@@ -36,7 +40,7 @@ Future<Map<Permission, PermissionStatus>> getPermissions() async {
       Permission.bluetoothConnect,
       Permission.bluetoothScan,
     ]);
-  } else if (Platform.isMacOS) {
+  } else if (Platform.isMacOS || Platform.isLinux) {
     return Future(() => const {});
   }
   return perms.request();
@@ -132,7 +136,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                   (element) => element.isDenied,
                 );
                 if (denied) {
-                  log.i(SDLogger.bike, 'Permission denied: ${snapshot.data}');
+                  log.i(SDLogger.general, 'Permission denied: ${snapshot.data}');
                   return const PermissionPage();
                 }
                 return const BikeSelectWidget();

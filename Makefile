@@ -3,8 +3,14 @@ MAKEFLAGS += -j4
 
 watch: watch-runner dev
 
+ifeq ($(shell uname -s),Darwin)
+DESKTOP_DEVICE := macos
+else
+DESKTOP_DEVICE := linux
+endif
+
 dev:
-	flutter run --hot -d macos
+	flutter run --hot -d $(DESKTOP_DEVICE)
 
 watch-runner:
 	dart run build_runner watch

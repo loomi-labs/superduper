@@ -17,6 +17,14 @@ class ColorRange {
   Color fontColor() {
     return start.computeLuminance() > 0.4 ? Colors.black : Colors.white;
   }
+
+  /// The one colour the control page paints with. The gradient itself survives
+  /// only in the bike's identity dot next to its name.
+  Color accent() => start;
+
+  /// What a label on a solid [accent] fill must be. [fontColor] already picks
+  /// for contrast against [start], and [accent] returns [start].
+  Color onAccent() => fontColor();
 }
 
 final _colors = [

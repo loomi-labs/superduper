@@ -52,3 +52,9 @@ app.*.map.json
 bugreport*
 .aider*
 .env
+
+# Local scratch area (APKs, protocol notes) — never committed
+/scratch/
+
+# Per-machine Claude Code settings
+.claude/settings.local.json

@@ -7,7 +7,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:superduper/bike.dart';
 import 'package:superduper/db.dart';
 import 'package:superduper/debug.dart';
+import 'package:superduper/fake_bike.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:superduper/repository.dart';
+import 'package:superduper/utils/logger.dart';
 import 'package:superduper/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -54,8 +57,9 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
     AsyncValue<List<BluetoothDevice>> connected,
     String bikeID,
   ) =>
-      connected.value?.any((element) => element.remoteId.str == bikeID) ??
-      false;
+      isFakeBike(bikeID) ||
+      (connected.value?.any((element) => element.remoteId.str == bikeID) ??
+          false);
 
   @override
   Widget build(BuildContext context) {
@@ -66,12 +70,24 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
     var isScanning = ref.watch(isScanningStatusProvider);
 
     List<BikeState> foundBikes = [];
-    for (var result in scanResults.value ?? []) {
-      if (bikeNotifier.getBike(result.device.remoteId.str) != null) {
-        continue;
+    // Only once bikes.json has landed: before that every saved bike reads as
+    // unknown, so this list would offer the rider's own bike as a fresh one —
+    // and opening it that way starts from a default state, not the record.
+    if (bikeNotifier.isLoaded) {
+      for (var result in scanResults.value ?? []) {
+        if (bikeNotifier.getBike(result.device.remoteId.str) != null) {
+          continue;
+        }
+        foundBikes.add(BikeState.defaultState(result.device.remoteId.str));
       }
-      foundBikes.add(BikeState.defaultState(result.device.remoteId.str));
     }
+
+    // Every device id the scan currently answers, saved or not — a saved bike
+    // in here is worth tapping even though nothing has connected it yet.
+    final Set<String> seenIds = {
+      for (final result in scanResults.value ?? const [])
+        result.device.remoteId.str,
+    };
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -271,19 +287,27 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
                   padding: const EdgeInsets.symmetric(horizontal: 20.0),
                   sliver: SliverList(
                     delegate: SliverChildBuilderDelegate((context, index) {
+                      final bike = bikeList[index];
+                      final connected = isConnected(connectedDevices, bike.id);
+                      // Connected beats in-range: a bike already linked needs
+                      // no invitation to tap it. Neither gets no pill at all,
+                      // rather than a third, blank one — see
+                      // DiscoverCard.trailing.
+                      final trailing = connected
+                          ? const StatusPill.connected()
+                          : seenIds.contains(bike.id)
+                              ? const StatusPill.inRange()
+                              : null;
                       return Padding(
                         padding: const EdgeInsets.only(top: 16.0),
                         child: DiscoverCard(
-                          selected: isConnected(
-                            connectedDevices,
-                            bikeList[index].id,
-                          ),
-                          onTap: () => selectBike(bikeList[index]),
-                          title: bikeList[index].name,
-                          subtitle: bikeList[index].id,
+                          selected: connected,
+                          onTap: () => selectBike(bike),
+                          title: bike.name,
+                          subtitle: bike.id,
                           titleIcon: Icons.directions_bike,
-                          colorIndex: bikeList[index]
-                              .color, // Vary colors based on index
+                          colorIndex: bike.color, // Vary colors based on index
+                          trailing: trailing,
                         ),
                       );
                     }, childCount: bikeList.length),
@@ -377,6 +401,9 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
                       ),
                     ),
 
+              // Share ride logs (also available in release builds)
+              const SliverToBoxAdapter(child: ShareLogsButton()),
+
               // Debug Button in Debug Mode
               if (kDebugMode)
                 SliverToBoxAdapter(
@@ -413,6 +440,68 @@ class BikeSelectWidgetState extends ConsumerState<BikeSelectWidget> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Shares the ride log file(s) so they can be pulled off the phone, where the
+/// app documents directory is otherwise private. Visible in release builds too.
+class ShareLogsButton extends StatelessWidget {
+  const ShareLogsButton({super.key});
+
+  Future<void> _shareLogs(BuildContext context) async {
+    // Grab the messenger and the button's position before awaiting: the
+    // context may be gone afterwards. The origin anchors the iPad popover.
+    final messenger = ScaffoldMessenger.of(context);
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box == null || !box.hasSize
+        ? null
+        : box.localToGlobal(Offset.zero) & box.size;
+    try {
+      // Make sure buffered lines are on disk before handing the files over.
+      await log.flushFileSink();
+      final files = log.logFiles();
+      if (files.isEmpty) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('No log file yet.')),
+        );
+        return;
+      }
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [
+            for (final file in files) XFile(file.path, mimeType: 'text/plain'),
+          ],
+          title: 'SuperDuper logs',
+          subject: 'SuperDuper logs',
+          sharePositionOrigin: origin,
+        ),
+      );
+    } catch (e) {
+      log.e(SDLogger.ui, 'Failed to share logs', e);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not share logs: $e')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 30.0, left: 20.0, right: 20.0),
+      child: ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.grey[800],
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        onPressed: () => _shareLogs(context),
+        icon: const Icon(Icons.ios_share, size: 16),
+        label: const Text('SHARE LOGS'),
       ),
     );
   }

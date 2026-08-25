@@ -27,6 +27,15 @@ final UUID_INFO_SERVICE = Guid.fromString("180a");
 // see https://nordicsemiconductor.github.io/Nordic-Thingy52-FW/documentation/firmware_architecture.html
 final UUID_DEVICE_FIRMWARE_UPDATES = Guid.fromString('fe59');
 
+/// Speed notifications arrive on the register notifier as
+/// `[2, 1, speed_low, speed_high, ...]`, speed in km/h * 100 (uint16 LE).
+double? parseSpeedNotification(List<int> data) {
+  if (data.length < 4 || data[0] != 2 || data[1] != 1) {
+    return null;
+  }
+  return ((data[3] << 8) | data[2]) / 100.0;
+}
+
 class StateData {
   StateData(this.config);
   List<int> config;

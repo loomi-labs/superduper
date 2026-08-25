@@ -51,13 +51,13 @@ final class BikesDBProvider
   }
 }
 
-String _$bikesDBHash() => r'68d0f459b163bb1f35c5e2ae819318d5f26c786d';
+String _$bikesDBHash() => r'801465a2b68acc8ded37eb58db061b9127e5e3e7';
 
 abstract class _$BikesDB extends $Notifier<List<BikeState>> {
   List<BikeState> build();
   @$mustCallSuper
   @override
-  void runBuild() {
+  WhenComplete runBuild() {
     final ref = this.ref as $Ref<List<BikeState>, List<BikeState>>;
     final element =
         ref.element
@@ -67,7 +67,7 @@ abstract class _$BikesDB extends $Notifier<List<BikeState>> {
               Object?,
               Object?
             >;
-    element.handleCreate(ref, build);
+    return element.handleCreate(ref, build);
   }
 }
 
@@ -103,13 +103,13 @@ final class SettingsDBProvider
   }
 }
 
-String _$settingsDBHash() => r'edad9433dc33333134820de0bd0ed8d2c60b67d2';
+String _$settingsDBHash() => r'62fce323c50dfb1060894342613b473224d282d4';
 
 abstract class _$SettingsDB extends $Notifier<SettingsModel> {
   SettingsModel build();
   @$mustCallSuper
   @override
-  void runBuild() {
+  WhenComplete runBuild() {
     final ref = this.ref as $Ref<SettingsModel, SettingsModel>;
     final element =
         ref.element
@@ -119,6 +119,6 @@ abstract class _$SettingsDB extends $Notifier<SettingsModel> {
               Object?,
               Object?
             >;
-    element.handleCreate(ref, build);
+    return element.handleCreate(ref, build);
   }
 }
