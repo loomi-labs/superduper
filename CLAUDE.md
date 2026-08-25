@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-SuperDuper is a Flutter app (Android/iOS) that controls Super73 ebikes over Bluetooth LE — an alternative to the official app. No backend; all state is local.
+SuperDuper is a Flutter app that controls Super73 ebikes over Bluetooth LE — an alternative to the official app. Android and iOS are the release targets. macOS and Linux build as desktop targets, for development only. No backend; all state is local.
 
 ## Commands
 
 ```sh
-make dev                      # flutter run --hot -d macos (dev happens on macOS desktop)
+make dev                      # flutter run --hot -d <desktop> (Makefile picks macos on Darwin, linux elsewhere)
 make watch                    # build_runner watch + dev, in parallel
 dart run build_runner build   # regenerate freezed/riverpod/json code (make build-runner)
 flutter analyze               # lint (flutter_lints + riverpod_lint)
@@ -31,14 +31,14 @@ The project uses freezed (data classes), json_serializable, and riverpod_generat
 
 All source lives flat in `lib/`. State management is Riverpod (annotation/codegen style). The layering, top to bottom:
 
-- **`main.dart`** — entry point. Requests platform-specific BLE/location permissions, then shows `BikeSelectWidget`. On macOS permissions are skipped (dev-only target; there is no macOS release).
+- **`main.dart`** — entry point. Requests platform-specific BLE/location permissions, then shows `BikeSelectWidget`. On macOS and Linux permissions are skipped (dev-only targets; there is no desktop release).
 - **`select_page.dart`** — scans for bikes, lists saved + discovered ones, navigates to `BikePage`. Selecting a bike stores it as `currentBike` in settings.
 - **`bike.dart`** — the core. The `Bike` riverpod notifier (keyed by device id) owns the control loop: polls bike state every 5s (debounced around writes), and enforces "locked" settings — if a locked value (light/mode/assist) differs from what the bike reports, it writes the locked value back. Also contains `BikePage` UI and the Android-only Background Lock, implemented as a `flutter_foreground_task` foreground service that keeps the app (and the lock loop) alive when the phone is locked.
 - **`repository.dart`** — Bluetooth layer over flutter_blue_plus. `ConnectionHandler` (per device id) manages connect/auto-reconnect (10s retry timer) and exposes read/write; `BluetoothRepository` does scanning (keyword-filtered for SUPER73 devices) and raw characteristic reads/writes.
 - **`models.dart`** — `BikeState` (freezed): encodes/decodes the BLE packet. Reading state means writing `[3, 0]` to the register-ID characteristic then reading the register characteristic; writes send `[0, 209, light, assist, mode, 0...]`. The wire byte for each region lives in a fixed table (`firmwareProfiles`); `selectableModes` picks the right bank per region (`BikeRegion`). There is no runtime offset arithmetic on the wire byte.
 - **`services.dart`** — BLE service/characteristic UUIDs for the bike's GATT profile.
 - **`db.dart`** — persistence: plain JSON files (`bikes.json`, `settings.json`) in the app documents directory, wrapped in `keepAlive` riverpod notifiers (`BikesDB`, `SettingsDB`).
-- **`utils/logger.dart`** — global `log` (SDLogger). Log with a tag constant: `log.d(SDLogger.bike, '...')`; tags are `bluetooth`, `bike`, `ui`, `db`, `general`. Debug-level logs are stripped from the *console* in release, but a file sink (attached in `main()` via `log.attachFileSink()`, rotating `logs/superduper.log` in the documents dir, ~4 MB cap) records debug level in release builds too; `select_page.dart`'s SHARE LOGS button exports it via share_plus.
+- **`utils/logger.dart`** — global `log` (SDLogger). Log with a tag constant: `log.d(SDLogger.bike, '...')`; tags are `bluetooth`, `bike`, `ui`, `db`, `general`. Debug-level logs are stripped from the *console* in release, but a file sink (attached in `main()` via `log.attachFileSink()`, rotating `logs/superduper.log` in the documents dir, ~32 MB cap: `maxFileSizeKB` 2048 x 16 files) records debug level in release builds too; `select_page.dart`'s SHARE LOGS button exports it via share_plus.
 - **`debug.dart`** — debug page that fabricates bikes with random MAC addresses for UI work without hardware.
 - **`setup_page.dart`** — the mandatory per-bike setup wizard. `BikePage` gates its Light/Mode/Assist controls behind `BikeState.capabilities == null` and, while true, shows a gate card in their place; tapping its Start button pushes this file's `SetupPage` widget. The wizard walks the rider through two power cycles, probing every mode wire, assist level and the light in between, and produces the `BikeCapabilities` that unlock the controls (and tell a card whether the bike accepts a given value at all).
 
