@@ -222,7 +222,7 @@ Superduper can only add automation around what the official app already does. It
 
 ### How do I get the logs off my phone?
 
-Superduper keeps a ride log on the device: a rotating text file at `logs/superduper.log` in the app's private documents directory. The budget is about 32 MB — enough for several full rides — and only once it is exceeded does the oldest file get deleted. Every line is timestamped, so individual rides are easy to tell apart. It records detailed Bluetooth traffic — connects, register reads, mode/light/assist writes, speed notifications — in normal store builds too, which is what makes it useful when something goes wrong on an actual ride. Nothing is ever uploaded anywhere. To send it along with a bug report, tap **SHARE LOGS** at the bottom of the bike select screen and pick an app to share the file(s) with.
+Superduper keeps a ride log on the device: a rotating text file at `logs/superduper.log` in the app's private documents directory. The budget is about 32 MB — enough for several full rides — and only once it is exceeded does the oldest file get deleted. Every line is timestamped, so individual rides are easy to tell apart. It records detailed Bluetooth traffic — connects, register reads, mode/light/assist writes, speed notifications — in normal store builds too, which is what makes it useful when something goes wrong on an actual ride. Superduper never uploads the log on its own. To send it along with a bug report, tap **SHARE LOGS** at the bottom of the bike select screen and pick an app to share the file(s) with.
 
 ### I'm having another issue or have a feature request
 
@@ -233,7 +233,7 @@ I'm sorry! Please start by making sure you have the newest app from the app stor
 ### Releases
 
 1. Update version, save. Don't commit.
-1. Run `make release`
+1. Run `make release`. A release build needs `android/key.properties`. Without it the build stops, because the artifact would carry the debug certificate. For a local release build without keys, run `ORG_GRADLE_PROJECT_allowDebugSigning=true flutter build apk --release` — that artifact is for testing only, and no store accepts it.
 1. Update release notes at provided URL.
 1. Upload aab to https://play.google.com/console/u/0/developers/6048825475784314007/app/4973912181639360195/tracks/internal-testing
 1. Upload ipa to the Transporter app

@@ -31,11 +31,12 @@ SuperDuper is designed to connect to your ebike via Bluetooth. The app is design
 
 ### Data Stored on Your Device Only
 
-The following information is stored locally on your device only and is never transmitted to us or any third parties:
+The following information is stored locally on your device only. SuperDuper never transmits it to us or to any third parties. Only you can send it off the device, and only by a deliberate action such as SHARE LOGS:
 
 - Bluetooth information about your ebike(s) to enable connection
 - Custom bike names you create
 - Your preferred bike settings
+- Diagnostic logs of the app's Bluetooth activity, in a rotating file on your device. The app never uploads them. They leave your device only when you tap SHARE LOGS and select where to send them.
 
 ### Legal Basis for Processing
 
@@ -43,7 +44,7 @@ We process the limited data described above based on our legitimate interest to 
 
 ### Data Retention and Deletion
 
-All data is stored locally on your device only. This data is retained as long as you have the App installed on your device. When you uninstall the App, all data associated with the App is automatically deleted. We do not retain any of your data on our servers, as we do not collect any data from your device.
+All data is stored locally on your device only. This data is retained as long as you have the App installed on your device. When you uninstall the App, all data associated with the App is automatically deleted. This includes the diagnostic log file. That file rotates on its own and holds about 32 MB at most, so the App deletes the oldest entries as new ones arrive. We do not retain any of your data on our servers, as we do not collect any data from your device.
 
 If you wish to delete your data before uninstalling the App, you can clear the App's data through your device's settings menu:
 - On Android: Settings > Apps > SuperDuper > Storage > Clear Data

@@ -22,11 +22,12 @@ SuperDuper is designed to connect to your ebike via Bluetooth. The app is design
 
 ### Data Stored on Your Device Only
 
-The following information is stored locally on your device only and is never transmitted to us or any third parties:
+The following information is stored locally on your device only. SuperDuper never transmits it to us or to any third parties. Only you can send it off the device, and only by a deliberate action such as SHARE LOGS:
 
 - Bluetooth information about your ebike(s) to enable connection
 - Custom bike names you create
 - Your preferred bike settings
+- Diagnostic logs of the app's Bluetooth activity, in a rotating file on your device. The app never uploads them. They leave your device only when you tap SHARE LOGS and select where to send them.
 
 ### Required App Store Data
 
