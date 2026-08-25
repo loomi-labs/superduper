@@ -33,6 +33,24 @@ Map<String, dynamic> _$LastSeenToJson(_LastSeen instance) => <String, dynamic>{
   'wire': instance.wire,
 };
 
+_BootSignature _$BootSignatureFromJson(Map<String, dynamic> json) =>
+    _BootSignature(
+      measuredAt: DateTime.parse(json['measuredAt'] as String),
+      bootWire: (json['bootWire'] as num?)?.toInt(),
+      bootAssist: (json['bootAssist'] as num?)?.toInt(),
+      preOffWire: (json['preOffWire'] as num).toInt(),
+      preOffAssist: (json['preOffAssist'] as num).toInt(),
+    );
+
+Map<String, dynamic> _$BootSignatureToJson(_BootSignature instance) =>
+    <String, dynamic>{
+      'measuredAt': instance.measuredAt.toIso8601String(),
+      'bootWire': instance.bootWire,
+      'bootAssist': instance.bootAssist,
+      'preOffWire': instance.preOffWire,
+      'preOffAssist': instance.preOffAssist,
+    };
+
 _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
   id: json['id'] as String,
   legacyMode: (json['mode'] as num?)?.toInt() ?? 0,
@@ -59,6 +77,9 @@ _BikeState _$BikeStateFromJson(Map<String, dynamic> json) => _BikeState(
   lastSeen: json['lastSeen'] == null
       ? null
       : LastSeen.fromJson(json['lastSeen'] as Map<String, dynamic>),
+  bootSignature: json['bootSignature'] == null
+      ? null
+      : BootSignature.fromJson(json['bootSignature'] as Map<String, dynamic>),
   name: json['name'] as String,
   region: $enumDecodeNullable(_$BikeRegionEnumMap, json['region']),
   autoReconnect: json['autoReconnect'] as bool? ?? true,
@@ -80,6 +101,7 @@ Map<String, dynamic> _$BikeStateToJson(_BikeState instance) =>
       'startupModeId': instance.startupModeId,
       'startupAssist': instance.startupAssist,
       'lastSeen': instance.lastSeen?.toJson(),
+      'bootSignature': instance.bootSignature?.toJson(),
       'name': instance.name,
       'region': _$BikeRegionEnumMap[instance.region],
       'autoReconnect': instance.autoReconnect,

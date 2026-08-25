@@ -547,6 +547,29 @@ abstract class LastSeen with _$LastSeen {
       _$LastSeenFromJson(json);
 }
 
+/// What this bike's settings register really reports after a power-on.
+///
+/// Measured once, per bike: the firmware decides which bytes reset and which
+/// come back unchanged, and that answer differs by region and by version. A
+/// null byte here is a byte that came back unchanged during calibration —
+/// it carries no boot news, so detection must ignore it. The staged pre-off
+/// values stay so a later audit can tell what the measurement compared
+/// against. Light is not recorded: it has a boot transient and its register
+/// value is untrustworthy.
+@freezed
+abstract class BootSignature with _$BootSignature {
+  const factory BootSignature({
+    required DateTime measuredAt,
+    int? bootWire,
+    int? bootAssist,
+    required int preOffWire,
+    required int preOffAssist,
+  }) = _BootSignature;
+
+  factory BootSignature.fromJson(Map<String, Object?> json) =>
+      _$BootSignatureFromJson(json);
+}
+
 /// The mode a CH bike is seeded with: what the old CH dynamic mode was, as a
 /// custom mode. Its id is fixed so migration can recognise it.
 const seededChModeId = 'seed-ch-25';
@@ -590,6 +613,9 @@ abstract class BikeState with _$BikeState {
       // Null as a group: a bike the app has never read has nothing to compare
       // a fresh read against.
       LastSeen? lastSeen,
+      // Null until the rider calibrates this bike, which every existing bike
+      // is: detection has nothing measured to compare a fresh read against.
+      BootSignature? bootSignature,
       required String name,
       BikeRegion? region,
       // Whether the app keeps trying to reconnect to this bike on its own.

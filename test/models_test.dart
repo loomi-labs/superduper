@@ -591,6 +591,50 @@ void main() {
     });
   });
 
+  group('boot signature', () {
+    // A bike whose selection round-trips on its own, so a failure here is
+    // about the signature and not about the mode migration.
+    BikeState saved() =>
+        bike(region: BikeRegion.ch, customModes: [seededChMode])
+            .withSelectedMode(seededChModeId);
+
+    test('a bike the app never calibrated has no boot signature', () {
+      final json = legacyJson();
+      expect(json.containsKey('bootSignature'), isFalse,
+          reason: 'an old bikes.json has no such key');
+      expect(BikeState.fromJson(json).bootSignature, isNull);
+      expect(BikeState.defaultState('id').bootSignature, isNull);
+    });
+
+    test('a measured boot signature survives a save', () {
+      final b = saved().copyWith(
+          bootSignature: BootSignature(
+              measuredAt: DateTime.utc(2026, 8, 11, 9, 30, 15),
+              bootWire: 4,
+              bootAssist: 0,
+              preOffWire: 7,
+              preOffAssist: 3));
+      expect(BikeState.fromJson(b.toJson()), b);
+    });
+
+    test('a byte that came back persisted saves as none', () {
+      // Null is the measurement the 2026-08-11 logs produced for assist: the
+      // register reported the pre-off value, so the byte carries no boot news.
+      final b = saved().copyWith(
+          bootSignature: BootSignature(
+              measuredAt: DateTime.utc(2026, 8, 11, 9, 30),
+              bootWire: 4,
+              bootAssist: null,
+              preOffWire: 7,
+              preOffAssist: 3));
+      final decoded = BikeState.fromJson(b.toJson());
+      expect(decoded, b);
+      expect(decoded.bootSignature!.bootAssist, isNull);
+      expect(decoded.bootSignature!.preOffAssist, 3,
+          reason: 'the staged value stays for a re-audit');
+    });
+  });
+
   group('mode selection', () {
     test('withSelectedMode keeps the legacy projection in sync', () {
       expect(
