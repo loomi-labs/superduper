@@ -33,6 +33,9 @@ abstract final class BikeGatt {
   static const v1OdometerSelector = <int>[0x02, 0x02];
   static const v2ControlSelector = <int>[0x00, 0xd0];
   static const v2ModeSelector = <int>[0x00, 0xd9];
+  static const rideDataSelector = <int>[0x02, 0x03];
+  static const rideDataRequest = <int>[0x02, 0x03, 0, 0, 0, 0, 0, 0, 0, 0];
+  static const speedPacketId = <int>[0x02, 0x01];
   static const displayVersionSelector = <int>[0xfc, 0xfc];
   static const componentVersionsSelector = <int>[0xfa, 0xfa];
 }
@@ -99,6 +102,14 @@ abstract class BikeProtocolDefinition {
   }
 
   List<int> encodeConfiguration(BikeConfiguration configuration);
+
+  /// Speed from a telemetry notification, or null for any other packet.
+  double? decodeSpeedKmh(List<int> packet) => null;
+
+  /// Asks the bike to stream ride data. Speed arrives on the telemetry
+  /// characteristic. The bike stops on its own at a standstill and after a
+  /// reconnect, so callers repeat this when samples stop.
+  Future<void> requestRideData() async {}
 
   Future<void> writeConfiguration(BikeConfiguration configuration) {
     return _run(
@@ -260,6 +271,39 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
       0,
       0,
     ];
+  }
+
+  @override
+  double? decodeSpeedKmh(List<int> packet) {
+    if (packet.length < 4 ||
+        packet[0] != BikeGatt.speedPacketId[0] ||
+        packet[1] != BikeGatt.speedPacketId[1]) {
+      return null;
+    }
+    return ((packet[3] << 8) | packet[2]) / 100.0;
+  }
+
+  @override
+  Future<void> requestRideData() async {
+    await _run(
+      _bike.writeCharacteristic(
+        serviceUuid: BikeGatt.metricsService,
+        characteristicUuid: BikeGatt.registerSelector,
+        value: BikeGatt.rideDataSelector,
+      ),
+      'Selecting ride data',
+    );
+    await _run(
+      _bike.writeCharacteristic(
+        serviceUuid: BikeGatt.metricsService,
+        characteristicUuid: BikeGatt.stateRegister,
+        value: BikeGatt.rideDataRequest,
+      ),
+      'Requesting ride data',
+    );
+    // The selector now points at ride data. The next history read must not
+    // trust a retained frame.
+    _lastLatchedHistorySelector = null;
   }
 
   int decodeOdometer(List<int> packet) {

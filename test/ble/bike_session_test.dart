@@ -76,6 +76,7 @@ void main() {
         BikeGatt.v1OdometerSelector,
         BikeGatt.displayVersionSelector,
         BikeGatt.componentVersionsSelector,
+        BikeGatt.rideDataSelector,
       ]);
       expect(session.odometerMeters.value, connection.odometerMeters);
       final authenticationWrite = connection.writes.singleWhere(
@@ -187,6 +188,22 @@ void main() {
       ),
       isEmpty,
     );
+  });
+
+  test('a refused ride-data request does not fail the connect', () async {
+    const configuration = BikeConfiguration(light: false, mode: 2, assist: 3);
+    final protocol = _FakeConnectedProtocol(configuration)
+      ..rideDataError = StateError('The bike refused ride data.');
+    session = createSession(
+      readDiagnosticsOnConnect: false,
+      connectedProtocol: protocol,
+    );
+
+    await session.connect();
+
+    expect(protocol.rideDataRequests, 1);
+    expect(session.state.value, isA<SessionReady>());
+    expect(session.observed.value, configuration);
   });
 
   test('invalidates a same-ID history result before accepting state', () async {
@@ -829,6 +846,7 @@ void main() {
 
     final writes = connection.writes
         .where((write) => write.characteristicUuid == BikeGatt.stateRegister)
+        .where((write) => write.value[1] != 3)
         .skip(1)
         .toList();
     expect(writes, hasLength(2));
@@ -1411,6 +1429,61 @@ void main() {
     expect(session.state.value, isA<SessionReady>());
     expect(_configurationWrites(connection), hasLength(3));
   });
+
+  test('V1 requests ride data after connecting and publishes speed', () async {
+    connection.readFrames.add(v1StateFrame(mode: 1));
+    session = createSession(readDiagnosticsOnConnect: false);
+
+    await session.connect();
+
+    final selectorWrites = connection.writes
+        .where((write) => write.characteristicUuid == BikeGatt.registerSelector)
+        .map((write) => write.value)
+        .toList();
+    expect(selectorWrites.last, BikeGatt.rideDataSelector);
+    final stateWrites = connection.writes.where(
+      (write) => write.characteristicUuid == BikeGatt.stateRegister,
+    );
+    expect(stateWrites.last.value, BikeGatt.rideDataRequest);
+    expect(session.speedKmh.value, isNull);
+
+    connection.emitNotification([2, 1, 0xc4, 0x09, 0, 0, 0, 0, 0, 0]);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(session.speedKmh.value, 25.0);
+    expect(session.lastSpeedAt, isNotNull);
+  });
+
+  test('speed resets on disconnect', () async {
+    connection.readFrames.add(v1StateFrame());
+    session = createSession(readDiagnosticsOnConnect: false);
+    await session.connect();
+    connection.emitNotification([2, 1, 0x10, 0x00, 0, 0, 0, 0, 0, 0]);
+    await Future<void>.delayed(Duration.zero);
+    expect(session.speedKmh.value, closeTo(0.16, 0.001));
+
+    await session.disconnect();
+
+    expect(session.speedKmh.value, isNull);
+  });
+
+  test('V2 does not request ride data', () async {
+    connection.readFrames.addAll([
+      [0, 0xd0, 2, 0, 1, 0, 0, 0, 0, 0],
+      [0, 0xd9, 0, 0, 0, 2, 0, 0, 0, 0],
+    ]);
+    session = createSession(
+      protocol: BikeProtocolVersion.v2,
+      readDiagnosticsOnConnect: false,
+    );
+    await session.connect();
+    expect(
+      connection.writes.where(
+        (write) => _sameBytes(write.value, BikeGatt.rideDataSelector),
+      ),
+      isEmpty,
+    );
+  });
 }
 
 final class _FakeConnectedProtocol extends BikeProtocolDefinition {
@@ -1419,6 +1492,16 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
   final BikeConfiguration configuration;
   int configurationReads = 0;
   final List<BikeConfiguration> configurationWrites = [];
+  int rideDataRequests = 0;
+  Error? rideDataError;
+
+  @override
+  Future<void> requestRideData() async {
+    rideDataRequests++;
+    if (rideDataError case final error?) {
+      throw error;
+    }
+  }
 
   @override
   BikeControlPatch? decodeTelemetry(List<int> packet) => null;
@@ -1480,4 +1563,5 @@ bool _sameBytes(List<int> left, List<int> right) {
 List<CharacteristicWrite> _configurationWrites(FakeBikeConnection connection) =>
     connection.writes
         .where((write) => write.characteristicUuid == BikeGatt.stateRegister)
+        .where((write) => write.value[1] != 3)
         .toList();

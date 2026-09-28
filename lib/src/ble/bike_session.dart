@@ -194,6 +194,13 @@ final class BikeSession {
     null,
     options: const SignalOptions(name: 'bikeSession.observed'),
   );
+  final Signal<double?> _speedKmh = signal(
+    null,
+    options: const SignalOptions(name: 'bikeSession.speedKmh'),
+  );
+  DateTime? _lastSpeedAt;
+  ReadonlySignal<double?> get speedKmh => _speedKmh.readonly();
+  DateTime? get lastSpeedAt => _lastSpeedAt;
   final Signal<BikeConfiguration?> _pending = signal(
     null,
     options: const SignalOptions(name: 'bikeSession.pending'),
@@ -325,6 +332,17 @@ final class BikeSession {
     });
   }
 
+  Future<void> requestRideData() {
+    _ensureNotDisposed();
+    final generation = _generation;
+    return _commands.add(() async {
+      if (!_isCurrent(generation) || !_hasObservedConnection) {
+        return;
+      }
+      await _protocol.requestRideData();
+    });
+  }
+
   Future<BikeConfiguration> setLight(bool value) {
     return setControls(BikeControlPatch(light: value));
   }
@@ -427,6 +445,7 @@ final class BikeSession {
     _pending.dispose();
     _versions.dispose();
     _odometerMeters.dispose();
+    _speedKmh.dispose();
   }
 
   Future<void> _startConnect() {
@@ -505,6 +524,14 @@ final class BikeSession {
             _hasObservedConnection) {
           await _refreshOdometer();
           await _refreshVersions();
+        }
+        if (_isCurrent(generation) && _hasObservedConnection) {
+          try {
+            await _protocol.requestRideData();
+          } on Object {
+            // Ride data is optional. A bike that refuses the request still
+            // connects, without speed.
+          }
         }
       } on Object catch (error) {
         if (!_isCurrent(generation)) {
@@ -699,6 +726,12 @@ final class BikeSession {
       return;
     }
     try {
+      final speed = _protocol.decodeSpeedKmh(packet);
+      if (speed != null) {
+        _lastSpeedAt = DateTime.now();
+        _speedKmh.value = speed;
+        return;
+      }
       final current = _observed.peek();
       if (current == null) {
         return;
@@ -1056,6 +1089,8 @@ final class BikeSession {
   void _invalidateConfigurationState() {
     _clearPendingConfiguration();
     _observed.value = null;
+    _speedKmh.value = null;
+    _lastSpeedAt = null;
     _protocol.reset();
   }
 

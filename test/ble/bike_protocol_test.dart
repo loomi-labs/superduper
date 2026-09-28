@@ -463,4 +463,22 @@ void main() {
       );
     });
   });
+
+  group('speed telemetry', () {
+    test('decodes [2, 1, lo, hi] as km/h times 100', () {
+      expect(
+        BikeProtocol.v1.decodeSpeedKmh([2, 1, 0xc4, 0x09, 0, 0, 0, 0, 0, 0]),
+        25.0,
+      );
+    });
+
+    test('ignores other packets and short frames', () {
+      expect(
+        BikeProtocol.v1.decodeSpeedKmh([3, 0, 1, 2, 3, 4, 0, 0, 0, 0]),
+        isNull,
+      );
+      expect(BikeProtocol.v1.decodeSpeedKmh([2, 1, 5]), isNull);
+      expect(BikeProtocol.v2.decodeSpeedKmh([2, 1, 0xc4, 0x09]), isNull);
+    });
+  });
 }
