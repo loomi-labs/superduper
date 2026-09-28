@@ -55,7 +55,7 @@ void main() {
         connections.putIfAbsent(bike.bike.deviceId, () => []).add(connection);
         return BikeSession(
           connection: connection,
-          setOnConnect: bike.setOnConnect,
+          setOnConnect: resolveSetOnConnect(bike).patch,
           protocol: bike.bike.protocol,
           reconnectDelays: const [],
         );
@@ -89,7 +89,7 @@ void main() {
   test('startup applies every kept value before reporting ready', () async {
     await bikes.setOnConnect(
       'first',
-      const BikeControlPatch(light: true, mode: 3, assist: 4),
+      const SetOnConnect(light: true, mode: NativeModeRef(3), assist: 4),
     );
     connectionFrames['first'] = [
       [0, 0, 0, 0, 0, 0],

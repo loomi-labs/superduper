@@ -182,9 +182,16 @@ final class _BikeControlPageState extends State<BikeControlPage> {
             label: (mode) => '$mode',
             onChanged: (mode) => _runCommand(() => session!.setMode(mode)),
           ),
-          setOnConnectValue: bike.setOnConnect.mode == null
-              ? null
-              : '${bike.setOnConnect.mode}',
+          setOnConnectValue: switch (bike.setOnConnect.mode) {
+            null => null,
+            NativeModeRef(:final wire) => '$wire',
+            CustomModeRef(:final id) =>
+              bike.customModes
+                      .where((mode) => mode.id == id)
+                      .firstOrNull
+                      ?.name ??
+                  '?',
+          },
         ),
         const SizedBox(height: 14),
         _SettingSection(

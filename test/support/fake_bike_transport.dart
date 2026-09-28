@@ -410,7 +410,10 @@ final class FakeBikeConnection implements BikeConnection {
     required List<int> value,
   }) {
     return _operate(() async {
-      if (characteristicUuid == BikeGatt.stateRegister) {
+      // The ride-data request uses the same register but is not a
+      // configuration write.
+      if (characteristicUuid == BikeGatt.stateRegister &&
+          !BikeProtocol.hasPacketId(value, BikeGatt.rideDataSelector)) {
         configurationWriteStarts++;
         if (configurationWriteStarts > configurationWriteGateAfterStarts) {
           await configurationWriteGate?.future;

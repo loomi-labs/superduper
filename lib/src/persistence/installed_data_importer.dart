@@ -6,6 +6,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/bike_names.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/persistence/app_database.dart';
 
 const installedJsonImportKey = 'v1_json';
@@ -245,13 +246,10 @@ final class InstalledDataImporter {
             .insert(
               BikePreferencesCompanion.insert(
                 deviceId: imported.deviceId,
-                setOnConnect: BikeControlPatch(
+                setOnConnect: SetOnConnect(
                   light: imported.lightLocked && imported.light ? true : null,
                   mode: imported.modePinned
-                      ? imported.mode +
-                            (imported.region == BikeRegion.eu
-                                ? BikeControlValues.v1BankSize
-                                : 0)
+                      ? _legacyModeRef(imported.region, imported.mode)
                       : null,
                   assist: imported.assistLocked ? imported.assist : null,
                 ),
@@ -259,6 +257,20 @@ final class InstalledDataImporter {
                 backgroundConsentVersion: 0,
               ),
             );
+        if (imported.region == BikeRegion.ch) {
+          await database
+              .into(database.bikeCustomModes)
+              .insert(
+                BikeCustomModesCompanion.insert(
+                  deviceId: imported.deviceId,
+                  modeId: seededChMode.id,
+                  name: seededChMode.name,
+                  limitKmh: seededChMode.limitKmh,
+                  throttle: seededChMode.throttle,
+                  sortOrder: 0,
+                ),
+              );
+        }
         inserted++;
       }
 
@@ -472,6 +484,17 @@ final class InstalledDataImporter {
         warnings,
       ),
     );
+  }
+
+  /// Legacy records store a mode inside the region's bank. A legacy CH mode
+  /// is not a wire: modes 0 and 1 were the dynamic 25 km/h mode. A CH bike
+  /// therefore gets the seeded custom mode and never a native wire.
+  SetOnConnectMode _legacyModeRef(BikeRegion region, int mode) {
+    return switch (region) {
+      BikeRegion.us => NativeModeRef(mode),
+      BikeRegion.eu => NativeModeRef(mode + BikeControlValues.v1BankSize),
+      BikeRegion.ch => const CustomModeRef(seededChModeId),
+    };
   }
 
   BikeRegion _parseRegion(

@@ -1219,8 +1219,11 @@ final class _DiagnosticBikeConnection implements BikeConnection {
         characteristicUuid == BikeGatt.authenticationResponse) {
       authenticationWrites++;
     }
+    // The ride-data request uses the same register. It is not a control
+    // packet, so the reconnect check must not see it.
     if (serviceUuid == BikeGatt.metricsService &&
-        characteristicUuid == BikeGatt.stateRegister) {
+        characteristicUuid == BikeGatt.stateRegister &&
+        !BikeProtocol.hasPacketId(value, BikeGatt.rideDataSelector)) {
       configurationWrites.add(List<int>.unmodifiable(value));
     }
     onTrace(

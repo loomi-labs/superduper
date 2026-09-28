@@ -298,6 +298,10 @@ void main() {
 
     final writes = connection.writes
         .where((write) => write.characteristicUuid == BikeGatt.stateRegister)
+        .where(
+          (write) =>
+              !BikeProtocol.hasPacketId(write.value, BikeGatt.rideDataSelector),
+        )
         .skip(1)
         .toList();
     expect(writes, hasLength(2));

@@ -448,6 +448,7 @@ final class SavedBike {
     required this.bike,
     required this.setOnConnect,
     this.customModes = const [],
+    this.streetLegalOnQuickRestart = false,
     this.backgroundPreference = const BackgroundPreference.defaults(),
     this.versions,
     this.odometer,
@@ -456,6 +457,7 @@ final class SavedBike {
   final Bike bike;
   final SetOnConnect setOnConnect;
   final List<CustomMode> customModes;
+  final bool streetLegalOnQuickRestart;
   final BackgroundPreference backgroundPreference;
   final CachedBikeVersions? versions;
   final CachedBikeOdometer? odometer;

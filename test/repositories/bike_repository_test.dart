@@ -3,6 +3,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/persistence/app_database.dart';
 import 'package:superduper/src/repositories/bike_repository.dart';
 import 'package:superduper/src/repositories/settings_repository.dart';
@@ -90,12 +91,12 @@ void main() {
 
       await repository.setOnConnect(
         'bike',
-        const BikeControlPatch(light: true, mode: 3, assist: 4),
+        const SetOnConnect(light: true, mode: NativeModeRef(3), assist: 4),
       );
 
       final saved = (await repository.getBikes()).single;
       expect(saved.setOnConnect.light, isTrue);
-      expect(saved.setOnConnect.mode, 3);
+      expect(saved.setOnConnect.mode, const NativeModeRef(3));
       expect(saved.setOnConnect.assist, 4);
     },
   );
@@ -105,11 +106,14 @@ void main() {
     await repository.addBike(deviceId: 'bike');
 
     expect(
-      () => repository.setOnConnect('bike', const BikeControlPatch(mode: 8)),
+      () => repository.setOnConnect(
+        'bike',
+        const SetOnConnect(mode: NativeModeRef(8)),
+      ),
       throwsRangeError,
     );
     expect(
-      () => repository.setOnConnect('bike', const BikeControlPatch(assist: -1)),
+      () => repository.setOnConnect('bike', const SetOnConnect(assist: -1)),
       throwsRangeError,
     );
   });
@@ -135,7 +139,7 @@ void main() {
       deviceId: 'AA:BB:CC:DD:EE:FF',
       moduleSerial: '00112233aabbccdd',
       region: BikeRegion.eu,
-      setOnConnect: const BikeControlPatch(light: true, mode: 6),
+      setOnConnect: const SetOnConnect(light: true, mode: NativeModeRef(6)),
       backgroundPreference: const BackgroundPreference(
         requested: true,
         consentVersion: backgroundSyncConsentVersion,
@@ -176,7 +180,7 @@ void main() {
     await repository.addBike(
       deviceId: 'first',
       moduleSerial: '00112233aabbccdd',
-      setOnConnect: const BikeControlPatch(assist: 4),
+      setOnConnect: const SetOnConnect(assist: 4),
       backgroundPreference: const BackgroundPreference(
         requested: true,
         consentVersion: backgroundSyncConsentVersion,
@@ -186,7 +190,7 @@ void main() {
       deviceId: 'second',
       moduleSerial: 'ffeeddccbbaa2211',
       advertisedName: BikeProtocolVersion.v2.advertisedName,
-      setOnConnect: const BikeControlPatch(mode: 3),
+      setOnConnect: const SetOnConnect(mode: NativeModeRef(3)),
       backgroundPreference: const BackgroundPreference(
         requested: true,
         consentVersion: backgroundSyncConsentVersion,
@@ -206,7 +210,7 @@ void main() {
       [0, 0xc1, 0xff, 0xff, 3, 1, 0, 0, 0, 0],
     );
 
-    await repository.setOnConnect('second', const BikeControlPatch());
+    await repository.setOnConnect('second', const SetOnConnect());
     expect(await database.select(database.backgroundSyncPlans).get(), isEmpty);
 
     await repository.setBackgroundPreference(
@@ -369,7 +373,7 @@ void main() {
     await repository.addBike(
       deviceId: 'AA:BB:CC:DD:EE:FF',
       moduleSerial: '00112233aabbccdd',
-      setOnConnect: const BikeControlPatch(light: true),
+      setOnConnect: const SetOnConnect(light: true),
       backgroundPreference: const BackgroundPreference(
         requested: true,
         consentVersion: backgroundSyncConsentVersion,
@@ -451,6 +455,129 @@ void main() {
       expect(v1.region, BikeRegion.eu);
     },
   );
+
+  group('custom modes', () {
+    test(
+      'addBike stores custom modes and a custom set-on-connect ref',
+      () async {
+        final saved = await repository.addBike(
+          deviceId: 'ch-bike',
+          region: BikeRegion.ch,
+          customModes: const [seededChMode],
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        );
+        expect(saved.bike.region, BikeRegion.ch);
+        expect(saved.customModes, [seededChMode]);
+        expect(saved.setOnConnect.mode, const CustomModeRef(seededChModeId));
+      },
+    );
+
+    test(
+      'setCustomModes replaces the list in order and bumps the bike stream',
+      () async {
+        await repository.addBike(deviceId: 'b', region: BikeRegion.ch);
+        final updates = <List<SavedBike>>[];
+        final subscription = repository.watchBikes().listen(updates.add);
+        addTearDown(subscription.cancel);
+        await Future<void>.delayed(Duration.zero);
+
+        const a = CustomMode(id: 'a', name: 'A', limitKmh: 30);
+        const b = CustomMode(id: 'b', name: 'B', limitKmh: 40, throttle: true);
+        await repository.setCustomModes('b', const [b, a]);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(updates.last.single.customModes, const [b, a]);
+      },
+    );
+
+    test(
+      'deleting the referenced custom mode clears the set-on-connect mode',
+      () async {
+        await repository.addBike(
+          deviceId: 'b',
+          region: BikeRegion.ch,
+          customModes: const [seededChMode],
+          setOnConnect: const SetOnConnect(
+            mode: CustomModeRef(seededChModeId),
+            assist: 3,
+          ),
+        );
+        await repository.setCustomModes('b', const []);
+        final saved = (await repository.getBikes()).single;
+        expect(saved.customModes, isEmpty);
+        expect(saved.setOnConnect, const SetOnConnect(assist: 3));
+      },
+    );
+
+    test(
+      'rejects a limit outside the slider range and an empty name',
+      () async {
+        await repository.addBike(deviceId: 'b', region: BikeRegion.ch);
+        expect(
+          () => repository.setCustomModes('b', const [
+            CustomMode(id: 'x', name: 'x', limitKmh: 50),
+          ]),
+          throwsArgumentError,
+        );
+        expect(
+          () => repository.setCustomModes('b', const [
+            CustomMode(id: 'x', name: '', limitKmh: 30),
+          ]),
+          throwsArgumentError,
+        );
+      },
+    );
+
+    test('native set-on-connect ref round-trips as an int wire', () async {
+      await repository.addBike(deviceId: 'b', region: BikeRegion.eu);
+      await repository.setOnConnect(
+        'b',
+        const SetOnConnect(mode: NativeModeRef(6)),
+      );
+      final row = await (database.select(
+        database.bikePreferences,
+      )..where((t) => t.deviceId.equals('b'))).getSingle();
+      expect(row.setOnConnect.mode, const NativeModeRef(6));
+      final raw = await database
+          .customSelect(
+            "SELECT set_on_connect AS s FROM bike_preferences WHERE device_id = 'b'",
+          )
+          .getSingle();
+      expect(raw.read<String>('s'), contains('"mode":6'));
+    });
+
+    test('background plan resolves a custom mode to its entry wire', () async {
+      await repository.addBike(
+        deviceId: 'b',
+        region: BikeRegion.ch,
+        customModes: const [seededChMode],
+        setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        moduleSerial: '00112233aabbccdd',
+      );
+      await repository.setBackgroundPreference(
+        'b',
+        requested: true,
+        consentVersion: backgroundSyncConsentVersion,
+      );
+      final command = await database
+          .select(database.backgroundSyncCommands)
+          .getSingle();
+      expect(command.payload[4], 1);
+    });
+
+    test('street-legal on quick restart round-trips', () async {
+      await repository.addBike(deviceId: 'b', region: BikeRegion.ch);
+      expect(
+        (await repository.getBikes()).single.streetLegalOnQuickRestart,
+        isFalse,
+      );
+      await repository.setStreetLegalOnQuickRestart('b', true);
+      expect(
+        (await repository.getBikes()).single.streetLegalOnQuickRestart,
+        isTrue,
+      );
+    });
+  });
 }
 
 const _versionInfo = BikeVersionInfo(

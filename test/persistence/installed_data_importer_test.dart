@@ -7,6 +7,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
 import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/persistence/app_database.dart';
 import 'package:superduper/src/persistence/installed_data_importer.dart';
 import 'package:superduper/src/repositories/bike_repository.dart';
@@ -122,7 +123,7 @@ void main() {
       expect(bikes.first.bike.region, BikeRegion.us);
       expect(bikes.first.bike.color, BikeColor.midnightSky);
       expect(bikes.first.setOnConnect.light, isTrue);
-      expect(bikes.first.setOnConnect.mode, 3);
+      expect(bikes.first.setOnConnect.mode, const NativeModeRef(3));
       expect(bikes.first.setOnConnect.assist, 4);
       expect(bikes.first.backgroundPreference.requested, isTrue);
       expect(bikes.first.backgroundPreference.consentVersion, 0);
@@ -145,7 +146,37 @@ void main() {
       BikeRegion.us,
       BikeRegion.eu,
     ]);
-    expect(bikes.map((saved) => saved.setOnConnect.mode), [2, 6]);
+    expect(bikes.map((saved) => saved.setOnConnect.mode), const [
+      NativeModeRef(2),
+      NativeModeRef(6),
+    ]);
+  });
+
+  test('a pinned legacy CH mode imports as the seeded custom mode', () async {
+    await _writeJson(documents, 'bikes.json', [
+      _bike('ch-1', region: 202, mode: 1, modeLocked: true),
+      _bike('ch-2', region: 202, mode: 2, modeLocked: true),
+    ]);
+
+    await importer.run();
+    final bikes = await BikeRepository(database: database).getBikes();
+
+    for (final saved in bikes) {
+      expect(saved.customModes, const [seededChMode]);
+      expect(saved.setOnConnect.mode, const CustomModeRef(seededChModeId));
+    }
+    expect(bikes, hasLength(2));
+  });
+
+  test('imports legacy region 202 as CH', () async {
+    await _writeJson(documents, 'bikes.json', [
+      _bike('ch', region: 202, mode: 1),
+    ]);
+
+    await importer.run();
+    final bikes = await BikeRepository(database: database).getBikes();
+
+    expect(bikes.single.bike.region, BikeRegion.ch);
   });
 
   test('maps every frozen legacy color index to its persistence key', () async {
@@ -202,7 +233,7 @@ void main() {
       expect(bikes.map((saved) => saved.bike.deviceId), ['duplicate', 'other']);
       expect(bikes.first.bike.displayName, 'New');
       expect(bikes.first.bike.sortOrder, 0);
-      expect(bikes.first.setOnConnect.mode, 3);
+      expect(bikes.first.setOnConnect.mode, const NativeModeRef(3));
       expect(
         result.warnings.any((warning) => warning.code == 'duplicate_bike'),
         isTrue,

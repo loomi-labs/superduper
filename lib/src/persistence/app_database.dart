@@ -7,6 +7,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 
 part 'app_database.g.dart';
 
@@ -14,28 +15,38 @@ const appDatabaseFilename = 'superduper.sqlite';
 const installedBikesFilename = 'bikes.json';
 const installedSettingsFilename = 'settings.json';
 
-final class BikeControlPatchConverter
-    extends TypeConverter<BikeControlPatch, String> {
+final class SetOnConnectConverter extends TypeConverter<SetOnConnect, String> {
   const new();
 
   @override
-  BikeControlPatch fromSql(String fromDb) {
+  SetOnConnect fromSql(String fromDb) {
     final decoded = jsonDecode(fromDb);
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('Set-on-connect settings must be an object.');
     }
-    return BikeControlPatch(
+    return SetOnConnect(
       light: _optionalBool(decoded, 'light'),
-      mode: _optionalInt(decoded, 'mode'),
+      mode: switch (decoded['mode']) {
+        null => null,
+        final int wire => NativeModeRef(wire),
+        final String id => CustomModeRef(id),
+        _ => throw const FormatException(
+          'Set-on-connect mode must be an integer or a string.',
+        ),
+      },
       assist: _optionalInt(decoded, 'assist'),
     );
   }
 
   @override
-  String toSql(BikeControlPatch value) {
+  String toSql(SetOnConnect value) {
     return jsonEncode({
       'light': ?value.light,
-      'mode': ?value.mode,
+      'mode': ?switch (value.mode) {
+        null => null,
+        NativeModeRef(:final wire) => wire,
+        CustomModeRef(:final id) => id,
+      },
       'assist': ?value.assist,
     });
   }
@@ -79,7 +90,7 @@ class Bikes extends Table {
     'CHECK (length(display_name) > 0)',
     'CHECK (length(advertised_name) > 0)',
     "CHECK (protocol IN ('v1', 'v2'))",
-    "CHECK ((protocol = 'v1' AND region IS NOT NULL AND region IN ('us', 'eu')) OR (protocol = 'v2' AND region IS NULL))",
+    "CHECK ((protocol = 'v1' AND region IS NOT NULL AND region IN ('us', 'eu', 'ch')) OR (protocol = 'v2' AND region IS NULL))",
     'CHECK (length(color_key) > 0)',
   ];
 
@@ -91,10 +102,11 @@ class Bikes extends Table {
 class BikePreferences extends Table {
   TextColumn get deviceId =>
       text().references(Bikes, #deviceId, onDelete: KeyAction.cascade)();
-  TextColumn get setOnConnect =>
-      text().map(const BikeControlPatchConverter())();
+  TextColumn get setOnConnect => text().map(const SetOnConnectConverter())();
   BoolColumn get backgroundRequested => boolean()();
   IntColumn get backgroundConsentVersion => integer()();
+  BoolColumn get streetLegalOnQuickRestart =>
+      boolean().withDefault(const Constant(false))();
 
   @override
   List<String> get customConstraints => [
@@ -243,6 +255,28 @@ class BackgroundSyncCommands extends Table {
   Set<Column<Object>> get primaryKey => {planSingletonId, sequence};
 }
 
+@DataClassName('BikeCustomModeRow')
+class BikeCustomModes extends Table {
+  TextColumn get deviceId =>
+      text().references(Bikes, #deviceId, onDelete: KeyAction.cascade)();
+  TextColumn get modeId => text()();
+  TextColumn get name => text()();
+  IntColumn get limitKmh => integer()();
+  BoolColumn get throttle => boolean()();
+  IntColumn get sortOrder => integer()();
+
+  @override
+  List<String> get customConstraints => [
+    'CHECK (length(mode_id) > 0)',
+    'CHECK (length(name) > 0)',
+    'CHECK (limit_kmh BETWEEN 25 AND 45)',
+    'CHECK (sort_order >= 0)',
+  ];
+
+  @override
+  Set<Column<Object>> get primaryKey => {deviceId, modeId};
+}
+
 @DriftDatabase(
   tables: [
     Bikes,
@@ -252,6 +286,7 @@ class BackgroundSyncCommands extends Table {
     DataImports,
     BackgroundSyncPlans,
     BackgroundSyncCommands,
+    BikeCustomModes,
   ],
 )
 final class AppDatabase extends _$AppDatabase {
@@ -304,7 +339,12 @@ final class AppDatabase extends _$AppDatabase {
         await migrator.alterTable(
           TableMigration(
             bikePreferences,
-            newColumns: [bikePreferences.setOnConnect],
+            // A table migration builds the current table. The column that
+            // schema v6 adds does not exist yet, so it takes its default here.
+            newColumns: [
+              bikePreferences.setOnConnect,
+              bikePreferences.streetLegalOnQuickRestart,
+            ],
             columnTransformer: {
               bikePreferences.setOnConnect: const CustomExpression<String>(
                 "'{' || "
@@ -325,6 +365,19 @@ final class AppDatabase extends _$AppDatabase {
         await migrator.createTable(backgroundSyncPlans);
         await migrator.createTable(backgroundSyncCommands);
       }
+      if (from < 6) {
+        await transaction(() async {
+          await migrator.alterTable(TableMigration(bikes));
+          // Before v3 the table migration above already created the column.
+          if (from >= 3) {
+            await migrator.addColumn(
+              bikePreferences,
+              bikePreferences.streetLegalOnQuickRestart,
+            );
+          }
+          await migrator.createTable(bikeCustomModes);
+        });
+      }
     },
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
@@ -332,7 +385,7 @@ final class AppDatabase extends _$AppDatabase {
   );
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   Future<void> refreshBackgroundSyncPlan() {
     return transaction(() async {
@@ -400,11 +453,37 @@ final class AppDatabase extends _$AppDatabase {
           planSingletonId: 1,
           sequence: 0,
           payload: Uint8List.fromList(
-            _backgroundControlFrame(bike, preferences),
+            await _backgroundControlFrame(bike, preferences),
           ),
         ),
       );
     });
+  }
+
+  Future<int?> _customModeEntryWire(BikeRow bike, String modeId) async {
+    final row =
+        await (select(bikeCustomModes)..where(
+              (t) => t.deviceId.equals(bike.deviceId) & t.modeId.equals(modeId),
+            ))
+            .getSingleOrNull();
+    if (row == null) {
+      return null;
+    }
+    final region = switch (bike.region) {
+      'us' => BikeRegion.us,
+      'eu' => BikeRegion.eu,
+      'ch' => BikeRegion.ch,
+      _ => null,
+    };
+    return entryWireFor(
+      CustomMode(
+        id: row.modeId,
+        name: row.name,
+        limitKmh: row.limitKmh,
+        throttle: row.throttle,
+      ),
+      region,
+    );
   }
 
   Uint8List? _decodeModuleSerial(String serial) {
@@ -417,12 +496,16 @@ final class AppDatabase extends _$AppDatabase {
     ]);
   }
 
-  List<int> _backgroundControlFrame(
+  Future<List<int>> _backgroundControlFrame(
     BikeRow bike,
     BikePreferenceRow preferences,
-  ) {
+  ) async {
     final patch = preferences.setOnConnect;
-    final mode = patch.mode ?? 0xff;
+    final mode = switch (preferences.setOnConnect.mode) {
+      null => 0xff,
+      NativeModeRef(:final wire) => wire,
+      CustomModeRef(:final id) => await _customModeEntryWire(bike, id) ?? 0xff,
+    };
     return [
       0,
       switch (bike.protocol) {

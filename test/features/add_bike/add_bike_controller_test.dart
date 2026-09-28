@@ -37,7 +37,7 @@ void main() {
       permissions: permissions,
       buildSession: (bike) => BikeSession(
         connection: transport.openConnection(bike.bike.deviceId),
-        setOnConnect: bike.setOnConnect,
+        setOnConnect: resolveSetOnConnect(bike).patch,
         protocol: bike.bike.protocol,
         reconnectDelays: const [],
       ),
@@ -186,7 +186,7 @@ void main() {
     expect(saved.bike.protocol, BikeProtocolVersion.v1);
     expect(saved.bike.region, BikeRegion.eu);
     expect(saved.bike.moduleSerial, '00112233aabbccdd');
-    expect(saved.setOnConnect, const BikeControlPatch());
+    expect(saved.setOnConnect, const SetOnConnect());
     expect(saved.odometer?.meters, 123500);
     expect(
       saved.versions?.info,

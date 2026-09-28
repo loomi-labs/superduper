@@ -7,6 +7,7 @@ import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/ble/exclusive_bluetooth_operation.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/bike_names.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/platform/bluetooth_permissions.dart';
 import 'package:superduper/src/repositories/bike_repository.dart';
 
@@ -289,6 +290,10 @@ final class AddBikeController {
         displayName: normalizedName,
         region: region,
         color: color,
+        customModes: region == BikeRegion.ch ? const [seededChMode] : const [],
+        setOnConnect: region == BikeRegion.ch
+            ? const SetOnConnect(mode: CustomModeRef(seededChModeId))
+            : const SetOnConnect(),
         moduleSerial: current.candidate.moduleSerial,
         versions: current.versions,
         odometerMeters: current.odometerMeters,

@@ -71,7 +71,7 @@ void main() {
         .getSingle();
     expect(
       preferences.setOnConnect,
-      const BikeControlPatch(light: true, assist: 4),
+      const SetOnConnect(light: true, assist: 4),
     );
     expect(preferences.backgroundRequested, isTrue);
     expect(preferences.backgroundConsentVersion, 2);

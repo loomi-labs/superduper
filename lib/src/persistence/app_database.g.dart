@@ -836,17 +836,14 @@ class $BikePreferencesTable extends BikePreferences
     ),
   );
   @override
-  late final GeneratedColumnWithTypeConverter<BikeControlPatch, String>
-  setOnConnect =
-      GeneratedColumn<String>(
-        'set_on_connect',
-        aliasedName,
-        false,
-        type: DriftSqlType.string,
-        requiredDuringInsert: true,
-      ).withConverter<BikeControlPatch>(
-        $BikePreferencesTable.$convertersetOnConnect,
-      );
+  late final GeneratedColumnWithTypeConverter<SetOnConnect, String>
+  setOnConnect = GeneratedColumn<String>(
+    'set_on_connect',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  ).withConverter<SetOnConnect>($BikePreferencesTable.$convertersetOnConnect);
   static const VerificationMeta _backgroundRequestedMeta =
       const VerificationMeta('backgroundRequested');
   @override
@@ -871,12 +868,28 @@ class $BikePreferencesTable extends BikePreferences
         type: DriftSqlType.int,
         requiredDuringInsert: true,
       );
+  static const VerificationMeta _streetLegalOnQuickRestartMeta =
+      const VerificationMeta('streetLegalOnQuickRestart');
+  @override
+  late final GeneratedColumn<bool> streetLegalOnQuickRestart =
+      GeneratedColumn<bool>(
+        'street_legal_on_quick_restart',
+        aliasedName,
+        false,
+        type: DriftSqlType.bool,
+        requiredDuringInsert: false,
+        defaultConstraints: GeneratedColumn.constraintIsAlways(
+          'CHECK ("street_legal_on_quick_restart" IN (0, 1))',
+        ),
+        defaultValue: const Constant(false),
+      );
   @override
   List<GeneratedColumn> get $columns => [
     deviceId,
     setOnConnect,
     backgroundRequested,
     backgroundConsentVersion,
+    streetLegalOnQuickRestart,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -920,6 +933,15 @@ class $BikePreferencesTable extends BikePreferences
     } else if (isInserting) {
       context.missing(_backgroundConsentVersionMeta);
     }
+    if (data.containsKey('street_legal_on_quick_restart')) {
+      context.handle(
+        _streetLegalOnQuickRestartMeta,
+        streetLegalOnQuickRestart.isAcceptableOrUnknown(
+          data['street_legal_on_quick_restart']!,
+          _streetLegalOnQuickRestartMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -947,6 +969,10 @@ class $BikePreferencesTable extends BikePreferences
         DriftSqlType.int,
         data['${effectivePrefix}background_consent_version'],
       )!,
+      streetLegalOnQuickRestart: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}street_legal_on_quick_restart'],
+      )!,
     );
   }
 
@@ -955,21 +981,23 @@ class $BikePreferencesTable extends BikePreferences
     return $BikePreferencesTable(attachedDatabase, alias);
   }
 
-  static TypeConverter<BikeControlPatch, String> $convertersetOnConnect =
-      const BikeControlPatchConverter();
+  static TypeConverter<SetOnConnect, String> $convertersetOnConnect =
+      const SetOnConnectConverter();
 }
 
 class BikePreferenceRow extends DataClass
     implements Insertable<BikePreferenceRow> {
   final String deviceId;
-  final BikeControlPatch setOnConnect;
+  final SetOnConnect setOnConnect;
   final bool backgroundRequested;
   final int backgroundConsentVersion;
+  final bool streetLegalOnQuickRestart;
   const BikePreferenceRow({
     required this.deviceId,
     required this.setOnConnect,
     required this.backgroundRequested,
     required this.backgroundConsentVersion,
+    required this.streetLegalOnQuickRestart,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -982,6 +1010,9 @@ class BikePreferenceRow extends DataClass
     }
     map['background_requested'] = Variable<bool>(backgroundRequested);
     map['background_consent_version'] = Variable<int>(backgroundConsentVersion);
+    map['street_legal_on_quick_restart'] = Variable<bool>(
+      streetLegalOnQuickRestart,
+    );
     return map;
   }
 
@@ -991,6 +1022,7 @@ class BikePreferenceRow extends DataClass
       setOnConnect: Value(setOnConnect),
       backgroundRequested: Value(backgroundRequested),
       backgroundConsentVersion: Value(backgroundConsentVersion),
+      streetLegalOnQuickRestart: Value(streetLegalOnQuickRestart),
     );
   }
 
@@ -1001,12 +1033,15 @@ class BikePreferenceRow extends DataClass
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return BikePreferenceRow(
       deviceId: serializer.fromJson<String>(json['deviceId']),
-      setOnConnect: serializer.fromJson<BikeControlPatch>(json['setOnConnect']),
+      setOnConnect: serializer.fromJson<SetOnConnect>(json['setOnConnect']),
       backgroundRequested: serializer.fromJson<bool>(
         json['backgroundRequested'],
       ),
       backgroundConsentVersion: serializer.fromJson<int>(
         json['backgroundConsentVersion'],
+      ),
+      streetLegalOnQuickRestart: serializer.fromJson<bool>(
+        json['streetLegalOnQuickRestart'],
       ),
     );
   }
@@ -1015,25 +1050,31 @@ class BikePreferenceRow extends DataClass
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
       'deviceId': serializer.toJson<String>(deviceId),
-      'setOnConnect': serializer.toJson<BikeControlPatch>(setOnConnect),
+      'setOnConnect': serializer.toJson<SetOnConnect>(setOnConnect),
       'backgroundRequested': serializer.toJson<bool>(backgroundRequested),
       'backgroundConsentVersion': serializer.toJson<int>(
         backgroundConsentVersion,
+      ),
+      'streetLegalOnQuickRestart': serializer.toJson<bool>(
+        streetLegalOnQuickRestart,
       ),
     };
   }
 
   BikePreferenceRow copyWith({
     String? deviceId,
-    BikeControlPatch? setOnConnect,
+    SetOnConnect? setOnConnect,
     bool? backgroundRequested,
     int? backgroundConsentVersion,
+    bool? streetLegalOnQuickRestart,
   }) => BikePreferenceRow(
     deviceId: deviceId ?? this.deviceId,
     setOnConnect: setOnConnect ?? this.setOnConnect,
     backgroundRequested: backgroundRequested ?? this.backgroundRequested,
     backgroundConsentVersion:
         backgroundConsentVersion ?? this.backgroundConsentVersion,
+    streetLegalOnQuickRestart:
+        streetLegalOnQuickRestart ?? this.streetLegalOnQuickRestart,
   );
   BikePreferenceRow copyWithCompanion(BikePreferencesCompanion data) {
     return BikePreferenceRow(
@@ -1047,6 +1088,9 @@ class BikePreferenceRow extends DataClass
       backgroundConsentVersion: data.backgroundConsentVersion.present
           ? data.backgroundConsentVersion.value
           : this.backgroundConsentVersion,
+      streetLegalOnQuickRestart: data.streetLegalOnQuickRestart.present
+          ? data.streetLegalOnQuickRestart.value
+          : this.streetLegalOnQuickRestart,
     );
   }
 
@@ -1056,7 +1100,8 @@ class BikePreferenceRow extends DataClass
           ..write('deviceId: $deviceId, ')
           ..write('setOnConnect: $setOnConnect, ')
           ..write('backgroundRequested: $backgroundRequested, ')
-          ..write('backgroundConsentVersion: $backgroundConsentVersion')
+          ..write('backgroundConsentVersion: $backgroundConsentVersion, ')
+          ..write('streetLegalOnQuickRestart: $streetLegalOnQuickRestart')
           ..write(')'))
         .toString();
   }
@@ -1067,6 +1112,7 @@ class BikePreferenceRow extends DataClass
     setOnConnect,
     backgroundRequested,
     backgroundConsentVersion,
+    streetLegalOnQuickRestart,
   );
   @override
   bool operator ==(Object other) =>
@@ -1075,27 +1121,31 @@ class BikePreferenceRow extends DataClass
           other.deviceId == this.deviceId &&
           other.setOnConnect == this.setOnConnect &&
           other.backgroundRequested == this.backgroundRequested &&
-          other.backgroundConsentVersion == this.backgroundConsentVersion);
+          other.backgroundConsentVersion == this.backgroundConsentVersion &&
+          other.streetLegalOnQuickRestart == this.streetLegalOnQuickRestart);
 }
 
 class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
   final Value<String> deviceId;
-  final Value<BikeControlPatch> setOnConnect;
+  final Value<SetOnConnect> setOnConnect;
   final Value<bool> backgroundRequested;
   final Value<int> backgroundConsentVersion;
+  final Value<bool> streetLegalOnQuickRestart;
   final Value<int> rowid;
   const BikePreferencesCompanion({
     this.deviceId = const Value.absent(),
     this.setOnConnect = const Value.absent(),
     this.backgroundRequested = const Value.absent(),
     this.backgroundConsentVersion = const Value.absent(),
+    this.streetLegalOnQuickRestart = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   BikePreferencesCompanion.insert({
     required String deviceId,
-    required BikeControlPatch setOnConnect,
+    required SetOnConnect setOnConnect,
     required bool backgroundRequested,
     required int backgroundConsentVersion,
+    this.streetLegalOnQuickRestart = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : deviceId = Value(deviceId),
        setOnConnect = Value(setOnConnect),
@@ -1106,6 +1156,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
     Expression<String>? setOnConnect,
     Expression<bool>? backgroundRequested,
     Expression<int>? backgroundConsentVersion,
+    Expression<bool>? streetLegalOnQuickRestart,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1115,15 +1166,18 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
         'background_requested': backgroundRequested,
       if (backgroundConsentVersion != null)
         'background_consent_version': backgroundConsentVersion,
+      if (streetLegalOnQuickRestart != null)
+        'street_legal_on_quick_restart': streetLegalOnQuickRestart,
       if (rowid != null) 'rowid': rowid,
     });
   }
 
   BikePreferencesCompanion copyWith({
     Value<String>? deviceId,
-    Value<BikeControlPatch>? setOnConnect,
+    Value<SetOnConnect>? setOnConnect,
     Value<bool>? backgroundRequested,
     Value<int>? backgroundConsentVersion,
+    Value<bool>? streetLegalOnQuickRestart,
     Value<int>? rowid,
   }) {
     return BikePreferencesCompanion(
@@ -1132,6 +1186,8 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
       backgroundRequested: backgroundRequested ?? this.backgroundRequested,
       backgroundConsentVersion:
           backgroundConsentVersion ?? this.backgroundConsentVersion,
+      streetLegalOnQuickRestart:
+          streetLegalOnQuickRestart ?? this.streetLegalOnQuickRestart,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1155,6 +1211,11 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
         backgroundConsentVersion.value,
       );
     }
+    if (streetLegalOnQuickRestart.present) {
+      map['street_legal_on_quick_restart'] = Variable<bool>(
+        streetLegalOnQuickRestart.value,
+      );
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1168,6 +1229,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
           ..write('setOnConnect: $setOnConnect, ')
           ..write('backgroundRequested: $backgroundRequested, ')
           ..write('backgroundConsentVersion: $backgroundConsentVersion, ')
+          ..write('streetLegalOnQuickRestart: $streetLegalOnQuickRestart, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3937,6 +3999,424 @@ class BackgroundSyncCommandsCompanion
   }
 }
 
+class $BikeCustomModesTable extends BikeCustomModes
+    with TableInfo<$BikeCustomModesTable, BikeCustomModeRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $BikeCustomModesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES bikes (device_id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _modeIdMeta = const VerificationMeta('modeId');
+  @override
+  late final GeneratedColumn<String> modeId = GeneratedColumn<String>(
+    'mode_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _limitKmhMeta = const VerificationMeta(
+    'limitKmh',
+  );
+  @override
+  late final GeneratedColumn<int> limitKmh = GeneratedColumn<int>(
+    'limit_kmh',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _throttleMeta = const VerificationMeta(
+    'throttle',
+  );
+  @override
+  late final GeneratedColumn<bool> throttle = GeneratedColumn<bool>(
+    'throttle',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("throttle" IN (0, 1))',
+    ),
+  );
+  static const VerificationMeta _sortOrderMeta = const VerificationMeta(
+    'sortOrder',
+  );
+  @override
+  late final GeneratedColumn<int> sortOrder = GeneratedColumn<int>(
+    'sort_order',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    deviceId,
+    modeId,
+    name,
+    limitKmh,
+    throttle,
+    sortOrder,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'bike_custom_modes';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<BikeCustomModeRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
+    if (data.containsKey('mode_id')) {
+      context.handle(
+        _modeIdMeta,
+        modeId.isAcceptableOrUnknown(data['mode_id']!, _modeIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_modeIdMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('limit_kmh')) {
+      context.handle(
+        _limitKmhMeta,
+        limitKmh.isAcceptableOrUnknown(data['limit_kmh']!, _limitKmhMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_limitKmhMeta);
+    }
+    if (data.containsKey('throttle')) {
+      context.handle(
+        _throttleMeta,
+        throttle.isAcceptableOrUnknown(data['throttle']!, _throttleMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_throttleMeta);
+    }
+    if (data.containsKey('sort_order')) {
+      context.handle(
+        _sortOrderMeta,
+        sortOrder.isAcceptableOrUnknown(data['sort_order']!, _sortOrderMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sortOrderMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {deviceId, modeId};
+  @override
+  BikeCustomModeRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return BikeCustomModeRow(
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
+      modeId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}mode_id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      limitKmh: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}limit_kmh'],
+      )!,
+      throttle: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}throttle'],
+      )!,
+      sortOrder: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}sort_order'],
+      )!,
+    );
+  }
+
+  @override
+  $BikeCustomModesTable createAlias(String alias) {
+    return $BikeCustomModesTable(attachedDatabase, alias);
+  }
+}
+
+class BikeCustomModeRow extends DataClass
+    implements Insertable<BikeCustomModeRow> {
+  final String deviceId;
+  final String modeId;
+  final String name;
+  final int limitKmh;
+  final bool throttle;
+  final int sortOrder;
+  const BikeCustomModeRow({
+    required this.deviceId,
+    required this.modeId,
+    required this.name,
+    required this.limitKmh,
+    required this.throttle,
+    required this.sortOrder,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['device_id'] = Variable<String>(deviceId);
+    map['mode_id'] = Variable<String>(modeId);
+    map['name'] = Variable<String>(name);
+    map['limit_kmh'] = Variable<int>(limitKmh);
+    map['throttle'] = Variable<bool>(throttle);
+    map['sort_order'] = Variable<int>(sortOrder);
+    return map;
+  }
+
+  BikeCustomModesCompanion toCompanion(bool nullToAbsent) {
+    return BikeCustomModesCompanion(
+      deviceId: Value(deviceId),
+      modeId: Value(modeId),
+      name: Value(name),
+      limitKmh: Value(limitKmh),
+      throttle: Value(throttle),
+      sortOrder: Value(sortOrder),
+    );
+  }
+
+  factory BikeCustomModeRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return BikeCustomModeRow(
+      deviceId: serializer.fromJson<String>(json['deviceId']),
+      modeId: serializer.fromJson<String>(json['modeId']),
+      name: serializer.fromJson<String>(json['name']),
+      limitKmh: serializer.fromJson<int>(json['limitKmh']),
+      throttle: serializer.fromJson<bool>(json['throttle']),
+      sortOrder: serializer.fromJson<int>(json['sortOrder']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'deviceId': serializer.toJson<String>(deviceId),
+      'modeId': serializer.toJson<String>(modeId),
+      'name': serializer.toJson<String>(name),
+      'limitKmh': serializer.toJson<int>(limitKmh),
+      'throttle': serializer.toJson<bool>(throttle),
+      'sortOrder': serializer.toJson<int>(sortOrder),
+    };
+  }
+
+  BikeCustomModeRow copyWith({
+    String? deviceId,
+    String? modeId,
+    String? name,
+    int? limitKmh,
+    bool? throttle,
+    int? sortOrder,
+  }) => BikeCustomModeRow(
+    deviceId: deviceId ?? this.deviceId,
+    modeId: modeId ?? this.modeId,
+    name: name ?? this.name,
+    limitKmh: limitKmh ?? this.limitKmh,
+    throttle: throttle ?? this.throttle,
+    sortOrder: sortOrder ?? this.sortOrder,
+  );
+  BikeCustomModeRow copyWithCompanion(BikeCustomModesCompanion data) {
+    return BikeCustomModeRow(
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
+      modeId: data.modeId.present ? data.modeId.value : this.modeId,
+      name: data.name.present ? data.name.value : this.name,
+      limitKmh: data.limitKmh.present ? data.limitKmh.value : this.limitKmh,
+      throttle: data.throttle.present ? data.throttle.value : this.throttle,
+      sortOrder: data.sortOrder.present ? data.sortOrder.value : this.sortOrder,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('BikeCustomModeRow(')
+          ..write('deviceId: $deviceId, ')
+          ..write('modeId: $modeId, ')
+          ..write('name: $name, ')
+          ..write('limitKmh: $limitKmh, ')
+          ..write('throttle: $throttle, ')
+          ..write('sortOrder: $sortOrder')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(deviceId, modeId, name, limitKmh, throttle, sortOrder);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is BikeCustomModeRow &&
+          other.deviceId == this.deviceId &&
+          other.modeId == this.modeId &&
+          other.name == this.name &&
+          other.limitKmh == this.limitKmh &&
+          other.throttle == this.throttle &&
+          other.sortOrder == this.sortOrder);
+}
+
+class BikeCustomModesCompanion extends UpdateCompanion<BikeCustomModeRow> {
+  final Value<String> deviceId;
+  final Value<String> modeId;
+  final Value<String> name;
+  final Value<int> limitKmh;
+  final Value<bool> throttle;
+  final Value<int> sortOrder;
+  final Value<int> rowid;
+  const BikeCustomModesCompanion({
+    this.deviceId = const Value.absent(),
+    this.modeId = const Value.absent(),
+    this.name = const Value.absent(),
+    this.limitKmh = const Value.absent(),
+    this.throttle = const Value.absent(),
+    this.sortOrder = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  BikeCustomModesCompanion.insert({
+    required String deviceId,
+    required String modeId,
+    required String name,
+    required int limitKmh,
+    required bool throttle,
+    required int sortOrder,
+    this.rowid = const Value.absent(),
+  }) : deviceId = Value(deviceId),
+       modeId = Value(modeId),
+       name = Value(name),
+       limitKmh = Value(limitKmh),
+       throttle = Value(throttle),
+       sortOrder = Value(sortOrder);
+  static Insertable<BikeCustomModeRow> custom({
+    Expression<String>? deviceId,
+    Expression<String>? modeId,
+    Expression<String>? name,
+    Expression<int>? limitKmh,
+    Expression<bool>? throttle,
+    Expression<int>? sortOrder,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (deviceId != null) 'device_id': deviceId,
+      if (modeId != null) 'mode_id': modeId,
+      if (name != null) 'name': name,
+      if (limitKmh != null) 'limit_kmh': limitKmh,
+      if (throttle != null) 'throttle': throttle,
+      if (sortOrder != null) 'sort_order': sortOrder,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  BikeCustomModesCompanion copyWith({
+    Value<String>? deviceId,
+    Value<String>? modeId,
+    Value<String>? name,
+    Value<int>? limitKmh,
+    Value<bool>? throttle,
+    Value<int>? sortOrder,
+    Value<int>? rowid,
+  }) {
+    return BikeCustomModesCompanion(
+      deviceId: deviceId ?? this.deviceId,
+      modeId: modeId ?? this.modeId,
+      name: name ?? this.name,
+      limitKmh: limitKmh ?? this.limitKmh,
+      throttle: throttle ?? this.throttle,
+      sortOrder: sortOrder ?? this.sortOrder,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
+    if (modeId.present) {
+      map['mode_id'] = Variable<String>(modeId.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (limitKmh.present) {
+      map['limit_kmh'] = Variable<int>(limitKmh.value);
+    }
+    if (throttle.present) {
+      map['throttle'] = Variable<bool>(throttle.value);
+    }
+    if (sortOrder.present) {
+      map['sort_order'] = Variable<int>(sortOrder.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('BikeCustomModesCompanion(')
+          ..write('deviceId: $deviceId, ')
+          ..write('modeId: $modeId, ')
+          ..write('name: $name, ')
+          ..write('limitKmh: $limitKmh, ')
+          ..write('throttle: $throttle, ')
+          ..write('sortOrder: $sortOrder, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   late final $BikesTable bikes = $BikesTable(this);
@@ -3950,6 +4430,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $BackgroundSyncPlansTable(this);
   late final $BackgroundSyncCommandsTable backgroundSyncCommands =
       $BackgroundSyncCommandsTable(this);
+  late final $BikeCustomModesTable bikeCustomModes = $BikeCustomModesTable(
+    this,
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -3962,6 +4445,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     dataImports,
     backgroundSyncPlans,
     backgroundSyncCommands,
+    bikeCustomModes,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -4008,6 +4492,13 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       result: [
         TableUpdate('background_sync_commands', kind: UpdateKind.delete),
       ],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'bikes',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('bike_custom_modes', kind: UpdateKind.delete)],
     ),
   ]);
 }

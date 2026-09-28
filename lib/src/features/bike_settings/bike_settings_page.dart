@@ -8,6 +8,7 @@ import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/distance.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/features/bike_settings/bike_version_report.dart';
 import 'package:superduper/src/features/help/help_page.dart';
 import 'package:superduper/src/platform/background_sync.dart';
@@ -420,19 +421,26 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                           saved.setOnConnect.copyWith(
                             mode: enabled
                                 ? (saved.setOnConnect.mode ??
-                                      BikeControlValues.minimumMode)
+                                      NativeModeRef(
+                                        nativeWiresFor(
+                                          saved.bike.region ?? BikeRegion.us,
+                                        ).first,
+                                      ))
                                 : null,
                           ),
                         ),
                       ),
                     ),
             ),
-            if (saved.setOnConnect.mode case final selectedMode?)
+            if (saved.setOnConnect.mode != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
                 child: BikeValueSelector(
                   values: BikeControlValues.modesFor(saved.bike.protocol),
-                  selected: selectedMode,
+                  selected: switch (saved.setOnConnect.mode) {
+                    NativeModeRef(:final wire) => wire,
+                    _ => null,
+                  },
                   enabled: !_changingSetOnConnect,
                   semanticLabel: 'Set on connect mode',
                   label: (mode) => '$mode',
@@ -440,7 +448,7 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                     _changeSetOnConnect(
                       () => _services.bikeRepository.setOnConnect(
                         deviceId,
-                        saved.setOnConnect.copyWith(mode: mode),
+                        saved.setOnConnect.copyWith(mode: NativeModeRef(mode)),
                       ),
                     ),
                   ),

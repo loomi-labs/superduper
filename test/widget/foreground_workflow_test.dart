@@ -40,7 +40,9 @@ void main() {
     await tester.pump();
 
     final configurationWrites = fixture.connection.writes.where(
-      (write) => write.characteristicUuid == BikeGatt.stateRegister,
+      (write) =>
+          write.characteristicUuid == BikeGatt.stateRegister &&
+          !BikeProtocol.hasPacketId(write.value, BikeGatt.rideDataSelector),
     );
     expect(configurationWrites.last.value, [0, 0xd1, 1, 2, 3, 1, 0, 0, 0, 0]);
   });
@@ -320,7 +322,7 @@ Future<_ReadyBikeFixture> _pumpReadyBikeApp(
     ),
     buildSession: (bike) => BikeSession(
       connection: transport.openConnection(bike.bike.deviceId),
-      setOnConnect: bike.setOnConnect,
+      setOnConnect: resolveSetOnConnect(bike).patch,
       protocol: bike.bike.protocol,
       onVersionsRead: (versions) async {
         await bikeRepository.saveVersions(bike.bike.deviceId, versions);
@@ -358,7 +360,7 @@ Future<_ReadyBikeFixture> _pumpReadyBikeApp(
   }
   await services.bikeRepository.setOnConnect(
     'active-bike',
-    const BikeControlPatch(mode: 3),
+    const SetOnConnect(mode: NativeModeRef(3)),
   );
   transport.readFramesOnOpen['active-bike'] = [
     v1StateFrame(light: true, assist: 2),

@@ -4,6 +4,7 @@ import 'package:superduper/src/ble/bike_identity_resolver.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/ble/flutter_blue_bike_transport.dart';
+import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/features/startup/startup_controller.dart';
 import 'package:superduper/src/persistence/app_database.dart';
 import 'package:superduper/src/persistence/installed_data_importer.dart';
@@ -52,7 +53,7 @@ final class AppServices {
           identityResolver: resolvedIdentityResolver,
           buildSession: (bike) => BikeSession(
             connection: resolvedTransport.openConnection(bike.bike.deviceId),
-            setOnConnect: bike.setOnConnect,
+            setOnConnect: resolveSetOnConnect(bike).patch,
             protocol: bike.bike.protocol,
             onVersionsRead: (versions) async {
               await resolvedBikeRepository.saveVersions(

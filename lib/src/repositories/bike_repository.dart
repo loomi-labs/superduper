@@ -1,6 +1,7 @@
 import 'package:drift/drift.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/bike_names.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/persistence/app_database.dart';
 
 final class BikeRepository {
@@ -11,30 +12,14 @@ final class BikeRepository {
   final DateTime Function() _clock;
 
   Stream<List<SavedBike>> watchBikes() {
-    return _savedBikesQuery().watch().map(
-      (rows) => List.unmodifiable(
-        rows.map(
-          (row) => _mapBike(
-            row.readTable(database.bikes),
-            row.readTable(database.bikePreferences),
-            row.readTableOrNull(database.bikeVersions),
-          ),
-        ),
-      ),
+    return _savedBikesQuery().watch().asyncMap(
+      (rows) async => _mapAll(rows, await _customModeRows()),
     );
   }
 
   Future<List<SavedBike>> getBikes() async {
     final rows = await _savedBikesQuery().get();
-    return List.unmodifiable(
-      rows.map(
-        (row) => _mapBike(
-          row.readTable(database.bikes),
-          row.readTable(database.bikePreferences),
-          row.readTableOrNull(database.bikeVersions),
-        ),
-      ),
-    );
+    return _mapAll(rows, await _customModeRows());
   }
 
   Future<SavedBike> addBike({
@@ -43,7 +28,8 @@ final class BikeRepository {
     String? displayName,
     BikeRegion? region = BikeRegion.us,
     BikeColor color = BikeColor.royalHorizon,
-    BikeControlPatch setOnConnect = const BikeControlPatch(),
+    SetOnConnect setOnConnect = const SetOnConnect(),
+    List<CustomMode> customModes = const [],
     BackgroundPreference backgroundPreference =
         const BackgroundPreference.defaults(),
     BikeVersionInfo? versions,
@@ -73,7 +59,8 @@ final class BikeRepository {
         'Must be a supported bike advertised name.',
       );
     }
-    _validateSetOnConnect(setOnConnect, protocol);
+    _validateCustomModes(customModes);
+    _validateSetOnConnect(setOnConnect, protocol, customModes);
     final persistedRegion = protocol.normalizeRegion(region);
     final normalizedName = _normalizeName(displayName, normalizedId);
     final normalizedSerial = moduleSerial == null
@@ -119,6 +106,7 @@ final class BikeRepository {
               backgroundPreference,
             ),
           );
+      await _insertCustomModes(normalizedId, customModes);
       if (normalizedVersions != null) {
         await database
             .into(database.bikeVersions)
@@ -184,15 +172,105 @@ final class BikeRepository {
     );
   }
 
-  Future<void> setOnConnect(String deviceId, BikeControlPatch settings) {
+  Future<void> setOnConnect(String deviceId, SetOnConnect settings) {
     return database.transaction(() async {
       final bike = await _requireBike(deviceId);
-      _validateSetOnConnect(settings, bike.protocol);
+      final customModes = [
+        for (final row in await _customModeRows(deviceId: deviceId))
+          _mapCustomMode(row),
+      ];
+      _validateSetOnConnect(settings, bike.protocol, customModes);
       await _updatePreferences(
         deviceId,
         BikePreferencesCompanion(setOnConnect: Value(settings)),
       );
     });
+  }
+
+  Future<void> setCustomModes(String deviceId, List<CustomMode> modes) {
+    _validateCustomModes(modes);
+    return database.transaction(() async {
+      final bike = await _requireBike(deviceId);
+      await (database.delete(
+        database.bikeCustomModes,
+      )..where((t) => t.deviceId.equals(deviceId))).go();
+      await _insertCustomModes(deviceId, modes);
+      final preferences = await (database.select(
+        database.bikePreferences,
+      )..where((t) => t.deviceId.equals(deviceId))).getSingle();
+      if (preferences.setOnConnect.mode case CustomModeRef(:final id)
+          when !modes.any((mode) => mode.id == id)) {
+        await (database.update(
+          database.bikePreferences,
+        )..where((t) => t.deviceId.equals(deviceId))).write(
+          BikePreferencesCompanion(
+            setOnConnect: Value(preferences.setOnConnect.copyWith(mode: null)),
+          ),
+        );
+      }
+      await (database.update(
+        database.bikes,
+      )..where((t) => t.deviceId.equals(bike.deviceId))).write(
+        BikesCompanion(updatedAtMs: Value(_clock().millisecondsSinceEpoch)),
+      );
+      await database.refreshBackgroundSyncPlan();
+    });
+  }
+
+  Future<void> _insertCustomModes(
+    String deviceId,
+    List<CustomMode> modes,
+  ) async {
+    for (var index = 0; index < modes.length; index++) {
+      final mode = modes[index];
+      await database
+          .into(database.bikeCustomModes)
+          .insert(
+            BikeCustomModesCompanion.insert(
+              deviceId: deviceId,
+              modeId: mode.id,
+              name: mode.name.trim(),
+              limitKmh: mode.effectiveLimitKmh,
+              throttle: mode.throttle,
+              sortOrder: index,
+            ),
+          );
+    }
+  }
+
+  void _validateCustomModes(List<CustomMode> modes) {
+    final ids = <String>{};
+    for (final mode in modes) {
+      if (mode.id.trim().isEmpty || !ids.add(mode.id)) {
+        throw ArgumentError.value(
+          mode.id,
+          'id',
+          'Custom mode ids must be unique and not empty.',
+        );
+      }
+      final name = mode.name.trim();
+      if (name.isEmpty || name.length > customModeNameMaxLength) {
+        throw ArgumentError.value(
+          mode.name,
+          'name',
+          'Must be 1 to $customModeNameMaxLength characters.',
+        );
+      }
+      if (mode.limitKmh < customLimitMin || mode.limitKmh > customLimitMax) {
+        throw ArgumentError.value(
+          mode.limitKmh,
+          'limitKmh',
+          'Must be $customLimitMin to $customLimitMax.',
+        );
+      }
+    }
+  }
+
+  Future<void> setStreetLegalOnQuickRestart(String deviceId, bool enabled) {
+    return _updatePreferences(
+      deviceId,
+      BikePreferencesCompanion(streetLegalOnQuickRestart: Value(enabled)),
+    );
   }
 
   Future<void> setBackgroundPreference(
@@ -354,6 +432,46 @@ final class BikeRepository {
       row.readTable(database.bikes),
       row.readTable(database.bikePreferences),
       row.readTableOrNull(database.bikeVersions),
+      await _customModeRows(deviceId: deviceId),
+    );
+  }
+
+  List<SavedBike> _mapAll(
+    List<TypedResult> rows,
+    List<BikeCustomModeRow> customModeRows,
+  ) {
+    final customModesByBike = <String, List<BikeCustomModeRow>>{};
+    for (final row in customModeRows) {
+      customModesByBike.putIfAbsent(row.deviceId, () => []).add(row);
+    }
+    return List.unmodifiable(
+      rows.map((row) {
+        final bike = row.readTable(database.bikes);
+        return _mapBike(
+          bike,
+          row.readTable(database.bikePreferences),
+          row.readTableOrNull(database.bikeVersions),
+          customModesByBike[bike.deviceId] ?? const [],
+        );
+      }),
+    );
+  }
+
+  Future<List<BikeCustomModeRow>> _customModeRows({String? deviceId}) {
+    final query = database.select(database.bikeCustomModes);
+    if (deviceId != null) {
+      query.where((table) => table.deviceId.equals(deviceId));
+    }
+    query.orderBy([(table) => OrderingTerm.asc(table.sortOrder)]);
+    return query.get();
+  }
+
+  CustomMode _mapCustomMode(BikeCustomModeRow row) {
+    return CustomMode(
+      id: row.modeId,
+      name: row.name,
+      limitKmh: row.limitKmh,
+      throttle: row.throttle,
     );
   }
 
@@ -410,6 +528,7 @@ final class BikeRepository {
     BikeRow bike,
     BikePreferenceRow preferences,
     BikeVersionRow? versions,
+    List<BikeCustomModeRow> customModes,
   ) {
     final region = switch (bike.region) {
       'us' => BikeRegion.us,
@@ -439,6 +558,8 @@ final class BikeRepository {
         moduleSerial: bike.moduleSerial,
       ),
       setOnConnect: preferences.setOnConnect,
+      customModes: List.unmodifiable(customModes.map(_mapCustomMode)),
+      streetLegalOnQuickRestart: preferences.streetLegalOnQuickRestart,
       backgroundPreference: BackgroundPreference(
         requested: preferences.backgroundRequested,
         consentVersion: preferences.backgroundConsentVersion,
@@ -475,7 +596,7 @@ final class BikeRepository {
 
   BikePreferencesCompanion _setOnConnectInsert(
     String deviceId,
-    BikeControlPatch setOnConnect,
+    SetOnConnect setOnConnect,
     BackgroundPreference backgroundPreference,
   ) {
     return BikePreferencesCompanion.insert(
@@ -523,8 +644,9 @@ final class BikeRepository {
   }
 
   void _validateSetOnConnect(
-    BikeControlPatch settings,
+    SetOnConnect settings,
     BikeProtocolVersion protocol,
+    List<CustomMode> customModes,
   ) {
     if (settings.light == false) {
       throw ArgumentError.value(
@@ -533,8 +655,19 @@ final class BikeRepository {
         'Set on connect can only turn the light on.',
       );
     }
-    if (settings.mode case final mode?) {
-      BikeControlValues.validateMode(mode, protocol);
+    switch (settings.mode) {
+      case null:
+        break;
+      case NativeModeRef(:final wire):
+        BikeControlValues.validateMode(wire, protocol);
+      case CustomModeRef(:final id):
+        if (!customModes.any((mode) => mode.id == id)) {
+          throw ArgumentError.value(
+            id,
+            'mode',
+            'Must be one of the bike custom modes.',
+          );
+        }
     }
     if (settings.assist case final assist?) {
       BikeControlValues.validateAssist(assist);
