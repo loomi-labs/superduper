@@ -1,3 +1,8 @@
+import 'package:superduper/src/domain/ride_modes.dart';
+
+export 'package:superduper/src/domain/ride_modes.dart'
+    show BikeRegion, CustomMode;
+
 enum BikeProtocolVersion {
   v1,
   v2;
@@ -38,24 +43,6 @@ enum BikeProtocolVersion {
       }
     }
     return null;
-  }
-}
-
-enum BikeRegion {
-  us('US'),
-  eu('EU'),
-  ch('CH');
-
-  new(this.label);
-
-  final String label;
-
-  static const v1BankSize = 4;
-
-  /// The bank a V1 wire byte belongs to. CH is never inferred: it is a
-  /// choice the rider makes.
-  static BikeRegion fromV1Wire(int wire) {
-    return wire >= v1BankSize ? BikeRegion.eu : BikeRegion.us;
   }
 }
 
@@ -183,6 +170,100 @@ final class BikeControlPatch {
 
   @override
   int get hashCode => Object.hash(light, mode, assist);
+}
+
+sealed class SetOnConnectMode {
+  const new();
+}
+
+final class NativeModeRef extends SetOnConnectMode {
+  const new(this.wire);
+
+  final int wire;
+
+  @override
+  bool operator ==(Object other) =>
+      other is NativeModeRef && other.wire == wire;
+
+  @override
+  int get hashCode => Object.hash(NativeModeRef, wire);
+}
+
+final class CustomModeRef extends SetOnConnectMode {
+  const new(this.id);
+
+  final String id;
+
+  @override
+  bool operator ==(Object other) => other is CustomModeRef && other.id == id;
+
+  @override
+  int get hashCode => Object.hash(CustomModeRef, id);
+}
+
+/// The persisted set-on-connect choice. The mode may point at a native wire
+/// or at one of the bike's custom modes.
+final class SetOnConnect {
+  const new({this.light, this.mode, this.assist});
+
+  final bool? light;
+  final SetOnConnectMode? mode;
+  final int? assist;
+
+  bool get isEmpty => light == null && mode == null && assist == null;
+
+  SetOnConnect copyWith({
+    Object? light = _unchanged,
+    Object? mode = _unchanged,
+    Object? assist = _unchanged,
+  }) {
+    return SetOnConnect(
+      light: identical(light, _unchanged) ? this.light : light as bool?,
+      mode: identical(mode, _unchanged) ? this.mode : mode as SetOnConnectMode?,
+      assist: identical(assist, _unchanged) ? this.assist : assist as int?,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is SetOnConnect &&
+      light == other.light &&
+      mode == other.mode &&
+      assist == other.assist;
+
+  @override
+  int get hashCode => Object.hash(light, mode, assist);
+}
+
+/// Turns the persisted choice into the patch the session writes on connect,
+/// plus the custom mode the ride-mode controller must run afterwards.
+({BikeControlPatch patch, CustomMode? rideMode}) resolveSetOnConnect(
+  SavedBike bike,
+) {
+  final setOnConnect = bike.setOnConnect;
+  int? wire;
+  CustomMode? rideMode;
+  switch (setOnConnect.mode) {
+    case null:
+      break;
+    case NativeModeRef(wire: final nativeWire):
+      wire = nativeWire;
+    case CustomModeRef(:final id):
+      for (final mode in bike.customModes) {
+        if (mode.id == id) {
+          rideMode = mode;
+          wire = entryWireFor(mode, bike.bike.region);
+        }
+      }
+  }
+  return (
+    patch: BikeControlPatch(
+      light: setOnConnect.light,
+      mode: wire,
+      assist: setOnConnect.assist,
+    ),
+    rideMode: rideMode,
+  );
 }
 
 const _unchanged = Object();
@@ -366,13 +447,15 @@ final class SavedBike {
   const new({
     required this.bike,
     required this.setOnConnect,
+    this.customModes = const [],
     this.backgroundPreference = const BackgroundPreference.defaults(),
     this.versions,
     this.odometer,
   });
 
   final Bike bike;
-  final BikeControlPatch setOnConnect;
+  final SetOnConnect setOnConnect;
+  final List<CustomMode> customModes;
   final BackgroundPreference backgroundPreference;
   final CachedBikeVersions? versions;
   final CachedBikeOdometer? odometer;
