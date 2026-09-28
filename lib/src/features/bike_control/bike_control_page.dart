@@ -1,11 +1,14 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:signals/signals_flutter.dart';
 import 'package:superduper/src/app_services.dart';
 import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_session.dart';
+import 'package:superduper/src/ble/ride_mode_controller.dart';
 import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/features/bike_settings/bike_settings_page.dart';
 import 'package:superduper/src/features/help/help_page.dart';
 import 'package:superduper/src/theme/app_theme.dart';
@@ -13,6 +16,7 @@ import 'package:superduper/src/user_facing_error.dart';
 import 'package:superduper/src/widgets/app_design.dart';
 import 'package:superduper/src/widgets/bike_session_presentation.dart';
 import 'package:superduper/src/widgets/bike_value_selector.dart';
+import 'package:superduper/src/widgets/ride_mode_selector.dart';
 
 final class BikeControlPage extends SignalStatefulWidget {
   const new({required this.deviceId, super.key});
@@ -71,6 +75,8 @@ final class _BikeControlPageState extends State<BikeControlPage> {
         ? activeState
         : null;
     final session = matchingStatus?.session;
+    final rideMode = matchingStatus?.rideMode;
+    final speed = session?.speedKmh.value;
     final matchingSessionState = matchingStatus?.sessionState;
     final coordinatorFailure = switch (activeState) {
       ActiveBikeCoordinatorFailure(:final error) => error,
@@ -172,26 +178,35 @@ final class _BikeControlPageState extends State<BikeControlPage> {
         _SettingSection(
           icon: Icons.speed_rounded,
           title: 'Mode',
-          control: BikeValueSelector(
-            values: BikeControlValues.modesFor(
-              session?.protocolVersion ?? bike.bike.protocol,
-            ),
-            selected: configuration?.mode,
-            enabled: canControl,
-            semanticLabel: 'Mode',
-            label: (mode) => '$mode',
-            onChanged: (mode) => _runCommand(() => session!.setMode(mode)),
-          ),
-          setOnConnectValue: switch (bike.setOnConnect.mode) {
-            null => null,
-            NativeModeRef(:final wire) => '$wire',
-            CustomModeRef(:final id) =>
-              bike.customModes
-                      .where((mode) => mode.id == id)
-                      .firstOrNull
-                      ?.name ??
-                  '?',
-          },
+          trailingText: speed == null
+              ? null
+              : '${speed.toStringAsFixed(0)} km/h',
+          control: bike.bike.protocol == BikeProtocolVersion.v1
+              ? RideModeSelector(
+                  options: selectableRideModes(
+                    region: bike.bike.region ?? BikeRegion.us,
+                    customModes: bike.customModes,
+                  ),
+                  selected: rideMode?.selection.value,
+                  region: bike.bike.region,
+                  enabled: canControl && rideMode != null,
+                  observedWire: configuration?.mode,
+                  onSelected: (selection) => _runCommand(() async {
+                    await rideMode!.select(selection);
+                    return session!.observed.peek()!;
+                  }),
+                )
+              : BikeValueSelector(
+                  values: BikeControlValues.modesFor(BikeProtocolVersion.v2),
+                  selected: configuration?.mode,
+                  enabled: canControl,
+                  semanticLabel: 'Mode',
+                  label: (mode) => '${mode + 1}',
+                  onChanged: (mode) =>
+                      _runCommand(() => session!.setMode(mode)),
+                ),
+          setOnConnectValue: _setOnConnectModeLabel(bike),
+          footnote: _modeFootnote(bike, rideMode),
         ),
         const SizedBox(height: 14),
         _SettingSection(
@@ -218,6 +233,29 @@ final class _BikeControlPageState extends State<BikeControlPage> {
         ],
       ],
     );
+  }
+
+  String? _setOnConnectModeLabel(SavedBike bike) =>
+      switch (bike.setOnConnect.mode) {
+        null => null,
+        NativeModeRef(:final wire) =>
+          bike.bike.protocol == BikeProtocolVersion.v1
+              ? profileByWire(wire).label(bike.bike.region)
+              : '${wire + 1}',
+        CustomModeRef(:final id) =>
+          bike.customModes.where((mode) => mode.id == id).firstOrNull?.name,
+      };
+
+  String? _modeFootnote(SavedBike bike, RideModeController? rideMode) {
+    final selection = rideMode?.selection.value;
+    if (selection is! CustomRideMode ||
+        !isDynamicSelection(selection, bike.bike.region)) {
+      return null;
+    }
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return 'Speed switching stops when the app is in the background on iOS.';
+    }
+    return 'Superduper CH keeps the link alive in the background to hold this limit.';
   }
 
   Future<void> _runCommand(Future<BikeConfiguration> Function() command) async {
@@ -356,11 +394,15 @@ final class _SettingSection extends StatelessWidget {
     this.control,
     this.toggleValue,
     this.onToggleChanged,
+    this.trailingText,
+    this.footnote,
   });
 
   final IconData icon;
   final String title;
   final Widget? control;
+  final String? trailingText;
+  final String? footnote;
   final bool? toggleValue;
   final ValueChanged<bool>? onToggleChanged;
   final String? setOnConnectValue;
@@ -402,11 +444,26 @@ final class _SettingSection extends StatelessWidget {
                           setOnConnectValue: setOnConnectValue,
                         ),
                       ),
+                      if (trailingText case final trailing?)
+                        Text(
+                          trailing,
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
                     ],
                   ),
                   if (control case final body?) ...[
                     const SizedBox(height: 18),
                     body,
+                  ],
+                  if (footnote case final note?) ...[
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        note,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
                   ],
                 ],
               ),

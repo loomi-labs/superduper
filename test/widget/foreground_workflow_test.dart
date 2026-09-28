@@ -114,7 +114,7 @@ void main() {
     );
     expect(modeIndicator, findsOneWidget);
     expect(
-      find.descendant(of: modeIndicator, matching: find.text('3')),
+      find.descendant(of: modeIndicator, matching: find.text('OFFROAD')),
       findsOneWidget,
     );
     expect(find.byKey(const Key('set-on-connect-mode')), findsNothing);
