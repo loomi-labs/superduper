@@ -1684,6 +1684,56 @@ void main() {
       expect(last.value[5], BikeGatt.sessionAppliedMarker);
     });
 
+    test(
+      'a manual disconnect does not start the quick-restart clock',
+      () async {
+        var now = DateTime(2026, 1, 1, 12);
+        connection.readFrames.addAll([
+          v1StateFrame(mode: 7),
+          historyFrame(marked: true),
+        ]);
+        session = createSession(
+          setOnConnect: const BikeControlPatch(mode: 1),
+          readDiagnosticsOnConnect: false,
+          streetLegalOnQuickRestart: true,
+          clock: () => now,
+        );
+        await session.connect();
+
+        // A mode write is in flight, so the manual disconnect waits in the
+        // command queue. The platform reports the loss in that time.
+        final gate = Completer<void>();
+        connection
+          ..configurationWriteGate = gate
+          ..configurationWriteGateAfterStarts =
+              connection.configurationWriteStarts;
+        final write = session
+            .setMode(1)
+            .catchError(
+              (Object _) =>
+                  const BikeConfiguration(light: false, mode: 0, assist: 0),
+            );
+        await Future<void>.delayed(Duration.zero);
+        final disconnect = session.disconnect();
+        connection.emitState(BikeConnectionState.disconnected);
+        await Future<void>.delayed(Duration.zero);
+        gate.complete();
+        connection.configurationWriteGate = null;
+        await write;
+        await disconnect;
+        await Future<void>.delayed(Duration.zero);
+        now = now.add(const Duration(seconds: 2));
+        connection.readFrames.addAll([
+          v1StateFrame(mode: 7),
+          historyFrame(marked: false),
+        ]);
+        await session.connect();
+
+        expect(session.streetLegalHeld.value, isFalse);
+        expect(session.observed.value?.mode, 1);
+      },
+    );
+
     test('a bike with no history record counts as power cycled', () async {
       var now = DateTime(2026, 1, 1, 12);
       connection.readFrames.addAll([

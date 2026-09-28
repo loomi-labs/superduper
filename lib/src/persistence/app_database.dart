@@ -415,7 +415,7 @@ final class AppDatabase extends _$AppDatabase {
       final moduleSerial = bike.moduleSerial;
       if (!preferences.backgroundRequested ||
           preferences.backgroundConsentVersion < backgroundSyncConsentVersion ||
-          preferences.setOnConnect.isEmpty ||
+          _backgroundPatch(preferences).isEmpty ||
           moduleSerial == null) {
         return;
       }
@@ -496,12 +496,20 @@ final class AppDatabase extends _$AppDatabase {
     ]);
   }
 
+  /// The set-on-connect values the native background sync may apply. It
+  /// cannot tell a quick restart from a normal one, so on a street-legal bike
+  /// it never sets the mode.
+  SetOnConnect _backgroundPatch(BikePreferenceRow preferences) =>
+      preferences.streetLegalOnQuickRestart
+      ? preferences.setOnConnect.copyWith(mode: null)
+      : preferences.setOnConnect;
+
   Future<List<int>> _backgroundControlFrame(
     BikeRow bike,
     BikePreferenceRow preferences,
   ) async {
-    final patch = preferences.setOnConnect;
-    final mode = switch (preferences.setOnConnect.mode) {
+    final patch = _backgroundPatch(preferences);
+    final mode = switch (patch.mode) {
       null => 0xff,
       NativeModeRef(:final wire) => wire,
       CustomModeRef(:final id) => await _customModeEntryWire(bike, id) ?? 0xff,

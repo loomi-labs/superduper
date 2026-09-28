@@ -1081,7 +1081,6 @@ final class BikeSession {
       return;
     }
     _hasObservedConnection = false;
-    _linkLostAt = _clock();
     _invalidateConfigurationState();
     if (_expectedDisconnect ||
         _manualReconnectPaused ||
@@ -1089,6 +1088,8 @@ final class BikeSession {
         _state.peek() is SessionIdle) {
       return;
     }
+    // Only an unexpected loss can be a bike power cycle.
+    _linkLostAt = _clock();
     _reconnectTimer?.cancel();
     _generation++;
     _pollTimer?.cancel();

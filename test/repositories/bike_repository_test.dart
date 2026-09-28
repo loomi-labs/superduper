@@ -646,6 +646,81 @@ void main() {
       expect(saved.customModes, const [seededChMode]);
     });
   });
+
+  group('background sync and street-legal', () {
+    Future<void> addSyncedBike(SetOnConnect setOnConnect) async {
+      await settingsRepository.initialize();
+      await repository.addBike(
+        deviceId: 'b',
+        moduleSerial: '00112233aabbccdd',
+        setOnConnect: setOnConnect,
+        backgroundPreference: const BackgroundPreference(
+          requested: true,
+          consentVersion: backgroundSyncConsentVersion,
+        ),
+      );
+    }
+
+    test('street-legal leaves the mode byte unset', () async {
+      await addSyncedBike(
+        const SetOnConnect(mode: NativeModeRef(2), assist: 3),
+      );
+
+      await repository.setStreetLegalOnQuickRestart('b', true);
+
+      final command = await database
+          .select(database.backgroundSyncCommands)
+          .getSingle();
+      expect(command.payload[3], 3);
+      expect(command.payload[4], 0xff);
+    });
+
+    test('street-legal with only a mode writes no plan', () async {
+      await addSyncedBike(const SetOnConnect(mode: NativeModeRef(2)));
+
+      await repository.setStreetLegalOnQuickRestart('b', true);
+
+      expect(
+        await database.select(database.backgroundSyncPlans).get(),
+        isEmpty,
+      );
+      expect(
+        await database.select(database.backgroundSyncCommands).get(),
+        isEmpty,
+      );
+    });
+
+    test('without street-legal the mode byte is the wire', () async {
+      await addSyncedBike(
+        const SetOnConnect(mode: NativeModeRef(2), assist: 3),
+      );
+
+      final command = await database
+          .select(database.backgroundSyncCommands)
+          .getSingle();
+      expect(command.payload[4], 2);
+    });
+
+    test('turning the switch on and off refreshes the plan', () async {
+      await addSyncedBike(const SetOnConnect(mode: NativeModeRef(2)));
+      expect(
+        await database.select(database.backgroundSyncCommands).get(),
+        hasLength(1),
+      );
+
+      await repository.setStreetLegalOnQuickRestart('b', true);
+      expect(
+        await database.select(database.backgroundSyncCommands).get(),
+        isEmpty,
+      );
+
+      await repository.setStreetLegalOnQuickRestart('b', false);
+      final command = await database
+          .select(database.backgroundSyncCommands)
+          .getSingle();
+      expect(command.payload[4], 2);
+    });
+  });
 }
 
 const _versionInfo = BikeVersionInfo(

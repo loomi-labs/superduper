@@ -119,6 +119,44 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('Background Sync says it leaves the mode on a street-legal bike', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final fixture = await _pumpReadyBikeApp(tester, 'street_legal_sync');
+    const note =
+        'With Street-legal on quick restart, Background Sync does not set the mode.';
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Background Sync'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text(note), findsNothing);
+
+    await tester.runAsync(() async {
+      await fixture.services.bikeRepository.setStreetLegalOnQuickRestart(
+        'active-bike',
+        true,
+      );
+      await _waitUntilAsync(
+        () async => fixture.services.activeBikeCoordinator.bikes
+            .peek()
+            .single
+            .streetLegalOnQuickRestart,
+      );
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text(note), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('Set on connect is configured separately from live controls', (
     tester,
   ) async {

@@ -267,6 +267,13 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                           _changeBackgroundPreference(saved, enabled),
                         ),
                 ),
+                if (saved.streetLegalOnQuickRestart)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 0, 20, 14),
+                    child: Text(
+                      'With Street-legal on quick restart, Background Sync does not set the mode.',
+                    ),
+                  ),
               ],
               if (hasSession) ...[
                 const Divider(height: 1),

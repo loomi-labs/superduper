@@ -77,7 +77,11 @@ Byte 5 of each control write is a marker. The bike keeps it in the control-histo
 | 1 | The app wrote in this power cycle. Normal writes. |
 | 2 | The app wrote in this power cycle while a street-legal hold was on. |
 
-When the preference is on, the session reads the marker at each connect. Marker 2 keeps the hold, marker 1 clears it, and marker 0 starts the hold only when the link was lost less than 12 seconds before. While the hold is on, the session does not write the set-on-connect mode, and all its control writes carry marker 2. So the hold survives an app restart. A mode choice by the rider ends the hold; its write carries marker 1. The native background sync writes only when the marker is 0.
+When the preference is on, the session reads the marker at each connect. Marker 2 keeps the hold, marker 1 clears it, and marker 0 starts the hold only when the link was lost less than 12 seconds before. Only an unexpected link loss starts that clock; a manual disconnect or a background pause does not. While the hold is on, the session does not write the set-on-connect mode, and all its control writes carry marker 2. So the hold survives an app restart. A mode choice by the rider ends the hold; its write carries marker 1.
+
+The native background sync writes only when the marker is 0. It has no timing information, so on a bike with the preference on, its command never sets the mode (mode byte `0xff`). When no light or assist value remains, the database holds no background plan for the bike.
+
+Limit: only a connected app can measure how long the bike was off. When the app is not connected at the restart, nothing detects a quick restart, and the app applies the set-on-connect mode at its next connect.
 
 ## Background hold
 
