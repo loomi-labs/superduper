@@ -1,4 +1,4 @@
-package io.kbl.superduper
+package com.loomilabs.superduperch
 
 internal object BackgroundSyncRuntime {
     @Volatile

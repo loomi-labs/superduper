@@ -14,7 +14,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "io.kbl.superduper"
+    namespace = "com.loomilabs.superduperch"
     compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
@@ -24,7 +24,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "io.kbl.superduper"
+        applicationId = "com.loomilabs.superduperch"
         minSdk = 31
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -50,6 +50,29 @@ android {
                 } else {
                     signingConfigs.getByName("debug")
                 }
+        }
+    }
+}
+
+// A distributed artifact must never carry the debug certificate. The check
+// runs as a task action, so the configuration cache accepts it.
+val allowDebugSigning = project.findProperty("allowDebugSigning")?.toString() == "true"
+
+if (!keystorePropertiesFile.exists()) {
+    tasks.configureEach {
+        val signsRelease = name.contains("Release") &&
+            listOf("assemble", "bundle", "package", "signingConfigWriter").any { name.startsWith(it) }
+        if (signsRelease) {
+            doFirst {
+                if (allowDebugSigning) {
+                    logger.warn("WARNING: signing the release build with the DEBUG certificate. Do not distribute it.")
+                } else {
+                    throw GradleException(
+                        "key.properties is missing, so the release build would be signed with the debug " +
+                            "certificate. Add key.properties, or set ORG_GRADLE_PROJECT_allowDebugSigning=true for a local build."
+                    )
+                }
+            }
         }
     }
 }

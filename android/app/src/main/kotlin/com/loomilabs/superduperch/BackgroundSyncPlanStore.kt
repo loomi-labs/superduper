@@ -1,4 +1,4 @@
-package io.kbl.superduper
+package com.loomilabs.superduperch
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase

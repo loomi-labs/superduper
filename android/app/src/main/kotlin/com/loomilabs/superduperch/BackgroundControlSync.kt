@@ -1,4 +1,4 @@
-package io.kbl.superduper
+package com.loomilabs.superduperch
 
 /** Authenticated history inspection and receipt verification for one control command. */
 internal class BackgroundControlSync(command: ByteArray) {

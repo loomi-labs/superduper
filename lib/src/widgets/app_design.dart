@@ -417,7 +417,7 @@ final class BrandMasthead extends StatelessWidget {
                 child: Transform.translate(
                   offset: Offset(0, -fontSize * 0.23),
                   child: Text(
-                    'SUPERDUPER',
+                    'SUPERDUPER CH',
                     maxLines: 1,
                     softWrap: false,
                     textAlign: TextAlign.center,

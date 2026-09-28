@@ -1,4 +1,4 @@
-package io.kbl.superduper
+package com.loomilabs.superduperch
 
 import android.Manifest
 import android.app.PendingIntent

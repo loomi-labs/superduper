@@ -20,7 +20,7 @@
         android:required="false" />
 
     <application
-        android:label="Superduper"
+        android:label="Superduper CH"
         android:name=".SuperduperApplication"
         android:icon="@mipmap/launcher_icon">
         <activity

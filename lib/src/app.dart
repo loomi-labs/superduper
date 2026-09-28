@@ -202,7 +202,7 @@ final class _SuperduperAppState extends State<SuperduperApp>
       services: widget.services,
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        title: 'Superduper',
+        title: 'Superduper CH',
         theme: AppTheme.dark,
         home: StartupPage(
           onStartupRetry: widget.onStartupRetry,

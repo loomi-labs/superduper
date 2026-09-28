@@ -1,4 +1,4 @@
-package io.kbl.superduper
+package com.loomilabs.superduperch
 
 import android.companion.AssociationInfo
 import android.companion.CompanionDeviceService

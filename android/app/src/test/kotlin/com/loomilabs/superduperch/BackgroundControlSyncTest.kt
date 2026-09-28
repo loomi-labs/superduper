@@ -1,4 +1,4 @@
-package io.kbl.superduper
+package com.loomilabs.superduperch
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals

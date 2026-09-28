@@ -2,19 +2,15 @@
 <div align="center">
   <img src="assets/superduper-nobg.png" alt="Logo" width="80" height="80">
 
-  <h3 align="center">SuperDuper App</h3>
+  <h3 align="center">Superduper CH</h3>
 
   <p align="center">
     An alternative ebike app.
     <br />
-    <a href="https://discord.gg/STvgARZYaw"><strong>Join the Discord</strong></a>
+    A fork of <a href="https://github.com/blopker/superduper">SuperDuper</a> by blopker.
     <br />
     <br />
-    <a href="https://apps.apple.com/us/app/superduper-bike/id1665290602">iOS Download</a>
-    ·
-    <a href="https://play.google.com/store/apps/details?id=io.kbl.superduper">Android Download</a>
-    ·
-    <a href="https://github.com/blopker/superduper/issues">Bug Reports</a>
+    <a href="https://github.com/loomi-labs/superduper/issues">Bug Reports</a>
   </p>
 </div>
 <br/>
@@ -96,6 +92,12 @@ Note: the mode setting means different things on different bike models. The tabl
 Changes the amount of assist your bike will provide while pedaling.
 0 is no assist, 4 is full assist. This does not affect throttle power.
 
+### Custom modes
+
+A custom mode is a speed limit of your choice between 25 and 45 km/h, with or without throttle.
+Below the limit the bike rides one firmware profile (the base), and above the limit the app switches it to a slower profile (the cap).
+On Android the app keeps the Bluetooth link alive in the background while such a mode is selected, so the switching continues when the phone is locked.
+
 
 ## FAQ
 
@@ -132,7 +134,7 @@ Superduper can only add automation around what the official app already does. It
 
 ### I'm having another issue or have a feature request
 
-I'm sorry! Please start by making sure you have the newest app from the app store. After that, please submit the issue to https://github.com/blopker/superduper/issues. It helps to have a way I can reproduce the issue, with screenshots or video. Alternatively, you may have luck either clearing all the app's data or reinstalling it.
+I'm sorry! Please start by making sure you have the newest app from the app store. After that, please submit the issue to https://github.com/loomi-labs/superduper/issues. It helps to have a way I can reproduce the issue, with screenshots or video. Alternatively, you may have luck either clearing all the app's data or reinstalling it.
 
 ### Releases
 

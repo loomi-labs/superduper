@@ -40,13 +40,12 @@ flutter:
     - assets/superduper-nobg.png
 
 flutter_launcher_icons:
-  android: launcher_icon
-  adaptive_icon_background: "#160A20"
-  adaptive_icon_foreground: assets/superduper-nobg.png
-  adaptive_icon_monochrome: assets/superduper-nobg.png
+  android: "launcher_icon"
+  adaptive_icon_background: "#DBECF0"
+  adaptive_icon_foreground: "assets/superduper.jpg"
   ios: true
-  image_path: assets/superduper.jpg
-  image_path_ios: assets/superduper.jpg
+  image_path: "assets/superduper.jpg"
+  image_path_ios: "assets/superduper.jpg"
   remove_alpha_ios: true
   macos:
     generate: true
