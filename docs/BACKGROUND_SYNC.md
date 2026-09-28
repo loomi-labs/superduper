@@ -215,13 +215,13 @@ Use a debug build and a physical bike whose module serial appears under Bike inf
 5. After the transaction has had time to finish, inspect the prototype result:
 
    ```text
-   adb shell run-as io.kbl.superduper cat shared_prefs/background_sync.xml
+   adb shell run-as com.loomilabs.superduperch cat shared_prefs/background_sync.xml
    ```
 
    `last_presence_source` should be `bleAppeared` or `bleScanFirstMatch`, `last_presence_at_ms` and `last_sync_started_at_ms` should be recent, and `last_outcome` should be `confirmed`. If restoration failed, `registration_error_detail` records the native reason.
 6. Open the app and confirm Set on connect was applied while every disabled value remained unchanged.
 
-For the cold-process case, `adb shell am kill io.kbl.superduper` may be used only after the app is backgrounded. Do not use `am force-stop`: Force Stop intentionally cancels this path until the user opens the app again.
+For the cold-process case, `adb shell am kill com.loomilabs.superduperch` may be used only after the app is backgrounded. Do not use `am force-stop`: Force Stop intentionally cancels this path until the user opens the app again.
 
 ### Companion association
 

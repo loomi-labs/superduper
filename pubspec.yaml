@@ -1,7 +1,7 @@
 name: superduper
 description: Configure your compatible bike and keep its ride settings consistent.
 publish_to: none
-version: 1.0.9+68
+version: 1.1.0+69
 
 environment:
   sdk: ^3.13.1
