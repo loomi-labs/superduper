@@ -72,14 +72,19 @@ void main() {
 
     final run = controller.start();
     await _waitForPhase(controller, BikeHardwareTestPhase.scanning);
-    transport.emitResults([
-      DiscoveredBike(
-        deviceId: 'bike',
-        name: BikeProtocolVersion.v1.advertisedName,
-        rssi: -42,
-        moduleSerial: '0102030405060708',
-      ),
-    ]);
+    // The scan loop listens only while a scan runs. Repeat the result until a
+    // scan receives it.
+    while (controller.state.peek().phase == BikeHardwareTestPhase.scanning) {
+      transport.emitResults([
+        DiscoveredBike(
+          deviceId: 'bike',
+          name: BikeProtocolVersion.v1.advertisedName,
+          rssi: -42,
+          moduleSerial: '0102030405060708',
+        ),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
 
     await _waitUntil(
       () => transport.connections['bike']?.notificationsEnabled ?? false,
