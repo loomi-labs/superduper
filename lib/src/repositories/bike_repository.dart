@@ -161,15 +161,58 @@ final class BikeRepository {
         'Must not be empty.',
       );
     }
-    return _updateBike(
-      deviceId,
-      BikesCompanion(
-        displayName: Value(normalizedName),
-        protocol: Value(protocol),
-        region: Value(protocol.normalizeRegion(region)?.name),
-        colorKey: Value(color.key),
-      ),
-    );
+    final newRegion = protocol.normalizeRegion(region);
+    return database.transaction(() async {
+      final before = await _requireBike(deviceId);
+      await _updateBike(
+        deviceId,
+        BikesCompanion(
+          displayName: Value(normalizedName),
+          protocol: Value(protocol),
+          region: Value(newRegion?.name),
+          colorKey: Value(color.key),
+        ),
+      );
+      if (newRegion != null && before.region != newRegion.name) {
+        await _adaptModesToRegion(deviceId, newRegion);
+      }
+    });
+  }
+
+  /// A native wire belongs to one region. After a region change, a CH bike
+  /// gets the seeded custom mode, and a set-on-connect wire that the new
+  /// region does not offer is cleared (on CH it points at the seeded mode).
+  Future<void> _adaptModesToRegion(String deviceId, BikeRegion region) async {
+    var customModes = [
+      for (final row in await _customModeRows(deviceId: deviceId))
+        _mapCustomMode(row),
+    ];
+    if (region == BikeRegion.ch && customModes.isEmpty) {
+      await _insertCustomModes(deviceId, const [seededChMode]);
+      customModes = const [seededChMode];
+    }
+    final preferences = await (database.select(
+      database.bikePreferences,
+    )..where((table) => table.deviceId.equals(deviceId))).getSingle();
+    final setOnConnect = preferences.setOnConnect;
+    if (setOnConnect.mode case NativeModeRef(:final wire)
+        when !nativeWiresFor(region).contains(wire)) {
+      final seeded =
+          region == BikeRegion.ch &&
+          customModes.any((mode) => mode.id == seededChModeId);
+      await (database.update(
+        database.bikePreferences,
+      )..where((table) => table.deviceId.equals(deviceId))).write(
+        BikePreferencesCompanion(
+          setOnConnect: Value(
+            setOnConnect.copyWith(
+              mode: seeded ? const CustomModeRef(seededChModeId) : null,
+            ),
+          ),
+        ),
+      );
+    }
+    await database.refreshBackgroundSyncPlan();
   }
 
   Future<void> setOnConnect(String deviceId, SetOnConnect settings) {

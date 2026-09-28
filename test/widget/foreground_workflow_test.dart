@@ -47,6 +47,17 @@ void main() {
     expect(configurationWrites.last.value, [0, 0xd1, 1, 2, 3, 1, 0, 0, 0, 0]);
   });
 
+  testWidgets('the speed readout uses mph on a US bike', (tester) async {
+    final fixture = await _pumpReadyBikeApp(tester, 'speed');
+
+    fixture.connection.emitNotification([2, 1, 0xc4, 0x09, 0, 0, 0, 0, 0, 0]);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('16 mph'), findsOneWidget);
+    expect(find.text('25 km/h'), findsNothing);
+  });
+
   testWidgets('bike color theme stays scoped to bike routes', (tester) async {
     await _pumpReadyBikeApp(tester, 'theme');
 
@@ -178,9 +189,12 @@ void main() {
     final nameField = tester.widget<TextField>(find.byType(TextField).first);
     await tester.runAsync(() async {
       nameField.onChanged?.call('Daily Rider');
+      // Wait for the bike stream, which the page and the coordinator read,
+      // not only for the database row.
       await _waitUntilAsync(
         () async =>
-            (await fixture.services.bikeRepository.getBikes())
+            fixture.services.activeBikeCoordinator.bikes
+                .peek()
                 .single
                 .bike
                 .displayName ==

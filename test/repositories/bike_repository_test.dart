@@ -578,6 +578,74 @@ void main() {
       );
     });
   });
+
+  group('region change', () {
+    test(
+      'US to CH seeds the CH mode and points set-on-connect at it',
+      () async {
+        await repository.addBike(
+          deviceId: 'b',
+          setOnConnect: const SetOnConnect(mode: NativeModeRef(1), assist: 2),
+        );
+
+        await repository.updateBikeDetails(
+          'b',
+          displayName: 'B',
+          region: BikeRegion.ch,
+          color: BikeColor.royalHorizon,
+          protocol: BikeProtocolVersion.v1,
+        );
+
+        final saved = (await repository.getBikes()).single;
+        expect(saved.bike.region, BikeRegion.ch);
+        expect(saved.customModes, const [seededChMode]);
+        expect(
+          saved.setOnConnect,
+          const SetOnConnect(mode: CustomModeRef(seededChModeId), assist: 2),
+        );
+      },
+    );
+
+    test('EU to US clears a wire the US bank does not offer', () async {
+      await repository.addBike(
+        deviceId: 'b',
+        region: BikeRegion.eu,
+        setOnConnect: const SetOnConnect(mode: NativeModeRef(5)),
+      );
+
+      await repository.updateBikeDetails(
+        'b',
+        displayName: 'B',
+        region: BikeRegion.us,
+        color: BikeColor.royalHorizon,
+        protocol: BikeProtocolVersion.v1,
+      );
+
+      final saved = (await repository.getBikes()).single;
+      expect(saved.setOnConnect, const SetOnConnect());
+      expect(saved.customModes, isEmpty);
+    });
+
+    test('a wire the new region offers stays', () async {
+      await repository.addBike(
+        deviceId: 'b',
+        region: BikeRegion.eu,
+        setOnConnect: const SetOnConnect(mode: NativeModeRef(7)),
+      );
+
+      await repository.updateBikeDetails(
+        'b',
+        displayName: 'B',
+        region: BikeRegion.ch,
+        color: BikeColor.royalHorizon,
+        protocol: BikeProtocolVersion.v1,
+      );
+
+      final saved = (await repository.getBikes()).single;
+      expect(saved.setOnConnect.mode, const NativeModeRef(7));
+      expect(saved.customModes, const [seededChMode]);
+    });
+  });
 }
 
 const _versionInfo = BikeVersionInfo(

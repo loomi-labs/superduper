@@ -180,7 +180,9 @@ final class _BikeControlPageState extends State<BikeControlPage> {
           title: 'Mode',
           trailingText: speed == null
               ? null
-              : '${speed.toStringAsFixed(0)} km/h',
+              : bike.bike.region == BikeRegion.us
+              ? '${(speed / 1.609344).round()} mph'
+              : '${speed.round()} km/h',
           control: bike.bike.protocol == BikeProtocolVersion.v1
               ? RideModeSelector(
                   options: selectableRideModes(

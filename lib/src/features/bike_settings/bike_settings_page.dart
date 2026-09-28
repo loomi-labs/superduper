@@ -768,24 +768,9 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
       _region = region;
       _regionFieldRevision += 1;
     });
+    // The repository adapts the custom modes and the set-on-connect mode to
+    // the new region in the same transaction.
     await _queueSaveNow();
-    if (region != BikeRegion.ch) {
-      return;
-    }
-    final deviceId = widget.initialBike.bike.deviceId;
-    final saved = (await _services.bikeRepository.getBikes())
-        .where((bike) => bike.bike.deviceId == deviceId)
-        .firstOrNull;
-    if (saved == null ||
-        saved.bike.region != BikeRegion.ch ||
-        saved.customModes.isNotEmpty) {
-      return;
-    }
-    await _changeSetOnConnect(
-      () => _services.bikeRepository.setCustomModes(deviceId, const [
-        seededChMode,
-      ]),
-    );
   }
 
   Future<void> _changeProtocol(BikeProtocolVersion protocol) async {
