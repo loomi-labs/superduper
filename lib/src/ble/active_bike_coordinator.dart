@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:signals/signals.dart';
 import 'package:superduper/src/ble/bike_identity_resolver.dart';
 import 'package:superduper/src/ble/bike_session.dart';
+import 'package:superduper/src/ble/ride_mode_controller.dart';
 import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/platform/background_hold.dart';
 import 'package:superduper/src/platform/bluetooth_permissions.dart';
 import 'package:superduper/src/repositories/bike_repository.dart';
 import 'package:superduper/src/repositories/settings_repository.dart';
@@ -32,10 +34,12 @@ final class ActiveBikeSessionStatus extends ActiveBikeState {
     required this.session,
     required this.sessionState,
     required this.isTemporary,
+    required this.rideMode,
   });
 
   final SavedBike bike;
   final BikeSession session;
+  final RideModeController rideMode;
   final BikeSessionState sessionState;
   final bool isTemporary;
 }
@@ -47,6 +51,11 @@ final class ActiveBikeCoordinatorFailure extends ActiveBikeState {
 }
 
 typedef BikeSessionBuilder = BikeSession Function(SavedBike bike);
+
+typedef RideModeBuilder = RideModeController Function(
+  BikeSession session,
+  SavedBike bike,
+);
 
 final class ActiveBikeDiscoveryPause {
   new _(this._coordinator);
@@ -86,13 +95,20 @@ final class ActiveBikeCoordinator {
     required this.permissions,
     required this.buildSession,
     this.identityResolver,
-  });
+    RideModeBuilder? rideModeBuilder,
+    this.backgroundHold = const NoopBackgroundHoldGateway(),
+  }) : _rideModeBuilder =
+           rideModeBuilder ??
+           ((session, bike) =>
+               RideModeController(session: session, bike: bike));
 
   final BikeRepository bikeRepository;
   final SettingsRepository settingsRepository;
   final BluetoothPermissionGateway permissions;
   final BikeSessionBuilder buildSession;
   final BikeIdentityResolver? identityResolver;
+  final BackgroundHoldGateway backgroundHold;
+  final RideModeBuilder _rideModeBuilder;
   final Signal<ActiveBikeState> _state = signal(
     const ActiveBikeLoading(),
     options: const SignalOptions(name: 'activeBike.state'),
@@ -118,6 +134,8 @@ final class ActiveBikeCoordinator {
   Future<void>? _reconcileFuture;
   _CoordinatorInputs _inputs = const _CoordinatorInputs();
   BikeSession? _session;
+  RideModeController? _rideMode;
+  EffectCleanup? _holdCleanup;
   SavedBike? _currentBike;
   String? _temporaryBikeId;
   final Set<String> _forgettingBikeIds = {};
@@ -354,7 +372,19 @@ final class ActiveBikeCoordinator {
         await current.resumeFromBackground();
       }
     } else {
+      if (_rideMode?.needsBackgroundHold.peek() ?? false) {
+        return;
+      }
       await _session?.pauseForBackground();
+    }
+  }
+
+  void _onHoldChanged(bool held) {
+    unawaited(backgroundHold.setHeld(held).catchError((Object _) {}));
+    // Without the hold Android stops the process at an unknown time. An
+    // orderly pause matches the behaviour without a dynamic mode.
+    if (!held && !_foreground && !_discoveryPaused) {
+      unawaited(_session?.pauseForBackground());
     }
   }
 
@@ -452,6 +482,7 @@ final class ActiveBikeCoordinator {
         current!
           ..updateSetOnConnect(resolveSetOnConnect(bike).patch)
           ..updateStreetLegalOnQuickRestart(bike.streetLegalOnQuickRestart);
+        _rideMode?.updateBike(bike);
         if (!_disposed &&
             !_discoveryPaused &&
             _session == current &&
@@ -508,6 +539,9 @@ final class ActiveBikeCoordinator {
       _readyRecorded = false;
       _currentBike = preparedBike;
       _session = next;
+      final rideMode = _rideModeBuilder(next, preparedBike);
+      _rideMode = rideMode;
+      _holdCleanup = rideMode.needsBackgroundHold.subscribe(_onHoldChanged);
       _sessionStateCleanup = next.state.subscribe((sessionState) {
         if (!_disposed && _session == next) {
           _publishSessionState(sessionState);
@@ -549,6 +583,11 @@ final class ActiveBikeCoordinator {
   Future<void> _clearSession() async {
     _sessionStateCleanup?.call();
     _sessionStateCleanup = null;
+    _holdCleanup?.call();
+    _holdCleanup = null;
+    _rideMode?.dispose();
+    _rideMode = null;
+    await backgroundHold.setHeld(false).catchError((Object _) {});
     final old = _session;
     _session = null;
     _currentBike = null;
@@ -564,7 +603,8 @@ final class ActiveBikeCoordinator {
   void _publishSessionState(BikeSessionState sessionState) {
     final bike = _currentBike;
     final session = _session;
-    if (bike == null || session == null) {
+    final rideMode = _rideMode;
+    if (bike == null || session == null || rideMode == null) {
       return;
     }
     _state.value = ActiveBikeSessionStatus(
@@ -572,6 +612,7 @@ final class ActiveBikeCoordinator {
       session: session,
       sessionState: sessionState,
       isTemporary: _temporaryBikeId != null,
+      rideMode: rideMode,
     );
     if (sessionState is SessionReady && !_readyRecorded) {
       _readyRecorded = true;

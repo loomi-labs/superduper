@@ -7,7 +7,9 @@ import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/persistence/app_database.dart';
+import 'package:superduper/src/platform/background_hold.dart';
 import 'package:superduper/src/platform/bluetooth_permissions.dart';
 import 'package:superduper/src/repositories/bike_repository.dart';
 import 'package:superduper/src/repositories/settings_repository.dart';
@@ -25,6 +27,26 @@ void main() {
   late bool throwWhenBuildingSession;
   late bool databaseClosed;
 
+  BikeSession buildTestSession(SavedBike bike) {
+    if (throwWhenBuildingSession) {
+      throw StateError('session factory unavailable');
+    }
+    final connection = FakeBikeConnection(deviceId: bike.bike.deviceId)
+      ..readFrames.addAll(
+        connectionFrames[bike.bike.deviceId]?.map(List<int>.from) ??
+            const [
+              [0, 0, 0, 0, 0, 0],
+            ],
+      );
+    connections.putIfAbsent(bike.bike.deviceId, () => []).add(connection);
+    return BikeSession(
+      connection: connection,
+      setOnConnect: resolveSetOnConnect(bike).patch,
+      protocol: bike.bike.protocol,
+      reconnectDelays: const [],
+    );
+  }
+
   setUp(() async {
     database = AppDatabase(NativeDatabase.memory());
     bikes = BikeRepository(database: database);
@@ -41,25 +63,7 @@ void main() {
       bikeRepository: bikes,
       settingsRepository: settings,
       permissions: permissions,
-      buildSession: (bike) {
-        if (throwWhenBuildingSession) {
-          throw StateError('session factory unavailable');
-        }
-        final connection = FakeBikeConnection(deviceId: bike.bike.deviceId)
-          ..readFrames.addAll(
-            connectionFrames[bike.bike.deviceId]?.map(List<int>.from) ??
-                const [
-                  [0, 0, 0, 0, 0, 0],
-                ],
-          );
-        connections.putIfAbsent(bike.bike.deviceId, () => []).add(connection);
-        return BikeSession(
-          connection: connection,
-          setOnConnect: resolveSetOnConnect(bike).patch,
-          protocol: bike.bike.protocol,
-          reconnectDelays: const [],
-        );
-      },
+      buildSession: buildTestSession,
     );
   });
 
@@ -481,6 +485,102 @@ void main() {
 
     expect(connection.connectCalls, 2);
   });
+
+  group('background hold', () {
+    late RecordingHold hold;
+
+    Future<ActiveBikeSessionStatus> startActive(
+      String deviceId, {
+      required int bootWire,
+    }) async {
+      connectionFrames[deviceId] = [v1StateFrame(mode: bootWire)];
+      await settings.makeBikeActive(deviceId);
+      await coordinator.dispose();
+      coordinator = ActiveBikeCoordinator(
+        bikeRepository: bikes,
+        settingsRepository: settings,
+        permissions: permissions,
+        buildSession: buildTestSession,
+        backgroundHold: hold,
+      );
+      await coordinator.start();
+      return await _waitFor(
+            coordinator.state,
+            (state) =>
+                state is ActiveBikeSessionStatus &&
+                state.bike.bike.deviceId == deviceId &&
+                state.sessionState is SessionReady,
+          )
+          as ActiveBikeSessionStatus;
+    }
+
+    Future<void> addChBike() async {
+      await bikes.addBike(
+        deviceId: 'ch',
+        region: BikeRegion.ch,
+        customModes: const [seededChMode],
+        setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+      );
+    }
+
+    setUp(() {
+      hold = RecordingHold();
+    });
+
+    test('dynamic custom mode keeps the session connected in the background', () async {
+      await addChBike();
+      await startActive('ch', bootWire: 7);
+      await Future<void>.delayed(Duration.zero);
+      expect(hold.held, isTrue);
+
+      await coordinator.setForeground(false);
+
+      final state = coordinator.state.value as ActiveBikeSessionStatus;
+      expect(state.sessionState, isA<SessionReady>());
+    });
+
+    test('native mode pauses the session in the background and holds nothing', () async {
+      await bikes.addBike(deviceId: 'eu', region: BikeRegion.eu);
+      await startActive('eu', bootWire: 4);
+      await Future<void>.delayed(Duration.zero);
+      expect(hold.held, isFalse);
+
+      await coordinator.setForeground(false);
+
+      final state = coordinator.state.value as ActiveBikeSessionStatus;
+      expect(state.sessionState, isA<SessionDisconnected>());
+    });
+
+    test('manual disconnect releases the hold', () async {
+      await addChBike();
+      await startActive('ch', bootWire: 7);
+      await Future<void>.delayed(Duration.zero);
+      expect(hold.held, isTrue);
+
+      await coordinator.disconnectManually();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(hold.held, isFalse);
+    });
+
+    test('a hold that ends in the background pauses the session', () async {
+      await addChBike();
+      final ready = await startActive('ch', bootWire: 7);
+      await Future<void>.delayed(Duration.zero);
+      expect(hold.held, isTrue);
+      await coordinator.setForeground(false);
+
+      await ready.rideMode.select(const NativeRideMode(7));
+      await _waitFor(
+        coordinator.state,
+        (state) =>
+            state is ActiveBikeSessionStatus &&
+            state.sessionState is SessionDisconnected,
+      );
+
+      expect(hold.held, isFalse);
+    });
+  });
 }
 
 Future<ActiveBikeState> _waitFor(
@@ -516,5 +616,16 @@ Future<void> _waitUntil(bool Function() condition) async {
       fail('Timed out waiting for the coordinator test condition.');
     }
     await Future<void>.delayed(Duration.zero);
+  }
+}
+
+final class RecordingHold implements BackgroundHoldGateway {
+  bool held = false;
+  final List<bool> calls = [];
+
+  @override
+  Future<void> setHeld(bool value) async {
+    held = value;
+    calls.add(value);
   }
 }

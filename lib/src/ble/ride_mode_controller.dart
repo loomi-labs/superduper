@@ -15,6 +15,7 @@ final class RideModeController {
     DateTime Function()? clock,
     this.speedTimeout = const Duration(seconds: 5),
     Duration watchdogInterval = const Duration(seconds: 1),
+    this.holdReleaseAfter = const Duration(minutes: 15),
   }) : _clock = clock ?? DateTime.now {
     _stateCleanup = session.state.subscribe(_onState);
     _observedCleanup = session.observed.subscribe(_onObserved);
@@ -25,6 +26,10 @@ final class RideModeController {
 
   final BikeSession session;
   final Duration speedTimeout;
+
+  /// A bike that stays unreachable this long (switched off after a ride)
+  /// releases the background hold until it is ready again.
+  final Duration holdReleaseAfter;
   final DateTime Function() _clock;
   final Signal<RideModeSelection?> _selection = signal(
     null,
@@ -42,6 +47,11 @@ final class RideModeController {
   SavedBike _bike;
   int? _assertedWire;
   DateTime? _lastRideDataRequestAt;
+  DateTime? _notReadySince;
+  // While a select write is in flight, the hold follows the previous
+  // selection: the new mode is not on the bike yet.
+  var _selectInFlight = false;
+  RideModeSelection? _holdSelection;
   var _wasReady = false;
   var _disposed = false;
 
@@ -68,9 +78,10 @@ final class RideModeController {
     final previousHold = session.streetLegalHeld.peek();
     // The write must carry the normal marker, so the hold ends first.
     session.endStreetLegalHold();
+    _selectInFlight = true;
+    _holdSelection = previousSelection;
     _selection.value = next;
     _assertedWire = wire;
-    _publishHold();
     try {
       await session.setMode(wire);
     } on Object {
@@ -78,9 +89,15 @@ final class RideModeController {
         _selection.value = previousSelection;
         _assertedWire = previousWire;
         session.restoreStreetLegalHold(previousHold);
-        _publishHold();
       }
       rethrow;
+    } finally {
+      _selectInFlight = false;
+      _holdSelection = null;
+      // The hold changes only when the bike runs the new mode. A hold that
+      // ends in the background pauses the session, which must not happen
+      // during this write.
+      _publishHold();
     }
   }
 
@@ -129,6 +146,11 @@ final class RideModeController {
       return;
     }
     final ready = state is SessionReady;
+    if (ready) {
+      _notReadySince = null;
+    } else if (_wasReady) {
+      _notReadySince = _clock();
+    }
     if (ready && !_wasReady) {
       _onBecameReady();
     }
@@ -212,7 +234,13 @@ final class RideModeController {
   /// Without speed samples a mode with an unlimited base must go back on its
   /// cap, and the bike must be asked to stream again.
   void _checkSpeedStream() {
-    if (_disposed || !_ready) {
+    if (_disposed) {
+      return;
+    }
+    if (_notReadySince != null) {
+      _publishHold();
+    }
+    if (!_ready) {
       return;
     }
     final current = _selection.peek();
@@ -252,7 +280,7 @@ final class RideModeController {
     if (_disposed) {
       return;
     }
-    final current = _selection.peek();
+    final current = _selectInFlight ? _holdSelection : _selection.peek();
     final dynamic = current != null && isDynamicSelection(current, _region);
     final linkWanted = switch (session.state.peek()) {
       SessionDisconnected(manuallyPaused: true) ||
@@ -260,6 +288,10 @@ final class RideModeController {
       SessionDisposed() => false,
       _ => true,
     };
-    _needsBackgroundHold.value = dynamic && linkWanted;
+    final notReadySince = _notReadySince;
+    final gaveUp =
+        notReadySince != null &&
+        _clock().difference(notReadySince) >= holdReleaseAfter;
+    _needsBackgroundHold.value = dynamic && linkWanted && !gaveUp;
   }
 }

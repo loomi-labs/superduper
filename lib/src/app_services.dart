@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_identity_resolver.dart';
@@ -8,6 +9,7 @@ import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/features/startup/startup_controller.dart';
 import 'package:superduper/src/persistence/app_database.dart';
 import 'package:superduper/src/persistence/installed_data_importer.dart';
+import 'package:superduper/src/platform/background_hold.dart';
 import 'package:superduper/src/platform/background_sync.dart';
 import 'package:superduper/src/platform/bluetooth_permissions.dart';
 import 'package:superduper/src/platform/external_links.dart';
@@ -26,6 +28,7 @@ final class AppServices {
     ActiveBikeCoordinator? activeBikeCoordinator,
     BackgroundSyncPlatformGateway? backgroundSyncPlatform,
     BackgroundSyncCoordinator? backgroundSyncCoordinator,
+    BackgroundHoldGateway? backgroundHold,
   }) {
     final resolvedImporter =
         importer ?? InstalledDataImporter(database: database);
@@ -40,6 +43,8 @@ final class AppServices {
         externalLinks ?? const SystemExternalLinkLauncher();
     final resolvedBackgroundSyncPlatform =
         backgroundSyncPlatform ?? const NoopBackgroundSyncPlatformGateway();
+    final resolvedBackgroundHold =
+        backgroundHold ?? const NoopBackgroundHoldGateway();
     final resolvedIdentityResolver = BikeIdentityResolver(
       bikeRepository: resolvedBikeRepository,
       transport: resolvedTransport,
@@ -51,6 +56,7 @@ final class AppServices {
           settingsRepository: resolvedSettingsRepository,
           permissions: resolvedPermissions,
           identityResolver: resolvedIdentityResolver,
+          backgroundHold: resolvedBackgroundHold,
           buildSession: (bike) => BikeSession(
             connection: resolvedTransport.openConnection(bike.bike.deviceId),
             setOnConnect: resolveSetOnConnect(bike).patch,
@@ -122,6 +128,9 @@ final class AppServices {
     return AppServices(
       database: AppDatabase.open(),
       backgroundSyncPlatform: SystemBackgroundSyncPlatformGateway(),
+      backgroundHold: defaultTargetPlatform == TargetPlatform.android
+          ? AndroidForegroundServiceHold()
+          : const NoopBackgroundHoldGateway(),
     );
   }
 

@@ -40,6 +40,7 @@ void main() {
     SavedBike bike, {
     required int bootWire,
     Duration speedTimeout = const Duration(seconds: 5),
+    DateTime Function()? clock,
   }) async {
     connection.readFrames.add(v1StateFrame(mode: bootWire));
     session = BikeSession(
@@ -53,6 +54,7 @@ void main() {
       session: session,
       bike: bike,
       speedTimeout: speedTimeout,
+      clock: clock,
       watchdogInterval: const Duration(milliseconds: 20),
     );
     await session.connect();
@@ -260,6 +262,36 @@ void main() {
     expect(controller.selection.value, const NativeRideMode(7));
     expect(session.streetLegalHeld.value, isTrue);
     expect(controller.needsBackgroundHold.value, isFalse);
+  });
+
+  test('the hold ends after 15 minutes without a connection', () async {
+    var now = DateTime(2026, 1, 1, 12);
+    await start(
+      chBike(
+        setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+      ),
+      bootWire: 7,
+      clock: () => now,
+    );
+    expect(controller.needsBackgroundHold.value, isTrue);
+
+    connection
+      ..connectGate = Completer<void>()
+      ..emitState(BikeConnectionState.disconnected);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    now = now.add(const Duration(minutes: 14));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(controller.needsBackgroundHold.value, isTrue);
+
+    now = now.add(const Duration(minutes: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(controller.needsBackgroundHold.value, isFalse);
+
+    connection.readFrames.add(v1StateFrame(mode: 1));
+    connection.connectGate!.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(session.state.value, isA<SessionReady>());
+    expect(controller.needsBackgroundHold.value, isTrue);
   });
 
   test('a static custom mode never holds the background', () async {
