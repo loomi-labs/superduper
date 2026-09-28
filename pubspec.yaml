@@ -13,6 +13,7 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_blue_plus: ^2.3.13
+  flutter_foreground_task: ^11.0.3
   logger: ^2.8.0
   package_info_plus: ^10.2.1
   path: ^1.9.1
