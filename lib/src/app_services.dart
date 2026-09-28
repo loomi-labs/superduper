@@ -54,6 +54,7 @@ final class AppServices {
           buildSession: (bike) => BikeSession(
             connection: resolvedTransport.openConnection(bike.bike.deviceId),
             setOnConnect: resolveSetOnConnect(bike).patch,
+            streetLegalOnQuickRestart: bike.streetLegalOnQuickRestart,
             protocol: bike.bike.protocol,
             onVersionsRead: (versions) async {
               await resolvedBikeRepository.saveVersions(

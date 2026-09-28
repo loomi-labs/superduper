@@ -24,6 +24,8 @@ void main() {
     bool readDiagnosticsOnConnect = true,
     Duration? pollInterval,
     BikeProtocolDefinition? connectedProtocol,
+    bool streetLegalOnQuickRestart = false,
+    DateTime Function()? clock,
   }) {
     return BikeSession(
       connection: connection,
@@ -37,6 +39,8 @@ void main() {
       pollInterval: pollInterval,
       reconnectDelays: reconnectDelays,
       connectedProtocol: connectedProtocol,
+      streetLegalOnQuickRestart: streetLegalOnQuickRestart,
+      clock: clock,
     );
   }
 
@@ -1484,6 +1488,228 @@ void main() {
       isEmpty,
     );
   });
+
+  group('street-legal on quick restart', () {
+    List<int> historyFrame({required bool marked, int wire = 7}) => [
+      0,
+      0xd1,
+      0,
+      0,
+      wire,
+      if (marked) 1 else 0,
+      0,
+      0,
+      0,
+      0,
+    ];
+
+    test('is skipped entirely when the preference is off', () async {
+      connection.readFrames.add(v1StateFrame(mode: 7));
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1),
+        readDiagnosticsOnConnect: false,
+      );
+      await session.connect();
+      expect(
+        connection.writes.any(
+          (w) =>
+              w.characteristicUuid == BikeGatt.registerSelector &&
+              w.value[1] == 0xd1,
+        ),
+        isFalse,
+      );
+      expect(session.observed.value?.mode, 1);
+    });
+
+    test('a quick power cycle holds street-legal', () async {
+      var now = DateTime(2026, 1, 1, 12);
+      connection.readFrames.addAll([
+        v1StateFrame(mode: 7),
+        historyFrame(marked: true),
+      ]);
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1, assist: 3),
+        readDiagnosticsOnConnect: false,
+        reconnectDelays: const [Duration(milliseconds: 10)],
+        streetLegalOnQuickRestart: true,
+        clock: () => now,
+      );
+      await session.connect();
+      expect(session.observed.value?.mode, 1);
+      expect(session.streetLegalHeld.value, isFalse);
+
+      connection.readFrames.addAll([
+        v1StateFrame(mode: 7),
+        historyFrame(marked: false),
+      ]);
+      connection.emitState(BikeConnectionState.disconnected);
+      // The state stream delivers the loss in a later microtask.
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(seconds: 5));
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.streetLegalHeld.value, isTrue);
+      expect(session.observed.value?.mode, 7);
+      expect(session.observed.value?.assist, 3);
+    });
+
+    test('a slow power cycle applies the mode again', () async {
+      var now = DateTime(2026, 1, 1, 12);
+      connection.readFrames.addAll([
+        v1StateFrame(mode: 7),
+        historyFrame(marked: true),
+      ]);
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1),
+        readDiagnosticsOnConnect: false,
+        reconnectDelays: const [Duration(milliseconds: 10)],
+        streetLegalOnQuickRestart: true,
+        clock: () => now,
+      );
+      await session.connect();
+
+      connection.readFrames.addAll([
+        v1StateFrame(mode: 7),
+        historyFrame(marked: false),
+      ]);
+      connection.emitState(BikeConnectionState.disconnected);
+      // The state stream delivers the loss in a later microtask.
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(seconds: 30));
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      expect(session.streetLegalHeld.value, isFalse);
+      expect(session.observed.value?.mode, 1);
+    });
+
+    test(
+      'a dropout keeps the hold, a mode write ends it on the bike',
+      () async {
+        var now = DateTime(2026, 1, 1, 12);
+        connection.readFrames.addAll([
+          v1StateFrame(mode: 7),
+          historyFrame(marked: true),
+        ]);
+        session = createSession(
+          setOnConnect: const BikeControlPatch(mode: 1),
+          readDiagnosticsOnConnect: false,
+          reconnectDelays: const [Duration(milliseconds: 10)],
+          streetLegalOnQuickRestart: true,
+          clock: () => now,
+        );
+        await session.connect();
+        connection.readFrames.addAll([
+          v1StateFrame(mode: 7),
+          historyFrame(marked: false),
+        ]);
+        connection.emitState(BikeConnectionState.disconnected);
+        // The state stream delivers the loss in a later microtask.
+        await Future<void>.delayed(Duration.zero);
+        now = now.add(const Duration(seconds: 3));
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(session.streetLegalHeld.value, isTrue);
+        expect(
+          _configurationWrites(connection).last.value[5],
+          BikeGatt.sessionHeldMarker,
+        );
+
+        // The last app write carried the held marker, so the bike returns it.
+        connection.readFrames.addAll([
+          v1StateFrame(mode: 7),
+          [0, 0xd1, 0, 0, 7, BikeGatt.sessionHeldMarker, 0, 0, 0, 0],
+        ]);
+        connection.emitState(BikeConnectionState.disconnected);
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(session.streetLegalHeld.value, isTrue);
+        expect(session.observed.value?.mode, 7);
+
+        // The rider picks a mode: the write carries the normal marker.
+        session.endStreetLegalHold();
+        connection.readFrames.add(v1StateFrame(mode: 7));
+        await session.setMode(7);
+        expect(
+          _configurationWrites(connection).last.value[5],
+          BikeGatt.sessionAppliedMarker,
+        );
+        connection.readFrames.addAll([
+          v1StateFrame(mode: 7),
+          historyFrame(marked: true),
+        ]);
+        connection.emitState(BikeConnectionState.disconnected);
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(session.streetLegalHeld.value, isFalse);
+        expect(session.observed.value?.mode, 1);
+      },
+    );
+
+    test('a new session keeps the hold that the bike stores', () async {
+      connection.readFrames.addAll([
+        v1StateFrame(mode: 7),
+        [0, 0xd1, 0, 0, 7, BikeGatt.sessionHeldMarker, 0, 0, 0, 0],
+      ]);
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1),
+        readDiagnosticsOnConnect: false,
+        streetLegalOnQuickRestart: true,
+      );
+
+      await session.connect();
+
+      expect(session.streetLegalHeld.value, isTrue);
+      expect(session.observed.value?.mode, 7);
+      final controlWrites = _configurationWrites(connection);
+      expect(controlWrites.map((write) => write.value[4]), everyElement(7));
+      expect(controlWrites.first.value[5], BikeGatt.sessionHeldMarker);
+    });
+
+    test('a mode choice after the hold writes the normal marker', () async {
+      connection.readFrames.addAll([
+        v1StateFrame(mode: 7),
+        [0, 0xd1, 0, 0, 7, BikeGatt.sessionHeldMarker, 0, 0, 0, 0],
+        v1StateFrame(mode: 1),
+      ]);
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1),
+        readDiagnosticsOnConnect: false,
+        streetLegalOnQuickRestart: true,
+      );
+      await session.connect();
+
+      session.endStreetLegalHold();
+      await session.setMode(1);
+
+      final last = _configurationWrites(connection).last;
+      expect(last.value[4], 1);
+      expect(last.value[5], BikeGatt.sessionAppliedMarker);
+    });
+
+    test('a bike with no history record counts as power cycled', () async {
+      var now = DateTime(2026, 1, 1, 12);
+      connection.readFrames.addAll([
+        v1StateFrame(mode: 7),
+        historyFrame(marked: true),
+      ]);
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1),
+        readDiagnosticsOnConnect: false,
+        reconnectDelays: const [Duration(milliseconds: 10)],
+        streetLegalOnQuickRestart: true,
+        clock: () => now,
+      );
+      await session.connect();
+      // Only the state frame is queued: every history read returns a wrong
+      // frame, and the fake retains the state frame for the four retries.
+      connection.readFrames.add(v1StateFrame(mode: 7));
+      connection.emitState(BikeConnectionState.disconnected);
+      // The state stream delivers the loss in a later microtask.
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.streetLegalHeld.value, isTrue);
+    });
+  });
 }
 
 final class _FakeConnectedProtocol extends BikeProtocolDefinition {
@@ -1507,7 +1733,13 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
   BikeControlPatch? decodeTelemetry(List<int> packet) => null;
 
   @override
-  List<int> encodeConfiguration(BikeConfiguration configuration) {
+  List<int> get controlHistorySelector => BikeGatt.v1ControlHistorySelector;
+
+  @override
+  List<int> encodeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  }) {
     throw UnsupportedError('Writes are overridden in this test.');
   }
 
@@ -1533,7 +1765,10 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
   void reset() {}
 
   @override
-  Future<void> writeConfiguration(BikeConfiguration configuration) async {
+  Future<void> writeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  }) async {
     configurationWrites.add(configuration);
   }
 }

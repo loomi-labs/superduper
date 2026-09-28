@@ -28,6 +28,15 @@ class BackgroundControlSyncTest {
     }
 
     @Test
+    fun heldRecordsSkipWithoutWritingForBothProtocols() {
+        for (id in listOf(0xd1, 0xc1)) {
+            val record = command(id).also { it[4] = 7; it[5] = 2 }
+            val result = inspect(BackgroundControlSync(command(id)), record)
+            assertEquals(BackgroundControlSync.Action.Complete(false), result)
+        }
+    }
+
+    @Test
     fun unmarkedNonzeroRecordsAreAppliedAndOnlyConfirmedAfterFullReadback() {
         for (id in listOf(0xd1, 0xc1)) {
             val original = command(id)
