@@ -10,6 +10,7 @@ import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/distance.dart';
 import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/features/bike_settings/bike_version_report.dart';
+import 'package:superduper/src/features/bike_settings/custom_mode_editor.dart';
 import 'package:superduper/src/features/help/help_page.dart';
 import 'package:superduper/src/platform/background_sync.dart';
 import 'package:superduper/src/platform/report_exporter.dart';
@@ -18,6 +19,7 @@ import 'package:superduper/src/user_facing_error.dart';
 import 'package:superduper/src/widgets/app_design.dart';
 import 'package:superduper/src/widgets/bike_value_selector.dart';
 import 'package:superduper/src/widgets/report_actions.dart';
+import 'package:superduper/src/widgets/ride_mode_selector.dart';
 
 enum BikeSettingsOutcome { forgotten }
 
@@ -421,11 +423,7 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                           saved.setOnConnect.copyWith(
                             mode: enabled
                                 ? (saved.setOnConnect.mode ??
-                                      NativeModeRef(
-                                        nativeWiresFor(
-                                          saved.bike.region ?? BikeRegion.us,
-                                        ).first,
-                                      ))
+                                      _defaultModeRef(saved))
                                 : null,
                           ),
                         ),
@@ -435,24 +433,48 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
             if (saved.setOnConnect.mode != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
-                child: BikeValueSelector(
-                  values: BikeControlValues.modesFor(saved.bike.protocol),
-                  selected: switch (saved.setOnConnect.mode) {
-                    NativeModeRef(:final wire) => wire,
-                    _ => null,
-                  },
-                  enabled: !_changingSetOnConnect,
-                  semanticLabel: 'Set on connect mode',
-                  label: (mode) => '$mode',
-                  onChanged: (mode) => unawaited(
-                    _changeSetOnConnect(
-                      () => _services.bikeRepository.setOnConnect(
-                        deviceId,
-                        saved.setOnConnect.copyWith(mode: NativeModeRef(mode)),
+                child: saved.bike.protocol == BikeProtocolVersion.v1
+                    ? RideModeSelector(
+                        options: selectableRideModes(
+                          region: saved.bike.region ?? BikeRegion.us,
+                          customModes: saved.customModes,
+                        ),
+                        selected: _selectionOf(saved),
+                        region: saved.bike.region,
+                        enabled: !_changingSetOnConnect,
+                        onSelected: (selection) => unawaited(
+                          _changeSetOnConnect(
+                            () => _services.bikeRepository.setOnConnect(
+                              deviceId,
+                              saved.setOnConnect.copyWith(
+                                mode: _refOf(selection),
+                              ),
+                            ),
+                          ),
+                        ),
+                      )
+                    : BikeValueSelector(
+                        values: BikeControlValues.modesFor(
+                          BikeProtocolVersion.v2,
+                        ),
+                        selected: switch (saved.setOnConnect.mode) {
+                          NativeModeRef(:final wire) => wire,
+                          _ => null,
+                        },
+                        enabled: !_changingSetOnConnect,
+                        semanticLabel: 'Set on connect mode',
+                        label: (mode) => '${mode + 1}',
+                        onChanged: (mode) => unawaited(
+                          _changeSetOnConnect(
+                            () => _services.bikeRepository.setOnConnect(
+                              deviceId,
+                              saved.setOnConnect.copyWith(
+                                mode: NativeModeRef(mode),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                ),
               ),
             const Divider(height: 1),
             SwitchListTile(
@@ -499,10 +521,186 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                   ),
                 ),
               ),
+            const Divider(height: 1),
+            SwitchListTile(
+              key: const Key('street-legal-quick-restart'),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 8,
+              ),
+              secondary: const Icon(Icons.restart_alt_rounded),
+              title: const Text('Street-legal on quick restart'),
+              subtitle: const Text(
+                'Turn the bike off and on within about 10 seconds and it keeps '
+                'the mode it booted with.',
+              ),
+              value: saved.streetLegalOnQuickRestart,
+              onChanged: _changingSetOnConnect
+                  ? null
+                  : (enabled) => unawaited(
+                      _changeSetOnConnect(
+                        () => _services.bikeRepository
+                            .setStreetLegalOnQuickRestart(deviceId, enabled),
+                      ),
+                    ),
+            ),
           ],
         ),
       ),
+      if (saved.bike.protocol == BikeProtocolVersion.v1) ...[
+        const SizedBox(height: 34),
+        const SectionHeader(eyebrow: 'Modes', title: 'Custom modes'),
+        const SizedBox(height: 10),
+        const Text(
+          'Pick a speed limit. Superduper CH switches firmware profiles as '
+          'you ride.',
+        ),
+        const SizedBox(height: 16),
+        SurfacePanel(
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              for (final mode in saved.customModes)
+                ListTile(
+                  key: ValueKey('custom-mode-row-${mode.id}'),
+                  title: Text(mode.name),
+                  subtitle: Text(_customModeSubtitle(mode, saved.bike.region)),
+                  trailing: IconButton(
+                    tooltip: 'Delete ${mode.name}',
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    onPressed: _changingSetOnConnect
+                        ? null
+                        : () => unawaited(_deleteCustomMode(saved, mode)),
+                  ),
+                  onTap: _changingSetOnConnect
+                      ? null
+                      : () => unawaited(
+                          _editCustomMode(saved, mode, autoName: false),
+                        ),
+                ),
+              ListTile(
+                key: const Key('custom-mode-add'),
+                leading: const Icon(Icons.add_rounded),
+                title: const Text('Add mode'),
+                onTap: _changingSetOnConnect
+                    ? null
+                    : () => unawaited(_addCustomMode(saved)),
+              ),
+            ],
+          ),
+        ),
+      ],
     ];
+  }
+
+  SetOnConnectMode _defaultModeRef(SavedBike saved) =>
+      saved.bike.protocol == BikeProtocolVersion.v1
+      ? NativeModeRef(nativeWiresFor(saved.bike.region ?? BikeRegion.us).first)
+      : const NativeModeRef(0);
+
+  RideModeSelection? _selectionOf(SavedBike saved) =>
+      switch (saved.setOnConnect.mode) {
+        null => null,
+        NativeModeRef(:final wire) => NativeRideMode(wire),
+        CustomModeRef(:final id) => switch (saved.customModes
+            .where((mode) => mode.id == id)
+            .firstOrNull) {
+          null => null,
+          final mode => CustomRideMode(mode),
+        },
+      };
+
+  SetOnConnectMode _refOf(RideModeSelection selection) => switch (selection) {
+    NativeRideMode(:final wire) => NativeModeRef(wire),
+    CustomRideMode(:final mode) => CustomModeRef(mode.id),
+  };
+
+  String _customModeSubtitle(CustomMode mode, BikeRegion? region) {
+    final limit = region == BikeRegion.us
+        ? '${mphFromKmh(mode.effectiveLimitKmh)} mph'
+        : '${mode.effectiveLimitKmh} km/h';
+    return mode.throttle ? '$limit · throttle' : limit;
+  }
+
+  Future<void> _addCustomMode(SavedBike saved) async {
+    final region = saved.bike.region;
+    final result = await showCustomModeEditor(
+      context,
+      mode: CustomMode(
+        id: newCustomModeId(),
+        name: customModeNameFor(customLimitMin, region),
+        limitKmh: customLimitMin,
+      ),
+      region: region,
+      autoName: true,
+    );
+    if (result == null || !mounted) {
+      return;
+    }
+    await _changeSetOnConnect(
+      () => _services.bikeRepository.setCustomModes(saved.bike.deviceId, [
+        ...saved.customModes,
+        result,
+      ]),
+    );
+  }
+
+  Future<void> _editCustomMode(
+    SavedBike saved,
+    CustomMode mode, {
+    required bool autoName,
+  }) async {
+    final result = await showCustomModeEditor(
+      context,
+      mode: mode,
+      region: saved.bike.region,
+      autoName: autoName,
+    );
+    if (result == null || !mounted) {
+      return;
+    }
+    await _changeSetOnConnect(
+      () => _services.bikeRepository.setCustomModes(
+        saved.bike.deviceId,
+        saved.customModes
+            .map((existing) => existing.id == result.id ? result : existing)
+            .toList(),
+      ),
+    );
+  }
+
+  Future<void> _deleteCustomMode(SavedBike saved, CustomMode mode) async {
+    final isSetOnConnect = saved.setOnConnect.mode == CustomModeRef(mode.id);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete mode?'),
+        content: Text(
+          isSetOnConnect
+              ? '${mode.name} is removed from this bike. It is also your Set on connect mode.'
+              : '${mode.name} is removed from this bike.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (!(confirmed ?? false) || !mounted) {
+      return;
+    }
+    await _changeSetOnConnect(
+      () => _services.bikeRepository.setCustomModes(saved.bike.deviceId, [
+        for (final existing in saved.customModes)
+          if (existing.id != mode.id) existing,
+      ]),
+    );
   }
 
   void _scheduleNameSave(String value) {
@@ -545,7 +743,7 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
       builder: (context) => AlertDialog(
         title: const Text('Change bike region?'),
         content: const Text(
-          'The selected region is included the next time Superduper sends settings to the bike. Changing it here does not immediately write to the bike.',
+          'The region decides which modes Superduper CH offers and the speed unit it shows. It does not write to the bike.',
         ),
         actions: [
           TextButton(
@@ -571,6 +769,23 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
       _regionFieldRevision += 1;
     });
     await _queueSaveNow();
+    if (region != BikeRegion.ch) {
+      return;
+    }
+    final deviceId = widget.initialBike.bike.deviceId;
+    final saved = (await _services.bikeRepository.getBikes())
+        .where((bike) => bike.bike.deviceId == deviceId)
+        .firstOrNull;
+    if (saved == null ||
+        saved.bike.region != BikeRegion.ch ||
+        saved.customModes.isNotEmpty) {
+      return;
+    }
+    await _changeSetOnConnect(
+      () => _services.bikeRepository.setCustomModes(deviceId, const [
+        seededChMode,
+      ]),
+    );
   }
 
   Future<void> _changeProtocol(BikeProtocolVersion protocol) async {

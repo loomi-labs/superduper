@@ -81,7 +81,12 @@ void main() {
     expect(find.text('BIKE SETTINGS'), findsOneWidget);
     expect(find.text('Bike not found'), findsNothing);
     final label = find.text('Background Sync');
-    await tester.ensureVisible(label);
+    // The settings list builds lazily; scroll until the row exists.
+    await tester.scrollUntilVisible(
+      label,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.pump();
 
     final backgroundSwitch = find.ancestor(
@@ -225,6 +230,38 @@ void main() {
     expect(find.text('66051'), findsOneWidget);
     expect(find.text('305419896'), findsOneWidget);
     expect(find.text('2882400001'), findsOneWidget);
+  });
+
+  testWidgets('bike settings add a custom mode', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fixture = await _pumpReadyBikeApp(tester, 'custom_mode');
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    final add = find.byKey(const Key('custom-mode-add'));
+    await tester.ensureVisible(add);
+    await tester.pumpAndSettle();
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('custom-mode-save')));
+    await tester.runAsync(() async {
+      await _waitUntilAsync(
+        () async => fixture.services.activeBikeCoordinator.bikes
+            .peek()
+            .single
+            .customModes
+            .isNotEmpty,
+      );
+    });
+    await tester.pumpAndSettle();
+
+    final saved = (await tester.runAsync(
+      fixture.services.bikeRepository.getBikes,
+    ))!.single;
+    expect(saved.customModes.single.limitKmh, 25);
+    expect(saved.customModes.single.name, '16 mph');
+    expect(find.text('16 mph'), findsWidgets);
   });
 
   testWidgets('Add Bike explains a blocked Bluetooth permission', (

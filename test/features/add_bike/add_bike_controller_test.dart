@@ -7,6 +7,7 @@ import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/features/add_bike/add_bike_controller.dart';
 import 'package:superduper/src/persistence/app_database.dart';
 import 'package:superduper/src/platform/bluetooth_permissions.dart';
@@ -144,6 +145,33 @@ void main() {
       );
     },
   );
+
+  test('a CH bike gets the seeded 25 km/h mode as set-on-connect', () async {
+    transport.readFramesOnOpen['ch-bike'] = [
+      [0, 0, 3, 0, 1, 7],
+    ];
+    await controller.start();
+    final candidate = DiscoveredBike(
+      deviceId: 'ch-bike',
+      name: BikeProtocolVersion.v1.advertisedName,
+      rssi: -42,
+    );
+    transport.emitResults([candidate]);
+    await _waitFor(
+      controller.state,
+      (state) => state is AddBikeScanning && state.results.contains(candidate),
+    );
+    await controller.selectCandidate(candidate);
+
+    final saved = await controller.confirm(
+      displayName: 'CH',
+      region: BikeRegion.ch,
+      color: BikeColor.royalHorizon,
+    );
+
+    expect(saved.customModes, const [seededChMode]);
+    expect(saved.setOnConnect.mode, const CustomModeRef(seededChModeId));
+  });
 
   test('discovers, verifies, confirms, and persists a bike', () async {
     transport.readFramesOnOpen['new-bike'] = [
