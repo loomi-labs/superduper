@@ -173,16 +173,18 @@ final class _BikeControlPageState extends State<BikeControlPage> {
           icon: Icons.speed_rounded,
           title: 'Mode',
           control: BikeValueSelector(
-            values: BikeControlValues.modes,
+            values: BikeControlValues.modesFor(
+              session?.protocolVersion ?? bike.bike.protocol,
+            ),
             selected: configuration?.mode,
             enabled: canControl,
             semanticLabel: 'Mode',
-            label: (mode) => '${mode + 1}',
+            label: (mode) => '$mode',
             onChanged: (mode) => _runCommand(() => session!.setMode(mode)),
           ),
           setOnConnectValue: bike.setOnConnect.mode == null
               ? null
-              : '${bike.setOnConnect.mode! + 1}',
+              : '${bike.setOnConnect.mode}',
         ),
         const SizedBox(height: 14),
         _SettingSection(

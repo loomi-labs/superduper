@@ -43,23 +43,39 @@ enum BikeProtocolVersion {
 
 enum BikeRegion {
   us('US'),
-  eu('EU');
+  eu('EU'),
+  ch('CH');
 
   new(this.label);
 
   final String label;
+
+  static const v1BankSize = 4;
+
+  /// The bank a V1 wire byte belongs to. CH is never inferred: it is a
+  /// choice the rider makes.
+  static BikeRegion fromV1Wire(int wire) {
+    return wire >= v1BankSize ? BikeRegion.eu : BikeRegion.us;
+  }
 }
 
 abstract final class BikeControlValues {
   static const minimumMode = 0;
-  static const maximumMode = 3;
+  static const int v1BankSize = BikeRegion.v1BankSize;
+  static const v1MaximumMode = 7;
+  static const v2MaximumMode = 3;
   static const minimumAssist = 0;
   static const maximumAssist = 4;
-  static const int modeCount = maximumMode - minimumMode + 1;
 
-  static final List<int> modes = List.unmodifiable(
-    List.generate(modeCount, (index) => minimumMode + index),
+  static int maximumModeFor(BikeProtocolVersion protocol) => switch (protocol) {
+    BikeProtocolVersion.v1 => v1MaximumMode,
+    BikeProtocolVersion.v2 => v2MaximumMode,
+  };
+
+  static List<int> modesFor(BikeProtocolVersion protocol) => List.unmodifiable(
+    List.generate(maximumModeFor(protocol) + 1, (index) => index),
   );
+
   static final List<int> assistLevels = List.unmodifiable(
     List.generate(
       maximumAssist - minimumAssist + 1,
@@ -67,17 +83,21 @@ abstract final class BikeControlValues {
     ),
   );
 
-  static bool isValidMode(int value) {
-    return value >= minimumMode && value <= maximumMode;
+  static bool isValidMode(int value, BikeProtocolVersion protocol) {
+    return value >= minimumMode && value <= maximumModeFor(protocol);
   }
 
-  static bool isValidAssist(int value) {
-    return value >= minimumAssist && value <= maximumAssist;
-  }
+  static bool isValidAssist(int value) =>
+      value >= minimumAssist && value <= maximumAssist;
 
-  static void validateMode(int value) {
-    if (!isValidMode(value)) {
-      throw RangeError.range(value, minimumMode, maximumMode, 'mode');
+  static void validateMode(int value, BikeProtocolVersion protocol) {
+    if (!isValidMode(value, protocol)) {
+      throw RangeError.range(
+        value,
+        minimumMode,
+        maximumModeFor(protocol),
+        'mode',
+      );
     }
   }
 
@@ -89,29 +109,17 @@ abstract final class BikeControlValues {
 }
 
 final class BikeConfiguration {
-  const new({
-    required this.light,
-    required this.mode,
-    required this.assist,
-    required this.region,
-  });
+  const new({required this.light, required this.mode, required this.assist});
 
   final bool light;
   final int mode;
   final int assist;
-  final BikeRegion region;
 
-  BikeConfiguration copyWith({
-    bool? light,
-    int? mode,
-    int? assist,
-    BikeRegion? region,
-  }) {
+  BikeConfiguration copyWith({bool? light, int? mode, int? assist}) {
     return BikeConfiguration(
       light: light ?? this.light,
       mode: mode ?? this.mode,
       assist: assist ?? this.assist,
-      region: region ?? this.region,
     );
   }
 
@@ -120,11 +128,10 @@ final class BikeConfiguration {
       other is BikeConfiguration &&
       light == other.light &&
       mode == other.mode &&
-      assist == other.assist &&
-      region == other.region;
+      assist == other.assist;
 
   @override
-  int get hashCode => Object.hash(light, mode, assist, region);
+  int get hashCode => Object.hash(light, mode, assist);
 }
 
 final class BikeControlPatch {

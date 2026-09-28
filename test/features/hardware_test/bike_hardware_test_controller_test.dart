@@ -207,6 +207,46 @@ void main() {
     expect(report, isNot(contains(authenticationResponse)));
   });
 
+  test('the mode toggle stays inside the bank of the current wire', () async {
+    final connection = FakeBikeConnection(deviceId: 'bike')
+      ..operationDelay = const Duration(milliseconds: 1);
+    connection.readFrames.addAll([
+      v1StateFrame(mode: 3, assist: 1),
+      v1StateFrame(light: true, mode: 3, assist: 1),
+      v1StateFrame(mode: 3, assist: 1),
+      v1StateFrame(assist: 1),
+      v1StateFrame(mode: 3, assist: 1),
+    ]);
+    transport.connections['bike'] = connection;
+
+    unawaited(controller.start());
+    await _waitForPhase(controller, BikeHardwareTestPhase.scanning);
+    while (controller.state.peek().phase == BikeHardwareTestPhase.scanning) {
+      transport.emitResults([
+        DiscoveredBike(
+          deviceId: 'bike',
+          name: BikeProtocolVersion.v1.advertisedName,
+          rssi: -42,
+        ),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    List<int>? toggle() {
+      for (final write in connection.writes) {
+        if (write.characteristicUuid == BikeGatt.stateRegister &&
+            write.value[1] == 0xd1 &&
+            write.value[4] != 3) {
+          return write.value;
+        }
+      }
+      return null;
+    }
+
+    await _waitUntil(() => toggle() != null);
+
+    expect(toggle()![4], 0);
+  });
+
   test('a repeated run does not select a replayed scan result', () async {
     transport.replayedScanResults = [
       DiscoveredBike(

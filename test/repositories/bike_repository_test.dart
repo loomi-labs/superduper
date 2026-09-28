@@ -105,7 +105,7 @@ void main() {
     await repository.addBike(deviceId: 'bike');
 
     expect(
-      () => repository.setOnConnect('bike', const BikeControlPatch(mode: 4)),
+      () => repository.setOnConnect('bike', const BikeControlPatch(mode: 8)),
       throwsRangeError,
     );
     expect(
@@ -135,7 +135,7 @@ void main() {
       deviceId: 'AA:BB:CC:DD:EE:FF',
       moduleSerial: '00112233aabbccdd',
       region: BikeRegion.eu,
-      setOnConnect: const BikeControlPatch(light: true, mode: 2),
+      setOnConnect: const BikeControlPatch(light: true, mode: 6),
       backgroundPreference: const BackgroundPreference(
         requested: true,
         consentVersion: backgroundSyncConsentVersion,

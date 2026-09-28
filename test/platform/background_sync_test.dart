@@ -40,7 +40,6 @@ void main() {
       permissions: permissions,
       buildSession: (saved) => BikeSession(
         connection: transport.openConnection(saved.bike.deviceId),
-        preferredRegion: saved.bike.region,
         setOnConnect: saved.setOnConnect,
         protocol: saved.bike.protocol,
       ),

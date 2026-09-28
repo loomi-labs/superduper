@@ -247,7 +247,12 @@ final class InstalledDataImporter {
                 deviceId: imported.deviceId,
                 setOnConnect: BikeControlPatch(
                   light: imported.lightLocked && imported.light ? true : null,
-                  mode: imported.modePinned ? imported.mode : null,
+                  mode: imported.modePinned
+                      ? imported.mode +
+                            (imported.region == BikeRegion.eu
+                                ? BikeControlValues.v1BankSize
+                                : 0)
+                      : null,
                   assist: imported.assistLocked ? imported.assist : null,
                 ),
                 backgroundRequested: imported.backgroundRequested,
@@ -414,7 +419,10 @@ final class InstalledDataImporter {
       return null;
     }
     final mode = source['mode'];
-    if (mode is! int || !BikeControlValues.isValidMode(mode)) {
+    // Legacy records store the mode inside the region's bank (0 to 3).
+    if (mode is! int ||
+        mode < BikeControlValues.minimumMode ||
+        mode >= BikeControlValues.v1BankSize) {
       warnings.add(
         ImportWarning(code: 'invalid_bike', record: index, field: 'mode'),
       );
@@ -486,6 +494,9 @@ final class InstalledDataImporter {
     }
     if (value == 201 || (value is String && value.toLowerCase() == 'eu')) {
       return BikeRegion.eu;
+    }
+    if (value == 202 || (value is String && value.toLowerCase() == 'ch')) {
+      return BikeRegion.ch;
     }
     warnings.add(
       ImportWarning(code: 'unknown_region', record: index, field: 'region'),

@@ -431,11 +431,11 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
                 child: BikeValueSelector(
-                  values: BikeControlValues.modes,
+                  values: BikeControlValues.modesFor(saved.bike.protocol),
                   selected: selectedMode,
                   enabled: !_changingSetOnConnect,
                   semanticLabel: 'Set on connect mode',
-                  label: (mode) => '${mode + 1}',
+                  label: (mode) => '$mode',
                   onChanged: (mode) => unawaited(
                     _changeSetOnConnect(
                       () => _services.bikeRepository.setOnConnect(

@@ -422,15 +422,7 @@ final class AppDatabase extends _$AppDatabase {
     BikePreferenceRow preferences,
   ) {
     final patch = preferences.setOnConnect;
-    final mode = switch ((bike.protocol, patch.mode)) {
-      (_, null) => 0xff,
-      (BikeProtocolVersion.v1, final mode?) =>
-        mode +
-            (bike.region == BikeRegion.eu.name
-                ? BikeControlValues.modeCount
-                : 0),
-      (BikeProtocolVersion.v2, final mode?) => mode,
-    };
+    final mode = patch.mode ?? 0xff;
     return [
       0,
       switch (bike.protocol) {

@@ -54,7 +54,6 @@ final class BikeRepository {
     if (normalizedId.isEmpty) {
       throw ArgumentError.value(deviceId, 'deviceId', 'Must not be empty.');
     }
-    _validateSetOnConnect(setOnConnect);
     _validateBackgroundPreference(backgroundPreference);
     final normalizedVersions = versions == null
         ? null
@@ -74,6 +73,7 @@ final class BikeRepository {
         'Must be a supported bike advertised name.',
       );
     }
+    _validateSetOnConnect(setOnConnect, protocol);
     final persistedRegion = protocol.normalizeRegion(region);
     final normalizedName = _normalizeName(displayName, normalizedId);
     final normalizedSerial = moduleSerial == null
@@ -185,11 +185,14 @@ final class BikeRepository {
   }
 
   Future<void> setOnConnect(String deviceId, BikeControlPatch settings) {
-    _validateSetOnConnect(settings);
-    return _updatePreferences(
-      deviceId,
-      BikePreferencesCompanion(setOnConnect: Value(settings)),
-    );
+    return database.transaction(() async {
+      final bike = await _requireBike(deviceId);
+      _validateSetOnConnect(settings, bike.protocol);
+      await _updatePreferences(
+        deviceId,
+        BikePreferencesCompanion(setOnConnect: Value(settings)),
+      );
+    });
   }
 
   Future<void> setBackgroundPreference(
@@ -411,6 +414,7 @@ final class BikeRepository {
     final region = switch (bike.region) {
       'us' => BikeRegion.us,
       'eu' => BikeRegion.eu,
+      'ch' => BikeRegion.ch,
       null => null,
       final value => throw StateError('Unknown bike region "$value".'),
     };
@@ -518,7 +522,10 @@ final class BikeRepository {
     return normalized;
   }
 
-  void _validateSetOnConnect(BikeControlPatch settings) {
+  void _validateSetOnConnect(
+    BikeControlPatch settings,
+    BikeProtocolVersion protocol,
+  ) {
     if (settings.light == false) {
       throw ArgumentError.value(
         settings.light,
@@ -527,7 +534,7 @@ final class BikeRepository {
       );
     }
     if (settings.mode case final mode?) {
-      BikeControlValues.validateMode(mode);
+      BikeControlValues.validateMode(mode, protocol);
     }
     if (settings.assist case final assist?) {
       BikeControlValues.validateAssist(assist);

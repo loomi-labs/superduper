@@ -80,12 +80,9 @@ abstract class BikeProtocolDefinition {
 
   final BikeConnection? _connection;
   final BikeProtocolTimeout? _timed;
-  BikeRegion? _lastWireRegion;
   List<int>? _lastLatchedHistorySelector;
 
   Future<BikeConfiguration> readConfiguration({
-    required BikeRegion? preferredRegion,
-    required BikeRegion? fallbackRegion,
     void Function(int meters)? onOdometer,
   });
 
@@ -95,21 +92,13 @@ abstract class BikeProtocolDefinition {
 
   BikeConfiguration? applyTelemetry(
     List<int> packet,
-    BikeConfiguration current, {
-    required BikeRegion? preferredRegion,
-  }) {
+    BikeConfiguration current,
+  ) {
     final patch = decodeTelemetry(packet);
-    if (patch == null) {
-      return null;
-    }
-    return patch
-        .applyTo(current)
-        .copyWith(region: preferredRegion ?? current.region);
+    return patch?.applyTo(current);
   }
 
   List<int> encodeConfiguration(BikeConfiguration configuration);
-
-  bool wireRegionMatches(BikeConfiguration target);
 
   Future<void> writeConfiguration(BikeConfiguration configuration) {
     return _run(
@@ -134,7 +123,6 @@ abstract class BikeProtocolDefinition {
   }
 
   void reset() {
-    _lastWireRegion = null;
     _lastLatchedHistorySelector = null;
   }
 
@@ -223,32 +211,25 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
       assist: assist,
       lightByte: lightByte,
       mode: wireMode,
-      maximumMode: BikeControlValues.modeCount * BikeRegion.values.length - 1,
+      maximumMode: BikeControlValues.v1MaximumMode,
     );
     return BikeConfiguration(
       light: lightByte == 1,
-      mode: wireMode % BikeControlValues.modeCount,
+      mode: wireMode,
       assist: assist,
-      region: wireMode >= BikeControlValues.modeCount
-          ? BikeRegion.eu
-          : BikeRegion.us,
     );
   }
 
   @override
   Future<BikeConfiguration> readConfiguration({
-    required BikeRegion? preferredRegion,
-    required BikeRegion? fallbackRegion,
     void Function(int meters)? onOdometer,
   }) async {
-    final wire = decodeState(
+    return decodeState(
       await readProtocolRecord(
         BikeGatt.v1StateSelector,
         invalidateRetained: true,
       ),
     );
-    _lastWireRegion = wire.region;
-    return wire.copyWith(region: preferredRegion);
   }
 
   @override
@@ -257,7 +238,6 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
       return null;
     }
     final decoded = decodeState(packet);
-    _lastWireRegion = decoded.region;
     return BikeControlPatch(
       light: decoded.light,
       mode: decoded.mode,
@@ -266,33 +246,14 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
   }
 
   @override
-  BikeConfiguration? applyTelemetry(
-    List<int> packet,
-    BikeConfiguration current, {
-    required BikeRegion? preferredRegion,
-  }) {
-    final patch = decodeTelemetry(packet);
-    if (patch == null) {
-      return null;
-    }
-    return patch
-        .applyTo(current)
-        .copyWith(region: preferredRegion ?? _lastWireRegion);
-  }
-
-  @override
   List<int> encodeConfiguration(BikeConfiguration configuration) {
-    BikeProtocol._validateConfiguration(configuration);
-    final mode = switch (configuration.region) {
-      BikeRegion.us => configuration.mode,
-      BikeRegion.eu => configuration.mode + BikeControlValues.modeCount,
-    };
+    BikeProtocol._validateConfiguration(configuration, BikeProtocolVersion.v1);
     return [
       0,
       0xd1,
       if (configuration.light) 1 else 0,
       configuration.assist,
-      mode,
+      configuration.mode,
       BikeGatt.sessionAppliedMarker,
       0,
       0,
@@ -312,11 +273,6 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
       await readProtocolRecord(BikeGatt.v1OdometerSelector),
     );
   }
-
-  @override
-  bool wireRegionMatches(BikeConfiguration target) {
-    return _lastWireRegion == target.region;
-  }
 }
 
 final class V2BikeProtocol extends BikeProtocolDefinition {
@@ -330,7 +286,6 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
   BikeConfiguration decodeState({
     required List<int> d0,
     required List<int> d9,
-    required BikeRegion region,
   }) {
     BikeProtocol._validatePacket(d0, BikeGatt.v2ControlSelector);
     BikeProtocol._validatePacket(d9, BikeGatt.v2ModeSelector);
@@ -341,20 +296,13 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
       assist: assist,
       lightByte: lightByte,
       mode: mode,
-      maximumMode: BikeControlValues.maximumMode,
+      maximumMode: BikeControlValues.v2MaximumMode,
     );
-    return BikeConfiguration(
-      light: lightByte == 1,
-      mode: mode,
-      assist: assist,
-      region: region,
-    );
+    return BikeConfiguration(light: lightByte == 1, mode: mode, assist: assist);
   }
 
   @override
   Future<BikeConfiguration> readConfiguration({
-    required BikeRegion? preferredRegion,
-    required BikeRegion? fallbackRegion,
     void Function(int meters)? onOdometer,
   }) async {
     final d0 = await readProtocolRecord(
@@ -365,7 +313,6 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
     return decodeState(
       d0: d0,
       d9: await readProtocolRecord(BikeGatt.v2ModeSelector),
-      region: preferredRegion ?? fallbackRegion ?? BikeRegion.us,
     );
   }
 
@@ -384,7 +331,7 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
 
   @override
   List<int> encodeConfiguration(BikeConfiguration configuration) {
-    BikeProtocol._validateConfiguration(configuration);
+    BikeProtocol._validateConfiguration(configuration, BikeProtocolVersion.v2);
     return [
       0,
       0xc1,
@@ -410,11 +357,6 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
         decodeOdometer(await readProtocolRecord(BikeGatt.v2ControlSelector));
   }
 
-  @override
-  bool wireRegionMatches(BikeConfiguration target) {
-    return true;
-  }
-
   BikeControlPatch _decodeD0Telemetry(List<int> packet) {
     BikeProtocol._validatePacket(packet, BikeGatt.v2ControlSelector);
     final assist = packet[2];
@@ -423,7 +365,7 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
       assist: assist,
       lightByte: lightByte,
       mode: BikeControlValues.minimumMode,
-      maximumMode: BikeControlValues.maximumMode,
+      maximumMode: BikeControlValues.v2MaximumMode,
     );
     return BikeControlPatch(light: lightByte == 1, assist: assist);
   }
@@ -431,7 +373,7 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
   BikeControlPatch _decodeD9Telemetry(List<int> packet) {
     BikeProtocol._validatePacket(packet, BikeGatt.v2ModeSelector);
     final mode = packet[5];
-    if (!BikeControlValues.isValidMode(mode)) {
+    if (!BikeControlValues.isValidMode(mode, BikeProtocolVersion.v2)) {
       throw UnsupportedBikeValue('ride mode', mode);
     }
     return BikeControlPatch(mode: mode);
@@ -553,8 +495,11 @@ abstract final class BikeProtocol {
     return ((packet[0] << 8) | packet[1]) == packetId;
   }
 
-  static void _validateConfiguration(BikeConfiguration configuration) {
-    BikeControlValues.validateMode(configuration.mode);
+  static void _validateConfiguration(
+    BikeConfiguration configuration,
+    BikeProtocolVersion protocol,
+  ) {
+    BikeControlValues.validateMode(configuration.mode, protocol);
     BikeControlValues.validateAssist(configuration.assist);
   }
 

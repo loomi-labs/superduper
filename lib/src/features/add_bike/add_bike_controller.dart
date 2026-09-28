@@ -226,7 +226,6 @@ final class AddBikeController {
 
       final session = BikeSession(
         connection: transport.openConnection(candidate.deviceId),
-        preferredRegion: null,
         setOnConnect: const BikeControlPatch(),
         protocol: protocol,
         reconnectDelays: const [],

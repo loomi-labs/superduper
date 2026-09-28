@@ -55,7 +55,6 @@ void main() {
         connections.putIfAbsent(bike.bike.deviceId, () => []).add(connection);
         return BikeSession(
           connection: connection,
-          preferredRegion: bike.bike.region,
           setOnConnect: bike.setOnConnect,
           protocol: bike.bike.protocol,
           reconnectDelays: const [],

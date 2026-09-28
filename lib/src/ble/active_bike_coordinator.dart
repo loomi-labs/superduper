@@ -449,8 +449,7 @@ final class ActiveBikeCoordinator {
           current?.deviceId == targetId &&
           current?.protocolVersion == bike.bike.protocol) {
         _currentBike = bike;
-        current!.updatePreferredRegion(bike.bike.region);
-        current.updateSetOnConnect(bike.setOnConnect);
+        current!.updateSetOnConnect(bike.setOnConnect);
         if (!_disposed &&
             !_discoveryPaused &&
             _session == current &&

@@ -15,7 +15,6 @@ void main() {
 
   BikeSession createSession({
     BikeControlPatch setOnConnect = const BikeControlPatch(),
-    BikeRegion? region,
     BikeProtocolVersion protocol = BikeProtocolVersion.v1,
     List<int> authenticationKey = BikeProtocol.defaultAuthenticationKey,
     VersionsRead? onVersionsRead,
@@ -28,7 +27,6 @@ void main() {
   }) {
     return BikeSession(
       connection: connection,
-      preferredRegion: region,
       setOnConnect: setOnConnect,
       protocol: protocol,
       authenticationKey: authenticationKey,
@@ -63,12 +61,7 @@ void main() {
       expect(session.state.value, isA<SessionReady>());
       expect(
         session.observed.value,
-        const BikeConfiguration(
-          light: true,
-          mode: 3,
-          assist: 2,
-          region: BikeRegion.us,
-        ),
+        const BikeConfiguration(light: true, mode: 3, assist: 2),
       );
       expect(connection.authenticated, isTrue);
       expect(connection.notificationsEnabled, isTrue);
@@ -120,12 +113,7 @@ void main() {
 
     expect(
       session.observed.value,
-      const BikeConfiguration(
-        light: true,
-        mode: 3,
-        assist: 2,
-        region: BikeRegion.us,
-      ),
+      const BikeConfiguration(light: true, mode: 3, assist: 2),
     );
     connection.configurationWriteGate!.complete();
     await connect;
@@ -160,12 +148,7 @@ void main() {
 
     expect(
       session.observed.value,
-      const BikeConfiguration(
-        light: true,
-        mode: 3,
-        assist: 2,
-        region: BikeRegion.us,
-      ),
+      const BikeConfiguration(light: true, mode: 3, assist: 2),
     );
     connection.configurationWriteGate!.complete();
     await connect;
@@ -185,12 +168,7 @@ void main() {
   });
 
   test('session orchestration can use a connected protocol object', () async {
-    const configuration = BikeConfiguration(
-      light: false,
-      mode: 2,
-      assist: 3,
-      region: BikeRegion.us,
-    );
+    const configuration = BikeConfiguration(light: false, mode: 2, assist: 3);
     final protocol = _FakeConnectedProtocol(configuration);
     session = createSession(
       readDiagnosticsOnConnect: false,
@@ -975,30 +953,29 @@ void main() {
     expect(_configurationWrites(connection), hasLength(2));
   });
 
-  test('uses the persisted region for configuration writes', () async {
+  test('writes a V1 wire mode unchanged', () async {
     connection.readFrames.addAll([
       [0, 0, 0, 0, 0, 0],
       [0, 0, 0, 0, 0, 7],
     ]);
-    session = createSession(region: BikeRegion.eu);
+    session = createSession();
     await session.connect();
 
-    await session.setMode(3);
+    await session.setMode(7);
 
     final write = connection.writes.lastWhere(
       (candidate) => candidate.characteristicUuid == BikeGatt.stateRegister,
     );
     expect(write.value[4], 7);
-    expect(session.observed.value?.region, BikeRegion.eu);
+    expect(session.observed.value?.mode, 7);
   });
 
-  test('uses the selected V1 region for the acknowledged write', () async {
+  test('keeps the observed V1 wire for the acknowledged write', () async {
     connection.readFrames.addAll([
-      [0, 0, 0, 0, 0, 1],
-      [0, 0, 0, 0, 1, 1],
+      [0, 0, 0, 0, 0, 5],
       [0, 0, 0, 0, 1, 5],
     ]);
-    session = createSession(region: BikeRegion.eu);
+    session = createSession();
     await session.connect();
 
     final confirmed = await session.setLight(true);
@@ -1006,8 +983,8 @@ void main() {
     final writes = _configurationWrites(connection);
     expect(writes, hasLength(2));
     expect(writes.map((write) => write.value[4]), everyElement(5));
-    expect(confirmed.region, BikeRegion.eu);
-    expect(session.observed.value?.region, BikeRegion.eu);
+    expect(confirmed.mode, 5);
+    expect(session.observed.value?.mode, 5);
   });
 
   test('does not schedule configuration polling by default', () {
@@ -1015,7 +992,6 @@ void main() {
       connection.readFrames.add([0, 0, 0, 0, 0, 0]);
       session = BikeSession(
         connection: connection,
-        preferredRegion: null,
         setOnConnect: const BikeControlPatch(),
         protocol: BikeProtocolVersion.v1,
         reconnectDelays: const [],
@@ -1037,7 +1013,6 @@ void main() {
       ]);
       session = BikeSession(
         connection: connection,
-        preferredRegion: null,
         setOnConnect: const BikeControlPatch(),
         protocol: BikeProtocolVersion.v1,
         pollInterval: const Duration(seconds: 30),
@@ -1455,8 +1430,6 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
 
   @override
   Future<BikeConfiguration> readConfiguration({
-    required BikeRegion? preferredRegion,
-    required BikeRegion? fallbackRegion,
     void Function(int meters)? onOdometer,
   }) async {
     configurationReads++;
@@ -1475,9 +1448,6 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
 
   @override
   void reset() {}
-
-  @override
-  bool wireRegionMatches(BikeConfiguration target) => true;
 
   @override
   Future<void> writeConfiguration(BikeConfiguration configuration) async {

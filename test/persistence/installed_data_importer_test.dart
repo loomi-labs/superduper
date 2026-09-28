@@ -132,6 +132,22 @@ void main() {
     },
   );
 
+  test('imports a pinned legacy mode as the V1 wire of its region', () async {
+    await _writeJson(documents, 'bikes.json', [
+      _bike('us', region: 200, mode: 2, modeLocked: true),
+      _bike('eu', region: 201, mode: 2, modeLocked: true),
+    ]);
+
+    await importer.run();
+    final bikes = await BikeRepository(database: database).getBikes();
+
+    expect(bikes.map((saved) => saved.bike.region), [
+      BikeRegion.us,
+      BikeRegion.eu,
+    ]);
+    expect(bikes.map((saved) => saved.setOnConnect.mode), [2, 6]);
+  });
+
   test('maps every frozen legacy color index to its persistence key', () async {
     await _writeJson(documents, 'bikes.json', [
       for (var index = 0; index < 32; index++)

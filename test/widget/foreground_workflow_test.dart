@@ -112,7 +112,7 @@ void main() {
     );
     expect(modeIndicator, findsOneWidget);
     expect(
-      find.descendant(of: modeIndicator, matching: find.text('4')),
+      find.descendant(of: modeIndicator, matching: find.text('3')),
       findsOneWidget,
     );
     expect(find.byKey(const Key('set-on-connect-mode')), findsNothing);
@@ -320,7 +320,6 @@ Future<_ReadyBikeFixture> _pumpReadyBikeApp(
     ),
     buildSession: (bike) => BikeSession(
       connection: transport.openConnection(bike.bike.deviceId),
-      preferredRegion: bike.bike.region,
       setOnConnect: bike.setOnConnect,
       protocol: bike.bike.protocol,
       onVersionsRead: (versions) async {

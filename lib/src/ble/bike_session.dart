@@ -118,7 +118,6 @@ typedef ManualConnectionPauseChanged = Future<void> Function(bool paused);
 final class BikeSession {
   new({
     required this.connection,
-    required BikeRegion? preferredRegion,
     required BikeControlPatch setOnConnect,
     required BikeProtocolVersion protocol,
     List<int> authenticationKey = BikeProtocol.defaultAuthenticationKey,
@@ -135,9 +134,6 @@ final class BikeSession {
     ],
     BikeProtocolDefinition? connectedProtocol,
   }) : _protocolVersion = protocol,
-       // The public named parameter backs private mutable session state.
-       // ignore: prefer_initializing_formals
-       _preferredRegion = preferredRegion,
        _authenticationKey = List<int>.unmodifiable(authenticationKey),
        _nextConnectionIntent = setOnConnect,
        _connectionIntent = setOnConnect,
@@ -213,7 +209,6 @@ final class BikeSession {
 
   late final StreamSubscription<BikeConnectionState> _connectionSubscription;
   StreamSubscription<List<int>>? _telemetrySubscription;
-  BikeRegion? _preferredRegion;
   BikeControlPatch _nextConnectionIntent;
   BikeControlPatch _connectionIntent;
   Timer? _pollTimer;
@@ -335,7 +330,7 @@ final class BikeSession {
   }
 
   Future<BikeConfiguration> setMode(int value) {
-    BikeControlValues.validateMode(value);
+    BikeControlValues.validateMode(value, _protocolVersion);
     return setControls(BikeControlPatch(mode: value));
   }
 
@@ -350,14 +345,6 @@ final class BikeSession {
 
   void updateSetOnConnect(BikeControlPatch settings) {
     _nextConnectionIntent = settings;
-  }
-
-  void updatePreferredRegion(BikeRegion? region) {
-    _preferredRegion = region;
-    final current = _observed.peek();
-    if (current != null && region != null) {
-      _observed.value = current.copyWith(region: region);
-    }
   }
 
   Future<void> disconnect() async {
@@ -716,11 +703,7 @@ final class BikeSession {
       if (current == null) {
         return;
       }
-      final updated = _protocol.applyTelemetry(
-        packet,
-        current,
-        preferredRegion: _preferredRegion,
-      );
+      final updated = _protocol.applyTelemetry(packet, current);
       if (updated == null) {
         return;
       }
@@ -770,12 +753,8 @@ final class BikeSession {
       _markReady(observed);
       return;
     }
-    final target = intent.applyTo(
-      observed.copyWith(region: _preferredRegion ?? observed.region),
-    );
-    if (!initialConnection &&
-        intent.matches(observed) &&
-        _wireRegionMatches(target)) {
+    final target = intent.applyTo(observed);
+    if (!initialConnection && intent.matches(observed)) {
       _markReady(observed);
       return;
     }
@@ -798,9 +777,7 @@ final class BikeSession {
       throw const BikeSessionNotReady();
     }
     _pendingControls = _pendingControls?.merge(controls) ?? controls;
-    final target = _pendingControls!.applyTo(
-      current.copyWith(region: _preferredRegion ?? current.region),
-    );
+    final target = _pendingControls!.applyTo(current);
     final generation = _generation;
     _pending.value = target;
     _state.value = const SessionSynchronizing(attempt: 1);
@@ -825,9 +802,7 @@ final class BikeSession {
           throw const BikeSessionNotReady();
         }
         final controls = _pendingControls!;
-        final target = controls.applyTo(
-          current.copyWith(region: _preferredRegion ?? current.region),
-        );
+        final target = controls.applyTo(current);
         _pending.value = target;
         // An explicit control must reach the bike even when telemetry claims
         // the cached state already matches; the controller can lag that cache.
@@ -867,8 +842,6 @@ final class BikeSession {
 
   Future<BikeConfiguration> _readConfiguration() async {
     return await _protocol.readConfiguration(
-      preferredRegion: _preferredRegion,
-      fallbackRegion: _observed.peek()?.region,
       onOdometer: (meters) => _odometerMeters.value = meters,
     );
   }
@@ -1076,10 +1049,6 @@ final class BikeSession {
     return failure is BikeSessionTransportFailure ||
         failure is BikeCommandTimedOut ||
         failure is BikeBluetoothUnavailable && failure.canRetry;
-  }
-
-  bool _wireRegionMatches(BikeConfiguration target) {
-    return _protocol.wireRegionMatches(target);
   }
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;

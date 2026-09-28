@@ -37,7 +37,6 @@ void main() {
       permissions: permissions,
       buildSession: (bike) => BikeSession(
         connection: transport.openConnection(bike.bike.deviceId),
-        preferredRegion: bike.bike.region,
         setOnConnect: bike.setOnConnect,
         protocol: bike.bike.protocol,
         reconnectDelays: const [],
@@ -165,8 +164,11 @@ void main() {
 
     await controller.selectCandidate(candidate);
     final confirmation = controller.state.value as AddBikeConfirming;
-    expect(confirmation.configuration.mode, 2);
-    expect(confirmation.configuration.region, BikeRegion.eu);
+    expect(confirmation.configuration.mode, 6);
+    expect(
+      BikeRegion.fromV1Wire(confirmation.configuration.mode),
+      BikeRegion.eu,
+    );
     expect(
       confirmation.suggestedName,
       isNot(BikeProtocolVersion.v1.advertisedName),

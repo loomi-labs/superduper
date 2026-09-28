@@ -116,21 +116,11 @@ void main() {
     test('decodes US boundaries', () {
       expect(
         BikeProtocol.v1.decodeState([3, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-        const BikeConfiguration(
-          light: false,
-          mode: 0,
-          assist: 0,
-          region: BikeRegion.us,
-        ),
+        const BikeConfiguration(light: false, mode: 0, assist: 0),
       );
       expect(
         BikeProtocol.v1.decodeState([3, 0, 4, 0, 1, 3, 0, 0, 0, 0]),
-        const BikeConfiguration(
-          light: true,
-          mode: 3,
-          assist: 4,
-          region: BikeRegion.us,
-        ),
+        const BikeConfiguration(light: true, mode: 3, assist: 4),
       );
     });
 
@@ -138,12 +128,7 @@ void main() {
       for (var wireMode = 4; wireMode <= 7; wireMode++) {
         expect(
           BikeProtocol.v1.decodeState([3, 0, 2, 0, 1, wireMode, 0, 0, 0, 0]),
-          BikeConfiguration(
-            light: true,
-            mode: wireMode - 4,
-            assist: 2,
-            region: BikeRegion.eu,
-          ),
+          BikeConfiguration(light: true, mode: wireMode, assist: 2),
         );
       }
     });
@@ -185,14 +170,8 @@ void main() {
         BikeProtocol.v2.decodeState(
           d0: const [0, 0xd0, 3, 0, 1, 88, 0, 0, 0, 0],
           d9: const [0, 0xd9, 0, 0, 0, 2, 0, 0, 0, 0],
-          region: BikeRegion.eu,
         ),
-        const BikeConfiguration(
-          light: true,
-          mode: 2,
-          assist: 3,
-          region: BikeRegion.eu,
-        ),
+        const BikeConfiguration(light: true, mode: 2, assist: 3),
       );
     });
 
@@ -201,7 +180,6 @@ void main() {
         () => BikeProtocol.v2.decodeState(
           d0: const [0, 0xd1, 3, 0, 1, 88, 0, 0, 0, 0],
           d9: const [0, 0xd9, 0, 0, 0, 2, 0, 0, 0, 0],
-          region: BikeRegion.us,
         ),
         throwsA(isA<UnexpectedBikePacket>()),
       );
@@ -209,7 +187,6 @@ void main() {
         () => BikeProtocol.v2.decodeState(
           d0: const [0, 0xd0, 5, 0, 1, 88, 0, 0, 0, 0],
           d9: const [0, 0xd9, 0, 0, 0, 4, 0, 0, 0, 0],
-          region: BikeRegion.us,
         ),
         throwsA(isA<UnsupportedBikeValue>()),
       );
@@ -244,29 +221,6 @@ void main() {
         isA<BikeControlPatch>()
             .having((patch) => patch.light, 'light', isTrue)
             .having((patch) => patch.assist, 'assist', 4),
-      );
-    });
-
-    test('V1 applies its wire region unless the user selected one', () {
-      const current = BikeConfiguration(
-        light: false,
-        mode: 0,
-        assist: 0,
-        region: BikeRegion.us,
-      );
-      const telemetry = [3, 0, 4, 0, 1, 7, 0, 0, 0, 0];
-
-      expect(
-        BikeProtocol.v1
-            .applyTelemetry(telemetry, current, preferredRegion: null)
-            ?.region,
-        BikeRegion.eu,
-      );
-      expect(
-        BikeProtocol.v1
-            .applyTelemetry(telemetry, current, preferredRegion: BikeRegion.us)
-            ?.region,
-        BikeRegion.us,
       );
     });
 
@@ -427,34 +381,19 @@ void main() {
     test('encodes complete US and EU payloads', () {
       expect(
         BikeProtocol.v1.encodeConfiguration(
-          const BikeConfiguration(
-            light: true,
-            mode: 3,
-            assist: 4,
-            region: BikeRegion.us,
-          ),
+          const BikeConfiguration(light: true, mode: 3, assist: 4),
         ),
         [0, 0xd1, 1, 4, 3, 1, 0, 0, 0, 0],
       );
       expect(
         BikeProtocol.v1.encodeConfiguration(
-          const BikeConfiguration(
-            light: false,
-            mode: 0,
-            assist: 0,
-            region: BikeRegion.eu,
-          ),
+          const BikeConfiguration(light: false, mode: 4, assist: 0),
         ),
         [0, 0xd1, 0, 0, 4, 1, 0, 0, 0, 0],
       );
       expect(
         BikeProtocol.v2.encodeConfiguration(
-          const BikeConfiguration(
-            light: true,
-            mode: 2,
-            assist: 3,
-            region: BikeRegion.eu,
-          ),
+          const BikeConfiguration(light: true, mode: 2, assist: 3),
         ),
         [0, 0xc1, 1, 3, 2, 1, 0, 0, 0, 0],
       );
@@ -463,25 +402,64 @@ void main() {
     test('rejects invalid configuration ranges', () {
       expect(
         () => BikeProtocol.v1.encodeConfiguration(
-          const BikeConfiguration(
-            light: false,
-            mode: 4,
-            assist: 0,
-            region: BikeRegion.us,
-          ),
+          const BikeConfiguration(light: false, mode: 8, assist: 0),
         ),
         throwsRangeError,
       );
       expect(
         () => BikeProtocol.v2.encodeConfiguration(
-          const BikeConfiguration(
-            light: false,
-            mode: 0,
-            assist: -1,
-            region: BikeRegion.us,
-          ),
+          const BikeConfiguration(light: false, mode: 0, assist: -1),
         ),
         throwsRangeError,
+      );
+    });
+  });
+
+  group('V1 wire modes', () {
+    test('decodes the wire byte as the mode, no region', () {
+      final configuration = BikeProtocol.v1.decodeState([
+        3,
+        0,
+        2,
+        0,
+        1,
+        6,
+        0,
+        0,
+        0,
+        0,
+      ]);
+      expect(
+        configuration,
+        const BikeConfiguration(light: true, mode: 6, assist: 2),
+      );
+    });
+
+    test('encodes the wire byte unchanged', () {
+      final packet = BikeProtocol.v1.encodeConfiguration(
+        const BikeConfiguration(light: false, mode: 7, assist: 4),
+      );
+      expect(packet, [0, 0xd1, 0, 4, 7, 1, 0, 0, 0, 0]);
+    });
+
+    test('rejects a wire above 7', () {
+      expect(
+        () => BikeProtocol.v1.decodeState([3, 0, 0, 0, 0, 8, 0, 0, 0, 0]),
+        throwsA(isA<UnsupportedBikeValue>()),
+      );
+    });
+
+    test('region is inferred from the wire bank', () {
+      expect(BikeRegion.fromV1Wire(3), BikeRegion.us);
+      expect(BikeRegion.fromV1Wire(4), BikeRegion.eu);
+    });
+
+    test('V2 still rejects a preset above 3', () {
+      expect(
+        () => BikeProtocol.v2.encodeConfiguration(
+          const BikeConfiguration(light: false, mode: 4, assist: 0),
+        ),
+        throwsA(isA<RangeError>()),
       );
     });
   });

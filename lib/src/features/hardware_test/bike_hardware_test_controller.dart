@@ -361,7 +361,6 @@ final class BikeHardwareTestController {
     var sawAuthenticationState = false;
     final session = BikeSession(
       connection: connection,
-      preferredRegion: _preferredRegion(candidate.deviceId),
       setOnConnect: const BikeControlPatch(),
       protocol: BikeProtocolVersion.fromAdvertisedName(candidate.name)!,
       onVersionsRead: (_) async {
@@ -673,7 +672,12 @@ final class BikeHardwareTestController {
       'Changed to ${light.light ? 'on' : 'off'}, acknowledged, and restored.',
     );
 
-    final nextMode = (initial.mode + 1) % BikeControlValues.modeCount;
+    // The toggle stays inside the bank of the current wire: a US bike on
+    // wire 3 goes to wire 0, not to the EU wire 4.
+    final bank = session.protocolVersion == BikeProtocolVersion.v1
+        ? initial.mode - initial.mode % BikeRegion.v1BankSize
+        : 0;
+    final nextMode = bank + (initial.mode - bank + 1) % BikeRegion.v1BankSize;
     final mode = await session.setMode(nextMode);
     _checkCurrent(generation);
     _expect(mode.mode == nextMode, 'Mode did not change to $nextMode.');
@@ -958,15 +962,6 @@ final class BikeHardwareTestController {
     }
   }
 
-  BikeRegion? _preferredRegion(String deviceId) {
-    for (final saved in activeBikeCoordinator.bikes.peek()) {
-      if (saved.bike.deviceId == deviceId) {
-        return saved.bike.region;
-      }
-    }
-    return null;
-  }
-
   void _publishSessionProgress(BikeSessionState sessionState) {
     final phase = _state.peek().phase;
     if (phase != BikeHardwareTestPhase.connecting &&
@@ -1076,7 +1071,7 @@ final class BikeHardwareTestController {
     final settings =
         'light ${value.light ? 'on' : 'off'}, mode ${value.mode}, assist ${value.assist}';
     return protocol == BikeProtocolVersion.v1
-        ? '$settings, ${value.region.label}'
+        ? '$settings, ${BikeRegion.fromV1Wire(value.mode).label}'
         : settings;
   }
 

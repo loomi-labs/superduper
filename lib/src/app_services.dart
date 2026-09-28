@@ -52,7 +52,6 @@ final class AppServices {
           identityResolver: resolvedIdentityResolver,
           buildSession: (bike) => BikeSession(
             connection: resolvedTransport.openConnection(bike.bike.deviceId),
-            preferredRegion: bike.bike.region,
             setOnConnect: bike.setOnConnect,
             protocol: bike.bike.protocol,
             onVersionsRead: (versions) async {
