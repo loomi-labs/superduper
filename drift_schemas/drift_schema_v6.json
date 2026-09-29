@@ -238,20 +238,6 @@
             "default_dart": null,
             "default_client_dart": null,
             "dsl_features": []
-          },
-          {
-            "name": "street_legal_on_quick_restart",
-            "getter_name": "streetLegalOnQuickRestart",
-            "moor_type": "bool",
-            "nullable": false,
-            "customConstraints": null,
-            "defaultConstraints": "CHECK (\"street_legal_on_quick_restart\" IN (0, 1))",
-            "dialectAwareDefaultConstraints": {
-              "sqlite": "CHECK (\"street_legal_on_quick_restart\" IN (0, 1))"
-            },
-            "default_dart": "const CustomExpression('0')",
-            "default_client_dart": null,
-            "dsl_features": []
           }
         ],
         "is_virtual": false,
@@ -977,7 +963,7 @@
       "sql": [
         {
           "dialect": "sqlite",
-          "sql": "CREATE TABLE IF NOT EXISTS \"bike_preferences\" (\"device_id\" TEXT NOT NULL REFERENCES bikes (device_id) ON DELETE CASCADE, \"set_on_connect\" TEXT NOT NULL, \"background_requested\" INTEGER NOT NULL CHECK (\"background_requested\" IN (0, 1)), \"background_consent_version\" INTEGER NOT NULL, \"street_legal_on_quick_restart\" INTEGER NOT NULL DEFAULT 0 CHECK (\"street_legal_on_quick_restart\" IN (0, 1)), PRIMARY KEY (\"device_id\"), CHECK (background_consent_version >= 0));"
+          "sql": "CREATE TABLE IF NOT EXISTS \"bike_preferences\" (\"device_id\" TEXT NOT NULL REFERENCES bikes (device_id) ON DELETE CASCADE, \"set_on_connect\" TEXT NOT NULL, \"background_requested\" INTEGER NOT NULL CHECK (\"background_requested\" IN (0, 1)), \"background_consent_version\" INTEGER NOT NULL, PRIMARY KEY (\"device_id\"), CHECK (background_consent_version >= 0));"
         }
       ]
     },

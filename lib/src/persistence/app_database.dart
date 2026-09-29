@@ -105,8 +105,6 @@ class BikePreferences extends Table {
   TextColumn get setOnConnect => text().map(const SetOnConnectConverter())();
   BoolColumn get backgroundRequested => boolean()();
   IntColumn get backgroundConsentVersion => integer()();
-  BoolColumn get streetLegalOnQuickRestart =>
-      boolean().withDefault(const Constant(false))();
 
   @override
   List<String> get customConstraints => [
@@ -339,12 +337,7 @@ final class AppDatabase extends _$AppDatabase {
         await migrator.alterTable(
           TableMigration(
             bikePreferences,
-            // A table migration builds the current table. The column that
-            // schema v6 adds does not exist yet, so it takes its default here.
-            newColumns: [
-              bikePreferences.setOnConnect,
-              bikePreferences.streetLegalOnQuickRestart,
-            ],
+            newColumns: [bikePreferences.setOnConnect],
             columnTransformer: {
               bikePreferences.setOnConnect: const CustomExpression<String>(
                 "'{' || "
@@ -368,13 +361,6 @@ final class AppDatabase extends _$AppDatabase {
       if (from < 6) {
         await transaction(() async {
           await migrator.alterTable(TableMigration(bikes));
-          // Before v3 the table migration above already created the column.
-          if (from >= 3) {
-            await migrator.addColumn(
-              bikePreferences,
-              bikePreferences.streetLegalOnQuickRestart,
-            );
-          }
           await migrator.createTable(bikeCustomModes);
         });
       }
@@ -415,7 +401,7 @@ final class AppDatabase extends _$AppDatabase {
       final moduleSerial = bike.moduleSerial;
       if (!preferences.backgroundRequested ||
           preferences.backgroundConsentVersion < backgroundSyncConsentVersion ||
-          _backgroundPatch(preferences).isEmpty ||
+          preferences.setOnConnect.isEmpty ||
           moduleSerial == null) {
         return;
       }
@@ -496,19 +482,11 @@ final class AppDatabase extends _$AppDatabase {
     ]);
   }
 
-  /// The set-on-connect values the native background sync may apply. It
-  /// cannot tell a quick restart from a normal one, so on a street-legal bike
-  /// it never sets the mode.
-  SetOnConnect _backgroundPatch(BikePreferenceRow preferences) =>
-      preferences.streetLegalOnQuickRestart
-      ? preferences.setOnConnect.copyWith(mode: null)
-      : preferences.setOnConnect;
-
   Future<List<int>> _backgroundControlFrame(
     BikeRow bike,
     BikePreferenceRow preferences,
   ) async {
-    final patch = _backgroundPatch(preferences);
+    final patch = preferences.setOnConnect;
     final mode = switch (patch.mode) {
       null => 0xff,
       NativeModeRef(:final wire) => wire,

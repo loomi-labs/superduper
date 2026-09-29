@@ -20,7 +20,6 @@ final class RideModeController {
     _stateCleanup = session.state.subscribe(_onState);
     _observedCleanup = session.observed.subscribe(_onObserved);
     _speedCleanup = session.speedKmh.subscribe(_onSpeed);
-    _streetLegalCleanup = session.streetLegalHeld.subscribe(_onStreetLegalHeld);
     _watchdog = Timer.periodic(watchdogInterval, (_) => _checkSpeedStream());
   }
 
@@ -42,7 +41,6 @@ final class RideModeController {
   late final EffectCleanup _stateCleanup;
   late final EffectCleanup _observedCleanup;
   late final EffectCleanup _speedCleanup;
-  late final EffectCleanup _streetLegalCleanup;
   late final Timer _watchdog;
   SavedBike _bike;
   int? _assertedWire;
@@ -67,7 +65,7 @@ final class RideModeController {
   };
 
   /// Selects a mode. The state changes only when the bike accepts the write;
-  /// on an error the previous selection and hold come back.
+  /// on an error the previous selection comes back.
   Future<void> select(RideModeSelection next) async {
     if (_disposed) {
       return;
@@ -75,9 +73,6 @@ final class RideModeController {
     final wire = initialWireFor(next, _region);
     final previousSelection = _selection.peek();
     final previousWire = _assertedWire;
-    final previousHold = session.streetLegalHeld.peek();
-    // The write must carry the normal marker, so the hold ends first.
-    session.endStreetLegalHold();
     _selectInFlight = true;
     _holdSelection = previousSelection;
     _selection.value = next;
@@ -88,7 +83,6 @@ final class RideModeController {
       if (!_disposed) {
         _selection.value = previousSelection;
         _assertedWire = previousWire;
-        session.restoreStreetLegalHold(previousHold);
       }
       rethrow;
     } finally {
@@ -135,7 +129,6 @@ final class RideModeController {
     _stateCleanup();
     _observedCleanup();
     _speedCleanup();
-    _streetLegalCleanup();
     _needsBackgroundHold.value = false;
     _selection.dispose();
     _needsBackgroundHold.dispose();
@@ -164,11 +157,6 @@ final class RideModeController {
     if (observed == null) {
       return;
     }
-    if (session.streetLegalHeld.peek()) {
-      _selection.value = NativeRideMode(observed);
-      _assertedWire = observed;
-      return;
-    }
     final current = _selection.peek();
     if (current is CustomRideMode && assertsWire(current, observed, _region)) {
       _assertedWire = observed;
@@ -183,20 +171,6 @@ final class RideModeController {
     }
     _selection.value = NativeRideMode(observed);
     _assertedWire = observed;
-  }
-
-  /// A street-legal hold leaves the bike on the wire it booted on.
-  void _onStreetLegalHeld(bool held) {
-    if (_disposed || !held || !_ready) {
-      return;
-    }
-    final observed = session.observed.peek()?.mode;
-    if (observed == null) {
-      return;
-    }
-    _selection.value = NativeRideMode(observed);
-    _assertedWire = observed;
-    _publishHold();
   }
 
   /// Follows the rider: a wire the selected mode never asserts ends the mode.

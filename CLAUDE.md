@@ -13,7 +13,6 @@ The fork adds these features to upstream:
 - The region CH, with custom modes: a speed limit (25 to 45 km/h) with or without throttle, per bike.
 - A ride mode controller that switches firmware profiles as the speed crosses the limit.
 - An Android foreground service that keeps the Bluetooth link alive while a switching custom mode is selected.
-- "Street-legal on quick restart": a quick power cycle keeps the mode the bike booted with.
 - A release build that refuses the debug certificate.
 
 ## Commands
@@ -39,7 +38,7 @@ After a change to a drift table, increase `schemaVersion`, add the migration ste
 The source is in `lib/src`. State is in `signals`. Code uses Dart primary constructors (`const new(...)`) and private named parameters (`required this._bike`).
 
 - `ble/bike_protocol.dart`: the V1 and V2 wire formats. It encodes and decodes the control packet, reads history records, decodes speed telemetry (`[2, 1, lo, hi]`, km/h x 100), and sends the ride-data request.
-- `ble/bike_session.dart`: one connection to one bike. It connects, authenticates, reads and writes the configuration, applies set-on-connect values, reconnects, publishes `speedKmh`, and runs the street-legal hold.
+- `ble/bike_session.dart`: one connection to one bike. It connects, authenticates, reads and writes the configuration, applies set-on-connect values, reconnects, and publishes `speedKmh`.
 - `ble/ride_mode_controller.dart`: the selected ride mode of a session. It writes the base or cap wire of a custom mode as the speed crosses the limit, and it publishes `needsBackgroundHold`.
 - `ble/active_bike_coordinator.dart`: owns the active session and its ride mode controller, and forwards `needsBackgroundHold` to the hold gateway.
 - `domain/ride_modes.dart`: the firmware profile table, custom modes, the base/cap engine, `BikeRegion`, and the seeded CH mode ("25 km/h", throttle on).
@@ -47,7 +46,7 @@ The source is in `lib/src`. State is in `signals`. Code uses Dart primary constr
 - `persistence/app_database.dart`: drift schema v6. The table `bike_custom_modes` holds the custom modes. `installed_data_importer.dart` imports the old `bikes.json` and `settings.json` once.
 - `repositories/`: all database access. A region change in `updateBikeDetails` adapts the modes in the same transaction: a CH bike gets the seeded mode, and a set-on-connect wire that the new region does not offer is cleared (on CH it points at the seeded mode).
 - `platform/background_hold.dart`: the Android foreground service (flutter_foreground_task). Other platforms have no hold.
-- `platform/background_sync.dart` and the Kotlin code in `android/app/src/main/kotlin/com/loomilabs/superduperch`: upstream's native background sync. The MethodChannel name `io.kbl.superduper/background_sync` is a fixed string and does not follow the application ID.
+- `platform/background_sync.dart` and the Kotlin code in `android/app/src/main/kotlin/com/loomilabs/superduperch`: upstream's native background sync. Byte 5 of each app control write is 1, and the bike sets it to 0 at power-up; the native sync writes only when byte 5 is 0. The MethodChannel name `io.kbl.superduper/background_sync` is a fixed string and does not follow the application ID.
 - `features/`: the pages (add bike, bike control, bike settings with the custom mode editor, hardware test, help, home, startup).
 
 ## Wire bytes
@@ -66,22 +65,6 @@ A V1 mode is the wire byte 0 to 7. The app never adds an offset to it. The regio
 | 7 | OFFROAD (EU) | none, throttle |
 
 US offers wires 0 to 3, EU offers 4 to 7, CH offers 7 and the custom modes. A V2 mode is the preset 0 to 3.
-
-## Street-legal on quick restart
-
-Byte 5 of each control write is a marker. The bike keeps it in the control-history record and sets it to 0 at power-up.
-
-| Byte 5 | Meaning |
-| --- | --- |
-| 0 | The bike started after the last app write (or no record exists). |
-| 1 | The app wrote in this power cycle. Normal writes. |
-| 2 | The app wrote in this power cycle while a street-legal hold was on. |
-
-When the preference is on, the session reads the marker at each connect. Marker 2 keeps the hold, marker 1 clears it, and marker 0 starts the hold only when the link was lost less than 12 seconds before. Only an unexpected link loss starts that clock; a manual disconnect or a background pause does not. While the hold is on, the session does not write the set-on-connect mode, and all its control writes carry marker 2. So the hold survives an app restart. A mode choice by the rider ends the hold; its write carries marker 1.
-
-The native background sync writes only when the marker is 0. It has no timing information, so on a bike with the preference on, its command never sets the mode (mode byte `0xff`). When no light or assist value remains, the database holds no background plan for the bike.
-
-Limit: only a connected app can measure how long the bike was off. When the app is not connected at the restart, nothing detects a quick restart, and the app applies the set-on-connect mode at its next connect.
 
 ## Background hold
 

@@ -12,11 +12,6 @@ abstract final class BikeGatt {
   // control write so background reconnects preserve subsequent rider changes.
   static const sessionAppliedMarker = 1;
 
-  // The same byte holds a street-legal hold: while it is on, every control
-  // write carries this marker, so the hold survives an app restart. The bike
-  // clears it at the next power-up.
-  static const sessionHeldMarker = 2;
-
   static const metricsService = '00001554-1212-efde-1523-785feabcd123';
   static const telemetry = '0000155e-1212-efde-1523-785feabcd123';
   static const stateRegister = '0000155f-1212-efde-1523-785feabcd123';
@@ -38,8 +33,6 @@ abstract final class BikeGatt {
   static const v1OdometerSelector = <int>[0x02, 0x02];
   static const v2ControlSelector = <int>[0x00, 0xd0];
   static const v2ModeSelector = <int>[0x00, 0xd9];
-  static const v1ControlHistorySelector = <int>[0x00, 0xd1];
-  static const v2ControlHistorySelector = <int>[0x00, 0xc1];
   static const rideDataSelector = <int>[0x02, 0x03];
   static const rideDataRequest = <int>[0x02, 0x03, 0, 0, 0, 0, 0, 0, 0, 0];
   static const speedPacketId = <int>[0x02, 0x01];
@@ -108,13 +101,7 @@ abstract class BikeProtocolDefinition {
     return patch?.applyTo(current);
   }
 
-  List<int> encodeConfiguration(
-    BikeConfiguration configuration, {
-    int marker = BikeGatt.sessionAppliedMarker,
-  });
-
-  /// The history record that holds the last control write of the app.
-  List<int> get controlHistorySelector;
+  List<int> encodeConfiguration(BikeConfiguration configuration);
 
   /// Speed from a telemetry notification, or null for any other packet.
   double? decodeSpeedKmh(List<int> packet) => null;
@@ -124,15 +111,12 @@ abstract class BikeProtocolDefinition {
   /// reconnect, so callers repeat this when samples stop.
   Future<void> requestRideData() async {}
 
-  Future<void> writeConfiguration(
-    BikeConfiguration configuration, {
-    int marker = BikeGatt.sessionAppliedMarker,
-  }) {
+  Future<void> writeConfiguration(BikeConfiguration configuration) {
     return _run(
       _bike.writeCharacteristic(
         serviceUuid: BikeGatt.metricsService,
         characteristicUuid: BikeGatt.stateRegister,
-        value: encodeConfiguration(configuration, marker: marker),
+        value: encodeConfiguration(configuration),
       ),
       'Writing bike settings',
     );
@@ -229,9 +213,6 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
     required BikeProtocolTimeout timed,
   }) : super.connected(connection: connection, timed: timed);
 
-  @override
-  List<int> get controlHistorySelector => BikeGatt.v1ControlHistorySelector;
-
   BikeConfiguration decodeState(List<int> packet) {
     BikeProtocol._validatePacket(packet, BikeGatt.v1StateSelector);
     final assist = packet[2];
@@ -276,10 +257,7 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
   }
 
   @override
-  List<int> encodeConfiguration(
-    BikeConfiguration configuration, {
-    int marker = BikeGatt.sessionAppliedMarker,
-  }) {
+  List<int> encodeConfiguration(BikeConfiguration configuration) {
     BikeProtocol._validateConfiguration(configuration, BikeProtocolVersion.v1);
     return [
       0,
@@ -287,7 +265,7 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
       if (configuration.light) 1 else 0,
       configuration.assist,
       configuration.mode,
-      marker,
+      BikeGatt.sessionAppliedMarker,
       0,
       0,
       0,
@@ -349,9 +327,6 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
     required BikeProtocolTimeout timed,
   }) : super.connected(connection: connection, timed: timed);
 
-  @override
-  List<int> get controlHistorySelector => BikeGatt.v2ControlHistorySelector;
-
   BikeConfiguration decodeState({
     required List<int> d0,
     required List<int> d9,
@@ -399,10 +374,7 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
   }
 
   @override
-  List<int> encodeConfiguration(
-    BikeConfiguration configuration, {
-    int marker = BikeGatt.sessionAppliedMarker,
-  }) {
+  List<int> encodeConfiguration(BikeConfiguration configuration) {
     BikeProtocol._validateConfiguration(configuration, BikeProtocolVersion.v2);
     return [
       0,
@@ -410,7 +382,7 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
       if (configuration.light) 1 else 0,
       configuration.assist,
       configuration.mode,
-      marker,
+      BikeGatt.sessionAppliedMarker,
       0,
       0,
       0,

@@ -564,19 +564,6 @@ void main() {
           .getSingle();
       expect(command.payload[4], 1);
     });
-
-    test('street-legal on quick restart round-trips', () async {
-      await repository.addBike(deviceId: 'b', region: BikeRegion.ch);
-      expect(
-        (await repository.getBikes()).single.streetLegalOnQuickRestart,
-        isFalse,
-      );
-      await repository.setStreetLegalOnQuickRestart('b', true);
-      expect(
-        (await repository.getBikes()).single.streetLegalOnQuickRestart,
-        isTrue,
-      );
-    });
   });
 
   group('region change', () {
@@ -647,7 +634,7 @@ void main() {
     });
   });
 
-  group('background sync and street-legal', () {
+  group('background sync', () {
     Future<void> addSyncedBike(SetOnConnect setOnConnect) async {
       await settingsRepository.initialize();
       await repository.addBike(
@@ -661,60 +648,11 @@ void main() {
       );
     }
 
-    test('street-legal leaves the mode byte unset', () async {
+    test('the background command carries the set-on-connect wire', () async {
       await addSyncedBike(
         const SetOnConnect(mode: NativeModeRef(2), assist: 3),
       );
 
-      await repository.setStreetLegalOnQuickRestart('b', true);
-
-      final command = await database
-          .select(database.backgroundSyncCommands)
-          .getSingle();
-      expect(command.payload[3], 3);
-      expect(command.payload[4], 0xff);
-    });
-
-    test('street-legal with only a mode writes no plan', () async {
-      await addSyncedBike(const SetOnConnect(mode: NativeModeRef(2)));
-
-      await repository.setStreetLegalOnQuickRestart('b', true);
-
-      expect(
-        await database.select(database.backgroundSyncPlans).get(),
-        isEmpty,
-      );
-      expect(
-        await database.select(database.backgroundSyncCommands).get(),
-        isEmpty,
-      );
-    });
-
-    test('without street-legal the mode byte is the wire', () async {
-      await addSyncedBike(
-        const SetOnConnect(mode: NativeModeRef(2), assist: 3),
-      );
-
-      final command = await database
-          .select(database.backgroundSyncCommands)
-          .getSingle();
-      expect(command.payload[4], 2);
-    });
-
-    test('turning the switch on and off refreshes the plan', () async {
-      await addSyncedBike(const SetOnConnect(mode: NativeModeRef(2)));
-      expect(
-        await database.select(database.backgroundSyncCommands).get(),
-        hasLength(1),
-      );
-
-      await repository.setStreetLegalOnQuickRestart('b', true);
-      expect(
-        await database.select(database.backgroundSyncCommands).get(),
-        isEmpty,
-      );
-
-      await repository.setStreetLegalOnQuickRestart('b', false);
       final command = await database
           .select(database.backgroundSyncCommands)
           .getSingle();

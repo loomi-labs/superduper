@@ -267,13 +267,6 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                           _changeBackgroundPreference(saved, enabled),
                         ),
                 ),
-                if (saved.streetLegalOnQuickRestart)
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(20, 0, 20, 14),
-                    child: Text(
-                      'With Street-legal on quick restart, Background Sync does not set the mode.',
-                    ),
-                  ),
               ],
               if (hasSession) ...[
                 const Divider(height: 1),
@@ -528,29 +521,6 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                   ),
                 ),
               ),
-            const Divider(height: 1),
-            SwitchListTile(
-              key: const Key('street-legal-quick-restart'),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 20,
-                vertical: 8,
-              ),
-              secondary: const Icon(Icons.restart_alt_rounded),
-              title: const Text('Street-legal on quick restart'),
-              subtitle: const Text(
-                'Turn the bike off and on within about 10 seconds and it keeps '
-                'the mode it booted with.',
-              ),
-              value: saved.streetLegalOnQuickRestart,
-              onChanged: _changingSetOnConnect
-                  ? null
-                  : (enabled) => unawaited(
-                      _changeSetOnConnect(
-                        () => _services.bikeRepository
-                            .setStreetLegalOnQuickRestart(deviceId, enabled),
-                      ),
-                    ),
-            ),
           ],
         ),
       ),

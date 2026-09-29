@@ -250,8 +250,6 @@ void main() {
 
   test('a failed select keeps the previous state', () async {
     await start(chBike(), bootWire: 7);
-    session.restoreStreetLegalHold(true);
-    await Future<void>.delayed(Duration.zero);
     await session.disconnect();
 
     await expectLater(
@@ -260,7 +258,7 @@ void main() {
     );
 
     expect(controller.selection.value, const NativeRideMode(7));
-    expect(session.streetLegalHeld.value, isTrue);
+    expect(controller.assertedWire, 7);
     expect(controller.needsBackgroundHold.value, isFalse);
   });
 
@@ -305,21 +303,5 @@ void main() {
     await controller.select(const CustomRideMode(exact));
     expect(modeWrites().last, 1);
     expect(controller.needsBackgroundHold.value, isFalse);
-  });
-
-  test('a street-legal hold makes the selection follow the boot wire; select ends it', () async {
-    await start(
-      chBike(
-        setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
-      ),
-      bootWire: 7,
-    );
-    session.restoreStreetLegalHold(true);
-    await Future<void>.delayed(Duration.zero);
-    expect(controller.selection.value, const NativeRideMode(1));
-    expect(controller.needsBackgroundHold.value, isFalse);
-    await controller.select(const CustomRideMode(seededChMode));
-    expect(session.streetLegalHeld.value, isFalse);
-    expect(controller.needsBackgroundHold.value, isTrue);
   });
 }

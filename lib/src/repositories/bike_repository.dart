@@ -309,13 +309,6 @@ final class BikeRepository {
     }
   }
 
-  Future<void> setStreetLegalOnQuickRestart(String deviceId, bool enabled) {
-    return _updatePreferences(
-      deviceId,
-      BikePreferencesCompanion(streetLegalOnQuickRestart: Value(enabled)),
-    );
-  }
-
   Future<void> setBackgroundPreference(
     String deviceId, {
     required bool requested,
@@ -602,7 +595,6 @@ final class BikeRepository {
       ),
       setOnConnect: preferences.setOnConnect,
       customModes: List.unmodifiable(customModes.map(_mapCustomMode)),
-      streetLegalOnQuickRestart: preferences.streetLegalOnQuickRestart,
       backgroundPreference: BackgroundPreference(
         requested: preferences.backgroundRequested,
         consentVersion: preferences.backgroundConsentVersion,

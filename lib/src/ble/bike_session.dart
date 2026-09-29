@@ -133,8 +133,6 @@ final class BikeSession {
       Duration(seconds: 10),
     ],
     BikeProtocolDefinition? connectedProtocol,
-    this._streetLegalOnQuickRestart = false,
-    this._quickRestartWindow = const Duration(seconds: 12),
     DateTime Function()? clock,
   }) : _protocolVersion = protocol,
        _clock = clock ?? DateTime.now,
@@ -232,34 +230,7 @@ final class BikeSession {
   var _disconnectRequested = false;
   var _expectedDisconnect = false;
   var _hasObservedConnection = false;
-  final Signal<bool> _streetLegalHeld = signal(
-    false,
-    options: const SignalOptions(name: 'bikeSession.streetLegalHeld'),
-  );
-  DateTime? _linkLostAt;
-  bool _streetLegalOnQuickRestart;
-  final Duration _quickRestartWindow;
   final DateTime Function() _clock;
-
-  ReadonlySignal<bool> get streetLegalHeld => _streetLegalHeld.readonly();
-
-  void updateStreetLegalOnQuickRestart(bool enabled) {
-    _streetLegalOnQuickRestart = enabled;
-    if (!enabled) {
-      _streetLegalHeld.value = false;
-    }
-  }
-
-  /// The rider chose a mode: the bike is no longer left as it booted.
-  void endStreetLegalHold() {
-    _streetLegalHeld.value = false;
-  }
-
-  /// Puts back a hold that a failed mode choice ended too early.
-  void restoreStreetLegalHold(bool held) {
-    _streetLegalHeld.value = held;
-  }
-
   Future<void>? _connectFuture;
   Future<void>? _connectRequestFuture;
   int? _connectFutureGeneration;
@@ -478,7 +449,6 @@ final class BikeSession {
     _versions.dispose();
     _odometerMeters.dispose();
     _speedKmh.dispose();
-    _streetLegalHeld.dispose();
   }
 
   Future<void> _startConnect() {
@@ -787,7 +757,6 @@ final class BikeSession {
     _reconnectTimer?.cancel();
     _generation++;
     _hasObservedConnection = false;
-    _linkLostAt = _clock();
     _pollTimer?.cancel();
     _invalidateConfigurationState();
     unawaited(_disableNotifications(updatePeripheral: false));
@@ -809,34 +778,13 @@ final class BikeSession {
     _publishObserved(observed);
 
     if (initialConnection) {
-      if (_streetLegalOnQuickRestart) {
-        final lostAt = _linkLostAt;
-        _linkLostAt = null;
-        // 0: the bike started since the last app write. 2: the bike holds
-        // a street-legal hold. 1: the app wrote in this power cycle.
-        final marker = await _readSessionMarker();
-        if (marker == BikeGatt.sessionHeldMarker) {
-          _streetLegalHeld.value = true;
-        } else if (marker == BikeGatt.sessionAppliedMarker) {
-          _streetLegalHeld.value = false;
-        } else {
-          _streetLegalHeld.value =
-              lostAt != null &&
-              _clock().difference(lostAt) < _quickRestartWindow;
-        }
-        if (!_isCurrent(generation) || !_hasObservedConnection) {
-          throw const BikeSessionDisposedFailure();
-        }
-      }
-      await _protocol.writeConfiguration(observed, marker: _writeMarker);
+      await _protocol.writeConfiguration(observed);
       if (!_isCurrent(generation) || !_hasObservedConnection) {
         throw const BikeSessionDisposedFailure();
       }
     }
 
-    final intent = _streetLegalHeld.peek()
-        ? _connectionIntent.copyWith(mode: null)
-        : _connectionIntent;
+    final intent = _connectionIntent;
     if (intent.isEmpty) {
       _markReady(observed);
       return;
@@ -847,7 +795,7 @@ final class BikeSession {
       return;
     }
     _state.value = const SessionSynchronizing(attempt: 1);
-    await _protocol.writeConfiguration(target, marker: _writeMarker);
+    await _protocol.writeConfiguration(target);
     if (!_isCurrent(generation) || !_hasObservedConnection) {
       throw const BikeSessionDisposedFailure();
     }
@@ -897,7 +845,7 @@ final class BikeSession {
         _pollTimer?.cancel();
         late BikeConfiguration written;
         try {
-          await _protocol.writeConfiguration(target, marker: _writeMarker);
+          await _protocol.writeConfiguration(target);
           if (!_isCurrent(generation) || !_hasObservedConnection) {
             throw const BikeSessionDisposedFailure();
           }
@@ -927,25 +875,6 @@ final class BikeSession {
       }
     }
   }
-
-  /// True when the bike started since the app's last control write: the
-  /// marker byte of the control-history record is clear, or no record exists.
-  Future<int> _readSessionMarker() async {
-    try {
-      final record = await _protocol.readProtocolRecord(
-        _protocol.controlHistorySelector,
-        invalidateRetained: true,
-      );
-      return record[5];
-    } on BikeProtocolFailure {
-      return 0;
-    }
-  }
-
-  /// The marker of the next control write: it keeps a hold on the bike.
-  int get _writeMarker => _streetLegalHeld.peek()
-      ? BikeGatt.sessionHeldMarker
-      : BikeGatt.sessionAppliedMarker;
 
   Future<BikeConfiguration> _readConfiguration() async {
     return await _protocol.readConfiguration(
@@ -1088,8 +1017,6 @@ final class BikeSession {
         _state.peek() is SessionIdle) {
       return;
     }
-    // Only an unexpected loss can be a bike power cycle.
-    _linkLostAt = _clock();
     _reconnectTimer?.cancel();
     _generation++;
     _pollTimer?.cancel();

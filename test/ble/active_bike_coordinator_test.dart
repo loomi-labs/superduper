@@ -505,13 +505,12 @@ void main() {
       );
       await coordinator.start();
       return await _waitFor(
-            coordinator.state,
-            (state) =>
-                state is ActiveBikeSessionStatus &&
-                state.bike.bike.deviceId == deviceId &&
-                state.sessionState is SessionReady,
-          )
-          as ActiveBikeSessionStatus;
+        coordinator.state,
+        (state) =>
+            state is ActiveBikeSessionStatus &&
+            state.bike.bike.deviceId == deviceId &&
+            state.sessionState is SessionReady,
+      ) as ActiveBikeSessionStatus;
     }
 
     Future<void> addChBike() async {
@@ -527,29 +526,35 @@ void main() {
       hold = RecordingHold();
     });
 
-    test('dynamic custom mode keeps the session connected in the background', () async {
-      await addChBike();
-      await startActive('ch', bootWire: 7);
-      await Future<void>.delayed(Duration.zero);
-      expect(hold.held, isTrue);
+    test(
+      'dynamic custom mode keeps the session connected in the background',
+      () async {
+        await addChBike();
+        await startActive('ch', bootWire: 7);
+        await Future<void>.delayed(Duration.zero);
+        expect(hold.held, isTrue);
 
-      await coordinator.setForeground(false);
+        await coordinator.setForeground(false);
 
-      final state = coordinator.state.value as ActiveBikeSessionStatus;
-      expect(state.sessionState, isA<SessionReady>());
-    });
+        final state = coordinator.state.value as ActiveBikeSessionStatus;
+        expect(state.sessionState, isA<SessionReady>());
+      },
+    );
 
-    test('native mode pauses the session in the background and holds nothing', () async {
-      await bikes.addBike(deviceId: 'eu', region: BikeRegion.eu);
-      await startActive('eu', bootWire: 4);
-      await Future<void>.delayed(Duration.zero);
-      expect(hold.held, isFalse);
+    test(
+      'native mode pauses the session in the background and holds nothing',
+      () async {
+        await bikes.addBike(deviceId: 'eu', region: BikeRegion.eu);
+        await startActive('eu', bootWire: 4);
+        await Future<void>.delayed(Duration.zero);
+        expect(hold.held, isFalse);
 
-      await coordinator.setForeground(false);
+        await coordinator.setForeground(false);
 
-      final state = coordinator.state.value as ActiveBikeSessionStatus;
-      expect(state.sessionState, isA<SessionDisconnected>());
-    });
+        final state = coordinator.state.value as ActiveBikeSessionStatus;
+        expect(state.sessionState, isA<SessionDisconnected>());
+      },
+    );
 
     test('manual disconnect releases the hold', () async {
       await addChBike();

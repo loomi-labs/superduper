@@ -479,9 +479,7 @@ final class ActiveBikeCoordinator {
           current?.deviceId == targetId &&
           current?.protocolVersion == bike.bike.protocol) {
         _currentBike = bike;
-        current!
-          ..updateSetOnConnect(resolveSetOnConnect(bike).patch)
-          ..updateStreetLegalOnQuickRestart(bike.streetLegalOnQuickRestart);
+        current!.updateSetOnConnect(resolveSetOnConnect(bike).patch);
         _rideMode?.updateBike(bike);
         if (!_disposed &&
             !_discoveryPaused &&

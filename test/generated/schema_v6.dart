@@ -200,24 +200,12 @@ class BikePreferences extends Table with TableInfo {
         requiredDuringInsert: true,
         $customConstraints: 'NOT NULL',
       );
-  late final GeneratedColumn<int>
-  streetLegalOnQuickRestart = GeneratedColumn<int>(
-    'street_legal_on_quick_restart',
-    aliasedName,
-    false,
-    type: DriftSqlType.int,
-    requiredDuringInsert: false,
-    $customConstraints:
-        'NOT NULL DEFAULT 0 CHECK (street_legal_on_quick_restart IN (0, 1))',
-    defaultValue: const CustomExpression('0'),
-  );
   @override
   List<GeneratedColumn> get $columns => [
     deviceId,
     setOnConnect,
     backgroundRequested,
     backgroundConsentVersion,
-    streetLegalOnQuickRestart,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
