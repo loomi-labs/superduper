@@ -79,5 +79,6 @@ US offers wires 0 to 3, EU offers 4 to 7, CH offers 7 and the custom modes. A V2
 
 - Version control is jj (colocated with git).
 - These files use CRLF line endings: `Makefile`, `analysis_options.yaml`, `pubspec.yaml`, `lib/src/features/add_bike/add_bike_controller.dart`, `lib/src/features/bike_control/bike_control_page.dart`, `lib/src/features/bike_settings/bike_settings_page.dart`, `lib/src/features/hardware_test/bike_hardware_test_controller.dart`, `test/widget/foreground_workflow_test.dart`. `README.md` has mixed line endings. Keep the line endings of each file; new files use LF.
-- `docs/superpowers/` holds local plans. `.git/info/exclude` excludes it from version control.
+- `plans/` holds the plans for work that is not finished, one folder per topic (`plans/<n>-<topic>/plan.md`). `plans/README.md` gives the rules. `.git/info/exclude` excludes it from version control.
+- `docs/superpowers/` holds older local plans and specs. `.git/info/exclude` excludes it from version control.
 - `docs/` also holds upstream's design notes and a separate Hugo site (`make docs`).
