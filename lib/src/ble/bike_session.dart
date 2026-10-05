@@ -425,6 +425,11 @@ final class BikeSession {
       }
       return;
     }
+    if (!wasEnabled) {
+      // Samples and losses from the time of the off preference are no basis
+      // for an off time.
+      _offTimeMeter.clear();
+    }
     if (!wasEnabled && _hasObservedConnection) {
       // The counter starts at once, so the next restart has a sample.
       final generation = _generation;
@@ -1033,10 +1038,10 @@ final class BikeSession {
     final gap = _offTimeMeter.takeGap(readAt);
     _lastSessionMarker = marker;
     if (marker == null) {
-      // Without a record the bike may have kept running: the off time is
-      // unknown, and an unknown off time is not quick.
+      // Without a record the off time is unknown, and an unknown off time is
+      // not quick. The lock keeps its state from memory: a running lock stays
+      // on, and no lock starts.
       _dropoutOnTime = null;
-      _streetLegalLocked.value = false;
       return observed;
     }
     _dropoutOnTime = marker == BikeGatt.sessionAppliedMarker

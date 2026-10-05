@@ -93,7 +93,7 @@ A V2 bike sends no speed samples. It has no parked fallback, only the quick rest
 
 A mode choice waits for a parked write that runs, so the choice always comes last and ends the lock that the write starts.
 
-At each connect, a marker read that fails twice, or a record shorter than 6 bytes, gives an unknown off time: the lock stays off. The meter keeps the counter samples from before the first link loss until the session takes a gap.
+At each connect, a marker read that fails twice, or a record shorter than 6 bytes, gives an unknown off time: the lock keeps its state from memory (a running lock stays on and no mode is written, else it stays off). Turning the preference on clears the meter. The meter keeps the counter samples from before the first link loss until the session takes a gap.
 
 Limit: only a connected app can measure the off time. On iOS the lock works only while the app is in the foreground.
 

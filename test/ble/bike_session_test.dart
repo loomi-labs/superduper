@@ -1758,6 +1758,69 @@ void main() {
       expect(session.lastSessionMarker, isNull);
     });
 
+    test(
+      'a failed marker read keeps a running lock and writes no mode',
+      () async {
+        await connectLocking(marker: BikeGatt.sessionLockedMarker);
+        expect(session.streetLegalLocked.value, isTrue);
+        final before = _configurationWrites(connection).length;
+        connection
+          ..auxiliaryCounter = 1002
+          ..readFrames.add(v1StateFrame(mode: 7))
+          ..emitState(BikeConnectionState.disconnected);
+        await Future<void>.delayed(Duration.zero);
+        now = now.add(const Duration(seconds: 5));
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+
+        expect(session.state.value, isA<SessionReady>());
+        expect(session.streetLegalLocked.value, isTrue);
+        final writes = _configurationWrites(connection).sublist(before);
+        expect(writes, isNotEmpty);
+        expect(writes.map((w) => w.value[4]), everyElement(7));
+        expect(
+          writes.map((w) => w.value[5]),
+          everyElement(BikeGatt.sessionLockedMarker),
+        );
+      },
+    );
+
+    test('turning the preference on forgets an earlier dropout', () async {
+      now = DateTime(2026, 10, 3, 12);
+      connection.readFrames.add(v1StateFrame(mode: 7));
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1, assist: 3),
+        readDiagnosticsOnConnect: false,
+        reconnectDelays: const [Duration(milliseconds: 10)],
+        streetLegalStockMode: 4,
+        counterSampleTimeout: const Duration(milliseconds: 20),
+        clock: () => now,
+      );
+      await session.connect();
+      connection.emitNotification([2, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+      await Future<void>.delayed(Duration.zero);
+
+      // A dropout with the preference off.
+      connection
+        ..readFrames.add(v1StateFrame(mode: 7))
+        ..emitState(BikeConnectionState.disconnected);
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(hours: 3));
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(session.state.value, isA<SessionReady>());
+
+      connection.auxiliaryCounter = 1000;
+      session.updateStreetLegalOnQuickRestart(true, stockMode: 4);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      await reconnect(
+        offline: const Duration(seconds: 20),
+        marker: 0,
+        counter: 1008,
+      );
+
+      expect(session.streetLegalLocked.value, isTrue);
+    });
+
     test('a marker read that fails once is read again', () async {
       await connectLocking();
       connection

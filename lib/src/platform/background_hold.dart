@@ -102,7 +102,13 @@ final class AndroidForegroundServiceHold implements BackgroundHoldGateway {
     if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
       await FlutterForegroundTask.requestIgnoreBatteryOptimization();
     }
-    if (!await FlutterForegroundTask.isRunningService) {
+    if (await FlutterForegroundTask.isRunningService) {
+      // The service of an earlier start runs: its title follows the reason.
+      await FlutterForegroundTask.updateService(
+        notificationTitle: _title(speedLimit),
+        notificationText: _text,
+      );
+    } else {
       final result = await FlutterForegroundTask.startService(
         serviceTypes: [ForegroundServiceTypes.connectedDevice],
         serviceId: serviceId,
