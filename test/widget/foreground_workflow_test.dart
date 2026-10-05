@@ -212,9 +212,14 @@ void main() {
       'Daily Rider',
     );
     expect(find.text('Saved'), findsOneWidget);
-    expect(find.text('V1'), findsOneWidget);
-    await tester.ensureVisible(find.text('V1'));
+    // The street-legal settings push the protocol section down.
+    await tester.scrollUntilVisible(
+      find.text('V1'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.pumpAndSettle();
+    expect(find.text('V1'), findsOneWidget);
     await tester.tap(find.text('V1'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('V2').last);
@@ -276,6 +281,119 @@ void main() {
     expect(saved.customModes.single.limitKmh, 25);
     expect(saved.customModes.single.name, '16 mph');
     expect(find.text('16 mph'), findsWidgets);
+  });
+
+  testWidgets('bike settings save the street-legal switch and the stock mode', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fixture = await _pumpReadyBikeApp(tester, 'street_legal');
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    final streetLegal = find.byKey(const Key('street-legal-quick-restart'));
+    await tester.ensureVisible(streetLegal);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(streetLegal).value, isFalse);
+    // The picker offers all native wires. A US bike defaults to ECO.
+    for (var wire = 0; wire <= 7; wire++) {
+      expect(find.byKey(ValueKey('stock-mode-$wire')), findsOneWidget);
+    }
+    expect(
+      tester.widget<ChoiceChip>(find.byKey(const ValueKey('stock-mode-0'))).selected,
+      isTrue,
+    );
+
+    await tester.tap(streetLegal);
+    await tester.pump();
+    await tester.runAsync(
+      () => _waitUntilAsync(
+        () async => fixture.services.activeBikeCoordinator.bikes
+            .peek()
+            .single
+            .streetLegalOnQuickRestart,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final epac = find.byKey(const ValueKey('stock-mode-4'));
+    await tester.ensureVisible(epac);
+    await tester.pumpAndSettle();
+    await tester.tap(epac);
+    await tester.pump();
+    await tester.runAsync(
+      () => _waitUntilAsync(
+        () async =>
+            fixture.services.activeBikeCoordinator.bikes
+                .peek()
+                .single
+                .streetLegalStockMode ==
+            4,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<ChoiceChip>(epac).selected, isTrue);
+  });
+
+  testWidgets('bike settings say that iOS needs the app in the foreground', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await _pumpReadyBikeApp(tester, 'street_legal_ios');
+    const note =
+        'On iOS, the street-legal lock works only while the app is in the foreground.';
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text(note),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    expect(find.text(note), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('ride controls show the parked timer and the lock', (
+    tester,
+  ) async {
+    final fixture = await _pumpReadyBikeApp(tester, 'street_legal_status');
+
+    await tester.runAsync(() async {
+      await fixture.services.bikeRepository.setStreetLegalOnQuickRestart(
+        'active-bike',
+        true,
+      );
+      await _waitUntilAsync(
+        () async => fixture.services.activeBikeCoordinator.bikes
+            .peek()
+            .single
+            .streetLegalOnQuickRestart,
+      );
+    });
+    await tester.pumpAndSettle();
+    // The bike rides OFFROAD (wire 3), not its stock mode ECO (wire 0).
+    expect(
+      find.textContaining('Stock mode in 10 minutes when parked'),
+      findsOneWidget,
+    );
+
+    await tester.runAsync(() async {
+      final status =
+          fixture.services.activeBikeCoordinator.state.peek()
+              as ActiveBikeSessionStatus;
+      await status.session.startStreetLegalLock();
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text('Street-legal lock: stock mode'), findsOneWidget);
+    expect(find.textContaining('when parked'), findsNothing);
   });
 
   testWidgets('Add Bike explains a blocked Bluetooth permission', (

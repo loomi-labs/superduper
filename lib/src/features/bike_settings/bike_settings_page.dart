@@ -372,6 +372,46 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
     );
   }
 
+  /// All native wires of the protocol, not only the wires of the region:
+  /// on CH the region offers only wire 7, but EPAC must be a stock mode.
+  Widget _buildStockModePicker(SavedBike saved, String deviceId) {
+    final stock = resolveStockMode(saved);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final wire in BikeControlValues.modesFor(saved.bike.protocol))
+          ChoiceChip(
+            key: ValueKey('stock-mode-$wire'),
+            label: Text(_stockModeLabel(saved, wire)),
+            selected: wire == stock,
+            onSelected: _changingSetOnConnect
+                ? null
+                : (_) => unawaited(
+                    _changeSetOnConnect(
+                      () => _services.bikeRepository.setStreetLegalStockMode(
+                        deviceId,
+                        wire,
+                      ),
+                    ),
+                  ),
+          ),
+      ],
+    );
+  }
+
+  /// The profile name and the limit from the wire table. No legal promise.
+  String _stockModeLabel(SavedBike saved, int wire) {
+    if (saved.bike.protocol == BikeProtocolVersion.v2) {
+      return 'Mode ${wire + 1}';
+    }
+    final profile = profileByWire(wire);
+    if (profile.unlimited) {
+      return '${profile.name} ${wire < BikeRegion.v1BankSize ? 'US' : 'EU'}';
+    }
+    return '${profile.name} ${profile.label(saved.bike.region)}';
+  }
+
   List<Widget> _buildSetOnConnectSettings(SavedBike saved, String deviceId) {
     return [
       const SectionHeader(eyebrow: 'Automation', title: 'Set on connect'),
@@ -521,6 +561,51 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                   ),
                 ),
               ),
+            const Divider(height: 1),
+            SwitchListTile(
+              key: const Key('street-legal-quick-restart'),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 8,
+              ),
+              secondary: const Icon(Icons.restart_alt_rounded),
+              title: const Text('Street-legal on quick restart'),
+              subtitle: const Text(
+                'Turn the bike off and on within 10 seconds and the bike goes '
+                'to its stock mode. After 10 minutes parked, it goes to its '
+                'stock mode too.',
+              ),
+              value: saved.streetLegalOnQuickRestart,
+              onChanged: _changingSetOnConnect
+                  ? null
+                  : (enabled) => unawaited(
+                      _changeSetOnConnect(
+                        () => _services.bikeRepository
+                            .setStreetLegalOnQuickRestart(deviceId, enabled),
+                      ),
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Stock mode',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  _buildStockModePicker(saved, deviceId),
+                  if (defaultTargetPlatform == TargetPlatform.iOS) ...[
+                    const SizedBox(height: 12),
+                    const Text(
+                      'On iOS, the street-legal lock works only while the '
+                      'app is in the foreground.',
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ],
         ),
       ),

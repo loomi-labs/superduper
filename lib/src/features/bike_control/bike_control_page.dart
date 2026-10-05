@@ -201,14 +201,17 @@ final class _BikeControlPageState extends State<BikeControlPage> {
               : BikeValueSelector(
                   values: BikeControlValues.modesFor(BikeProtocolVersion.v2),
                   selected: configuration?.mode,
-                  enabled: canControl,
+                  enabled: canControl && rideMode != null,
                   semanticLabel: 'Mode',
                   label: (mode) => '${mode + 1}',
-                  onChanged: (mode) =>
-                      _runCommand(() => session!.setMode(mode)),
+                  // The controller ends the lock and restarts the parked timer.
+                  onChanged: (mode) => _runCommand(() async {
+                    await rideMode!.select(NativeRideMode(mode));
+                    return session!.observed.peek()!;
+                  }),
                 ),
           setOnConnectValue: _setOnConnectModeLabel(bike),
-          footnote: _modeFootnote(bike, rideMode),
+          footnote: _modeFootnote(bike, session, rideMode),
         ),
         const SizedBox(height: 14),
         _SettingSection(
@@ -248,16 +251,30 @@ final class _BikeControlPageState extends State<BikeControlPage> {
           bike.customModes.where((mode) => mode.id == id).firstOrNull?.name,
       };
 
-  String? _modeFootnote(SavedBike bike, RideModeController? rideMode) {
+  String? _modeFootnote(
+    SavedBike bike,
+    BikeSession? session,
+    RideModeController? rideMode,
+  ) {
+    if (session?.streetLegalLocked.value ?? false) {
+      return 'Street-legal lock: stock mode';
+    }
+    final parked = switch (rideMode?.parkedMinutesLeft.value) {
+      null => null,
+      1 => 'Stock mode in 1 minute when parked',
+      final minutes => 'Stock mode in $minutes minutes when parked',
+    };
     final selection = rideMode?.selection.value;
-    if (selection is! CustomRideMode ||
-        !isDynamicSelection(selection, bike.bike.region)) {
-      return null;
-    }
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return 'Speed switching stops when the app is in the background on iOS.';
-    }
-    return 'Superduper CH keeps the link alive in the background to hold this limit.';
+    final switching =
+        selection is CustomRideMode &&
+        isDynamicSelection(selection, bike.bike.region);
+    final speedNote = !switching
+        ? null
+        : defaultTargetPlatform == TargetPlatform.iOS
+        ? 'Speed switching stops when the app is in the background on iOS.'
+        : 'Superduper CH keeps the link alive in the background to hold this limit.';
+    final lines = [?parked, ?speedNote];
+    return lines.isEmpty ? null : lines.join('\n');
   }
 
   Future<void> _runCommand(Future<BikeConfiguration> Function() command) async {

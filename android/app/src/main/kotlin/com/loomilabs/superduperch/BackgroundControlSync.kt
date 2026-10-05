@@ -69,7 +69,9 @@ internal class BackgroundControlSync(command: ByteArray) {
             stage = Stage.SELECT_CONTROL
             return Action.Select(markedCommand.copyOfRange(0, 2))
         }
-        if (verifying || value[5] == 1.toByte()) {
+        // 1: the app already wrote in this power cycle. 2: the bike holds a
+        // street-legal lock. Only a clear marker (a fresh power-up) is synced.
+        if (verifying || value[5] != 0.toByte()) {
             stage = Stage.FINISHED
             return Action.Complete(applied = verifying)
         }

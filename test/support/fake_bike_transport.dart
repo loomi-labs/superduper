@@ -13,6 +13,13 @@ List<int> v1StateFrame({bool light = false, int mode = 0, int assist = 0}) => [
   mode,
 ];
 
+/// A control-history record (`00 d1`). Marker 0 and mode 0: the bike
+/// restarted after the last app write.
+List<int> v1HistoryFrame({
+  int marker = BikeGatt.sessionAppliedMarker,
+  int mode = 0,
+}) => [0, 0xd1, 0, 0, mode, marker, 0, 0, 0, 0];
+
 final class FakeBluetoothPermissionGateway
     implements BluetoothPermissionGateway {
   BluetoothPermissionState state = BluetoothPermissionState.granted;
@@ -178,6 +185,13 @@ final class FakeBikeConnection implements BikeConnection {
       StreamController.broadcast();
   final StreamController<List<int>> _notifications =
       StreamController.broadcast();
+  final StreamController<List<int>> _auxiliaryNotifications =
+      StreamController.broadcast();
+
+  /// The value the fake bike notifies when the app enables the auxiliary
+  /// counter. Null: the bike sends no counter sample.
+  int? auxiliaryCounter;
+  bool auxiliaryNotificationsEnabled = false;
   final List<List<int>> readFrames = [];
   final List<CharacteristicWrite> writes = [];
   final List<CharacteristicRead> reads = [];
@@ -267,6 +281,7 @@ final class FakeBikeConnection implements BikeConnection {
       await _operate(() async {
         authenticated = false;
         notificationsEnabled = false;
+        auxiliaryNotificationsEnabled = false;
         if (emitInitialDisconnectedState) {
           _states.add(BikeConnectionState.disconnected);
         }
@@ -455,6 +470,9 @@ final class FakeBikeConnection implements BikeConnection {
     required String serviceUuid,
     required String characteristicUuid,
   }) {
+    if (characteristicUuid == BikeGatt.auxiliaryCounter) {
+      return _auxiliaryNotifications.stream;
+    }
     return _notifications.stream;
   }
 
@@ -468,9 +486,25 @@ final class FakeBikeConnection implements BikeConnection {
       if (!authenticated) {
         throw StateError('The fake bike is not authenticated.');
       }
+      if (characteristicUuid == BikeGatt.auxiliaryCounter) {
+        auxiliaryNotificationsEnabled = enabled;
+        final counter = auxiliaryCounter;
+        if (enabled && counter != null) {
+          emitAuxiliaryCounter(counter);
+        }
+        return;
+      }
       notificationsEnabled = enabled;
       notificationChanges++;
     });
+  }
+
+  void emitAuxiliaryCounter(int value) {
+    if (auxiliaryNotificationsEnabled) {
+      _auxiliaryNotifications.add(
+        List<int>.unmodifiable([value & 0xff, (value >> 8) & 0xff, 0]),
+      );
+    }
   }
 
   void emitNotification(List<int> value) {
@@ -489,6 +523,7 @@ final class FakeBikeConnection implements BikeConnection {
     await disconnectGate?.future;
     authenticated = false;
     notificationsEnabled = false;
+    auxiliaryNotificationsEnabled = false;
     _states.add(BikeConnectionState.disconnected);
   }
 
@@ -501,6 +536,9 @@ final class FakeBikeConnection implements BikeConnection {
     }
     if (!_notifications.isClosed) {
       await _notifications.close();
+    }
+    if (!_auxiliaryNotifications.isClosed) {
+      await _auxiliaryNotifications.close();
     }
   }
 

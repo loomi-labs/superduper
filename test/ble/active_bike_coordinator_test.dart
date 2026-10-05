@@ -631,6 +631,40 @@ void main() {
       expect(state.sessionState, isA<SessionReady>());
     });
 
+    test(
+      'the street-legal preference holds the background on a native mode',
+      () async {
+        await bikes.addBike(deviceId: 'eu', region: BikeRegion.eu);
+        await bikes.setStreetLegalOnQuickRestart('eu', true);
+        await startActive('eu', bootWire: 4);
+        await Future<void>.delayed(Duration.zero);
+        expect(hold.held, isTrue);
+
+        await coordinator.setForeground(false);
+
+        final state = coordinator.state.value as ActiveBikeSessionStatus;
+        expect(state.sessionState, isA<SessionReady>());
+      },
+    );
+
+    test(
+      'a preference change reaches the session and the controller',
+      () async {
+        await bikes.addBike(deviceId: 'eu', region: BikeRegion.eu);
+        await startActive('eu', bootWire: 4);
+        await Future<void>.delayed(Duration.zero);
+        expect(hold.held, isFalse);
+
+        await bikes.setStreetLegalOnQuickRestart('eu', true);
+        await _waitUntil(() => hold.held);
+
+        // The session subscribes to the counter at once.
+        await _waitUntil(
+          () => connections['eu']!.last.auxiliaryNotificationsEnabled,
+        );
+      },
+    );
+
     test('manual disconnect releases the hold', () async {
       await addChBike();
       await startActive('ch', bootWire: 7);

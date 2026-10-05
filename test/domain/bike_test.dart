@@ -51,4 +51,50 @@ void main() {
       expect(() => BikeControlValues.validateAssist(5), throwsRangeError);
     });
   });
+  group('stock mode', () {
+    SavedBike saved({
+      BikeProtocolVersion protocol = BikeProtocolVersion.v1,
+      BikeRegion? region = BikeRegion.ch,
+      int? stockMode,
+    }) {
+      return SavedBike(
+        bike: Bike(
+          deviceId: 'bike',
+          displayName: 'Bike',
+          protocol: protocol,
+          region: region,
+          color: BikeColor.royalHorizon,
+          sortOrder: 0,
+          createdAt: DateTime(2026),
+          updatedAt: DateTime(2026),
+          lastConnectedAt: null,
+        ),
+        setOnConnect: const SetOnConnect(),
+        streetLegalStockMode: stockMode,
+      );
+    }
+
+    test('the default follows the region and the protocol', () {
+      expect(defaultStockMode(BikeRegion.eu, BikeProtocolVersion.v1), 4);
+      expect(defaultStockMode(BikeRegion.ch, BikeProtocolVersion.v1), 4);
+      expect(defaultStockMode(BikeRegion.us, BikeProtocolVersion.v1), 0);
+      expect(defaultStockMode(null, BikeProtocolVersion.v1), 0);
+      expect(defaultStockMode(null, BikeProtocolVersion.v2), 0);
+    });
+
+    test('a stored stock mode wins over the default', () {
+      expect(resolveStockMode(saved(stockMode: 5)), 5);
+      expect(resolveStockMode(saved()), 4);
+      expect(resolveStockMode(saved(region: BikeRegion.us)), 0);
+    });
+
+    test('a stored wire that the protocol does not offer gives the default', () {
+      expect(
+        resolveStockMode(
+          saved(protocol: BikeProtocolVersion.v2, region: null, stockMode: 6),
+        ),
+        0,
+      );
+    });
+  });
 }

@@ -481,4 +481,39 @@ void main() {
       expect(BikeProtocol.v2.decodeSpeedKmh([2, 1, 0xc4, 0x09]), isNull);
     });
   });
+  group('street-legal marker', () {
+    test('encodes the marker in byte 5', () {
+      expect(
+        BikeProtocol.v1.encodeConfiguration(
+          const BikeConfiguration(light: false, mode: 4, assist: 0),
+          marker: BikeGatt.sessionLockedMarker,
+        ),
+        [0, 0xd1, 0, 0, 4, 2, 0, 0, 0, 0],
+      );
+      expect(
+        BikeProtocol.v2.encodeConfiguration(
+          const BikeConfiguration(light: true, mode: 0, assist: 1),
+          marker: BikeGatt.sessionLockedMarker,
+        ),
+        [0, 0xc1, 1, 1, 0, 2, 0, 0, 0, 0],
+      );
+    });
+
+    test('the control-history selector follows the protocol', () {
+      expect(BikeProtocol.v1.controlHistorySelector, [0x00, 0xd1]);
+      expect(BikeProtocol.v2.controlHistorySelector, [0x00, 0xc1]);
+    });
+  });
+
+  group('auxiliary counter', () {
+    test('decodes bytes 0 and 1 little-endian and ignores byte 2', () {
+      expect(BikeProtocol.decodeAuxiliaryCounter([0x95, 0x27, 0x07]), 10133);
+      expect(BikeProtocol.decodeAuxiliaryCounter([0xff, 0xff]), 65535);
+    });
+
+    test('ignores a short frame', () {
+      expect(BikeProtocol.decodeAuxiliaryCounter([0x01]), isNull);
+      expect(BikeProtocol.decodeAuxiliaryCounter(const []), isNull);
+    });
+  });
 }

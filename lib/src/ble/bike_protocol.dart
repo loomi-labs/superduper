@@ -12,6 +12,16 @@ abstract final class BikeGatt {
   // control write so background reconnects preserve subsequent rider changes.
   static const sessionAppliedMarker = 1;
 
+  // The same byte holds the street-legal lock: while the lock is on, each
+  // control write carries this marker, so the lock survives an app restart.
+  // The bike clears it at the next power-up.
+  static const sessionLockedMarker = 2;
+
+  // The auxiliary counter adds 1 each second while the bike is on. It
+  // notifies without authentication. The app uses it to measure the off time.
+  static const auxiliaryService = '00001580-0000-1000-8000-00805f9b34fb';
+  static const auxiliaryCounter = '00001581-0000-1000-8000-00805f9b34fb';
+
   static const metricsService = '00001554-1212-efde-1523-785feabcd123';
   static const telemetry = '0000155e-1212-efde-1523-785feabcd123';
   static const stateRegister = '0000155f-1212-efde-1523-785feabcd123';
@@ -33,6 +43,8 @@ abstract final class BikeGatt {
   static const v1OdometerSelector = <int>[0x02, 0x02];
   static const v2ControlSelector = <int>[0x00, 0xd0];
   static const v2ModeSelector = <int>[0x00, 0xd9];
+  static const v1ControlHistorySelector = <int>[0x00, 0xd1];
+  static const v2ControlHistorySelector = <int>[0x00, 0xc1];
   static const rideDataSelector = <int>[0x02, 0x03];
   static const rideDataRequest = <int>[0x02, 0x03, 0, 0, 0, 0, 0, 0, 0, 0];
   static const speedPacketId = <int>[0x02, 0x01];
@@ -101,7 +113,13 @@ abstract class BikeProtocolDefinition {
     return patch?.applyTo(current);
   }
 
-  List<int> encodeConfiguration(BikeConfiguration configuration);
+  List<int> encodeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  });
+
+  /// The history record that holds the last control write of the app.
+  List<int> get controlHistorySelector;
 
   /// Speed from a telemetry notification, or null for any other packet.
   double? decodeSpeedKmh(List<int> packet) => null;
@@ -111,12 +129,15 @@ abstract class BikeProtocolDefinition {
   /// reconnect, so callers repeat this when samples stop.
   Future<void> requestRideData() async {}
 
-  Future<void> writeConfiguration(BikeConfiguration configuration) {
+  Future<void> writeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  }) {
     return _run(
       _bike.writeCharacteristic(
         serviceUuid: BikeGatt.metricsService,
         characteristicUuid: BikeGatt.stateRegister,
-        value: encodeConfiguration(configuration),
+        value: encodeConfiguration(configuration, marker: marker),
       ),
       'Writing bike settings',
     );
@@ -257,7 +278,13 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
   }
 
   @override
-  List<int> encodeConfiguration(BikeConfiguration configuration) {
+  List<int> get controlHistorySelector => BikeGatt.v1ControlHistorySelector;
+
+  @override
+  List<int> encodeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  }) {
     BikeProtocol._validateConfiguration(configuration, BikeProtocolVersion.v1);
     return [
       0,
@@ -265,7 +292,7 @@ final class V1BikeProtocol extends BikeProtocolDefinition {
       if (configuration.light) 1 else 0,
       configuration.assist,
       configuration.mode,
-      BikeGatt.sessionAppliedMarker,
+      marker,
       0,
       0,
       0,
@@ -374,7 +401,13 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
   }
 
   @override
-  List<int> encodeConfiguration(BikeConfiguration configuration) {
+  List<int> get controlHistorySelector => BikeGatt.v2ControlHistorySelector;
+
+  @override
+  List<int> encodeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  }) {
     BikeProtocol._validateConfiguration(configuration, BikeProtocolVersion.v2);
     return [
       0,
@@ -382,7 +415,7 @@ final class V2BikeProtocol extends BikeProtocolDefinition {
       if (configuration.light) 1 else 0,
       configuration.assist,
       configuration.mode,
-      BikeGatt.sessionAppliedMarker,
+      marker,
       0,
       0,
       0,
@@ -482,6 +515,15 @@ abstract final class BikeProtocol {
     _validateAuthenticationBytes(challenge, 'challenge');
     _validateAuthenticationBytes(key, 'key');
     return List.unmodifiable(sha1.convert([...challenge, ...key]).bytes);
+  }
+
+  /// The auxiliary counter: bytes 0 and 1, little-endian. Byte 2 is not
+  /// used. Null for a short frame.
+  static int? decodeAuxiliaryCounter(List<int> packet) {
+    if (packet.length < 2) {
+      return null;
+    }
+    return _readLittleEndian(packet, 0, 2);
   }
 
   static String? decodeModuleSerial(List<int>? manufacturerData) {

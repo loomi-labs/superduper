@@ -24,6 +24,10 @@ void main() {
     bool readDiagnosticsOnConnect = true,
     Duration? pollInterval,
     BikeProtocolDefinition? connectedProtocol,
+    bool streetLegalOnQuickRestart = false,
+    int streetLegalStockMode = 0,
+    Duration counterSampleTimeout = const Duration(seconds: 3),
+    DateTime Function()? clock,
   }) {
     return BikeSession(
       connection: connection,
@@ -37,6 +41,10 @@ void main() {
       pollInterval: pollInterval,
       reconnectDelays: reconnectDelays,
       connectedProtocol: connectedProtocol,
+      streetLegalOnQuickRestart: streetLegalOnQuickRestart,
+      streetLegalStockMode: streetLegalStockMode,
+      counterSampleTimeout: counterSampleTimeout,
+      clock: clock,
     );
   }
 
@@ -1484,6 +1492,311 @@ void main() {
       isEmpty,
     );
   });
+
+  group('street-legal lock', () {
+    late DateTime now;
+
+    Future<void> connectLocking({
+      int bootWire = 7,
+      int marker = BikeGatt.sessionAppliedMarker,
+      int? counter = 1000,
+    }) async {
+      now = DateTime(2026, 10, 3, 12);
+      connection
+        ..auxiliaryCounter = counter
+        ..readFrames.addAll([
+          v1StateFrame(mode: bootWire),
+          v1HistoryFrame(marker: marker, mode: bootWire),
+        ]);
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1, assist: 3),
+        readDiagnosticsOnConnect: false,
+        reconnectDelays: const [Duration(milliseconds: 10)],
+        streetLegalOnQuickRestart: true,
+        streetLegalStockMode: 4,
+        counterSampleTimeout: const Duration(milliseconds: 20),
+        clock: () => now,
+      );
+      await session.connect();
+      // The counter sample of the first connection arrives.
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    /// The link drops, [offline] passes on the phone clock, and the bike
+    /// connects again with [counter] and the control-history [marker].
+    /// Returns the control writes of the new connection.
+    Future<List<CharacteristicWrite>> reconnect({
+      required Duration offline,
+      required int marker,
+      int? counter,
+      int bootWire = 7,
+    }) async {
+      final before = _configurationWrites(connection).length;
+      connection
+        ..auxiliaryCounter = counter
+        ..readFrames.addAll([
+          v1StateFrame(mode: bootWire),
+          v1HistoryFrame(marker: marker, mode: bootWire),
+        ])
+        ..emitState(BikeConnectionState.disconnected);
+      // The fake reports the loss one event turn later (Part B defect 5).
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(offline);
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(session.state.value, isA<SessionReady>());
+      return _configurationWrites(connection).sublist(before);
+    }
+
+    test('the preference off reads no marker and starts no counter', () async {
+      connection.readFrames.add(v1StateFrame(mode: 7));
+      session = createSession(
+        setOnConnect: const BikeControlPatch(mode: 1),
+        readDiagnosticsOnConnect: false,
+      );
+
+      await session.connect();
+
+      expect(
+        connection.writes.any(
+          (w) =>
+              w.characteristicUuid == BikeGatt.registerSelector &&
+              w.value[1] == 0xd1,
+        ),
+        isFalse,
+      );
+      expect(connection.auxiliaryNotificationsEnabled, isFalse);
+      expect(
+        _configurationWrites(connection).map((w) => w.value[5]),
+        everyElement(BikeGatt.sessionAppliedMarker),
+      );
+      expect(session.observed.value?.mode, 1);
+    });
+
+    test('a dropout never starts the lock', () async {
+      await connectLocking();
+
+      final writes = await reconnect(
+        offline: const Duration(seconds: 3),
+        marker: BikeGatt.sessionAppliedMarker,
+        counter: 1003,
+        bootWire: 1,
+      );
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(session.observed.value?.mode, 1);
+      expect(
+        writes.map((w) => w.value[5]),
+        everyElement(BikeGatt.sessionAppliedMarker),
+      );
+    });
+
+    test('a quick restart starts the lock and writes the stock mode', () async {
+      await connectLocking();
+
+      // Probe row 4: a phone gap of 20 s, of which the bike was on for 8 s.
+      final writes = await reconnect(
+        offline: const Duration(seconds: 20),
+        marker: 0,
+        counter: 1008,
+      );
+
+      expect(session.streetLegalLocked.value, isTrue);
+      expect(session.observed.value?.mode, 4);
+      expect(session.observed.value?.assist, 3);
+      expect(writes.map((w) => w.value[4]), everyElement(4));
+      expect(
+        writes.map((w) => w.value[5]),
+        everyElement(BikeGatt.sessionLockedMarker),
+      );
+    });
+
+    test(
+      'a quick restart writes no mode when the bike reports the stock mode',
+      () async {
+        await connectLocking();
+
+        final writes = await reconnect(
+          offline: const Duration(seconds: 10),
+          marker: 0,
+          counter: 1003,
+          bootWire: 4,
+        );
+
+        expect(session.streetLegalLocked.value, isTrue);
+        expect(writes.map((w) => w.value[4]), everyElement(4));
+        expect(
+          writes.map((w) => w.value[5]),
+          everyElement(BikeGatt.sessionLockedMarker),
+        );
+      },
+    );
+
+    test('a dropout keeps the lock', () async {
+      await connectLocking();
+      await reconnect(
+        offline: const Duration(seconds: 10),
+        marker: 0,
+        counter: 1003,
+      );
+      expect(session.streetLegalLocked.value, isTrue);
+
+      final writes = await reconnect(
+        offline: const Duration(seconds: 3),
+        marker: BikeGatt.sessionLockedMarker,
+        counter: 1006,
+        bootWire: 4,
+      );
+
+      expect(session.streetLegalLocked.value, isTrue);
+      expect(session.observed.value?.mode, 4);
+      expect(writes.map((w) => w.value[4]), everyElement(4));
+      expect(
+        writes.map((w) => w.value[5]),
+        everyElement(BikeGatt.sessionLockedMarker),
+      );
+    });
+
+    test('a slow restart ends the lock', () async {
+      await connectLocking();
+      await reconnect(
+        offline: const Duration(seconds: 10),
+        marker: 0,
+        counter: 1003,
+      );
+      expect(session.streetLegalLocked.value, isTrue);
+
+      final writes = await reconnect(
+        offline: const Duration(seconds: 40),
+        marker: 0,
+        counter: 1006,
+      );
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(session.observed.value?.mode, 1);
+      expect(writes.last.value[5], BikeGatt.sessionAppliedMarker);
+    });
+
+    test('marker 2 keeps the lock after an app restart', () async {
+      await connectLocking(marker: BikeGatt.sessionLockedMarker);
+
+      expect(session.streetLegalLocked.value, isTrue);
+      expect(session.observed.value?.mode, 7);
+      final writes = _configurationWrites(connection);
+      expect(writes.map((w) => w.value[4]), everyElement(7));
+      expect(
+        writes.map((w) => w.value[5]),
+        everyElement(BikeGatt.sessionLockedMarker),
+      );
+    });
+
+    test('a mode choice after the lock writes marker 1', () async {
+      await connectLocking(marker: BikeGatt.sessionLockedMarker);
+
+      session.endStreetLegalLock();
+      await session.setMode(1);
+
+      final last = _configurationWrites(connection).last;
+      expect(last.value[4], 1);
+      expect(last.value[5], BikeGatt.sessionAppliedMarker);
+    });
+
+    test('a deliberate disconnect gives an unknown off time', () async {
+      await connectLocking();
+      await session.disconnect();
+      now = now.add(const Duration(seconds: 5));
+      connection
+        ..auxiliaryCounter = 1002
+        ..readFrames.addAll([v1StateFrame(mode: 7), v1HistoryFrame(marker: 0)]);
+
+      await session.connect();
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(session.observed.value?.mode, 1);
+    });
+
+    test(
+      'without the counter the phone clock decides with a 25-second window',
+      () async {
+        connection.missingCharacteristics.add(BikeGatt.auxiliaryCounter);
+        await connectLocking(counter: null);
+        connection.emitNotification([2, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        await Future<void>.delayed(Duration.zero);
+
+        await reconnect(offline: const Duration(seconds: 20), marker: 0);
+
+        expect(connection.auxiliaryNotificationsEnabled, isFalse);
+        expect(session.streetLegalLocked.value, isTrue);
+      },
+    );
+
+    test(
+      'without a counter sample after the reconnect the phone clock decides',
+      () async {
+        await connectLocking();
+
+        await reconnect(offline: const Duration(seconds: 22), marker: 0);
+
+        expect(session.streetLegalLocked.value, isTrue);
+      },
+    );
+
+    test('a bike with no history record counts as restarted', () async {
+      await connectLocking();
+      // Only the state frame is queued: each history read gets the retained
+      // state frame, so the marker read fails.
+      connection
+        ..auxiliaryCounter = 1002
+        ..readFrames.add(v1StateFrame(mode: 7))
+        ..emitState(BikeConnectionState.disconnected);
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(seconds: 5));
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.streetLegalLocked.value, isTrue);
+    });
+
+    test('a dropout reports the bike on time of the dropout', () async {
+      await connectLocking();
+
+      await reconnect(
+        offline: const Duration(seconds: 60),
+        marker: BikeGatt.sessionAppliedMarker,
+        counter: 1020,
+        bootWire: 1,
+      );
+
+      expect(session.lastSessionMarker, BikeGatt.sessionAppliedMarker);
+      expect(session.dropoutOnTime, const Duration(seconds: 20));
+    });
+
+    test('startStreetLegalLock writes the stock mode with marker 2', () async {
+      await connectLocking();
+      expect(session.observed.value?.mode, 1);
+
+      await session.startStreetLegalLock();
+
+      final last = _configurationWrites(connection).last;
+      expect(last.value[4], 4);
+      expect(last.value[5], BikeGatt.sessionLockedMarker);
+      expect(session.observed.value?.mode, 4);
+      expect(session.streetLegalLocked.value, isTrue);
+      expect(session.state.value, isA<SessionReady>());
+    });
+
+    test('a failed lock write leaves the lock off', () async {
+      await connectLocking();
+      connection.writeError = StateError('write failed');
+
+      await expectLater(
+        session.startStreetLegalLock(),
+        throwsA(isA<BikeSessionTransportFailure>()),
+      );
+
+      expect(session.streetLegalLocked.value, isFalse);
+      connection.writeError = null;
+    });
+  });
 }
 
 final class _FakeConnectedProtocol extends BikeProtocolDefinition {
@@ -1507,7 +1820,13 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
   BikeControlPatch? decodeTelemetry(List<int> packet) => null;
 
   @override
-  List<int> encodeConfiguration(BikeConfiguration configuration) {
+  List<int> get controlHistorySelector => BikeGatt.v1ControlHistorySelector;
+
+  @override
+  List<int> encodeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  }) {
     throw UnsupportedError('Writes are overridden in this test.');
   }
 
@@ -1533,7 +1852,10 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
   void reset() {}
 
   @override
-  Future<void> writeConfiguration(BikeConfiguration configuration) async {
+  Future<void> writeConfiguration(
+    BikeConfiguration configuration, {
+    int marker = BikeGatt.sessionAppliedMarker,
+  }) async {
     configurationWrites.add(configuration);
   }
 }

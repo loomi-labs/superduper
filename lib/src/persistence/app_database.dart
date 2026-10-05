@@ -105,6 +105,9 @@ class BikePreferences extends Table {
   TextColumn get setOnConnect => text().map(const SetOnConnectConverter())();
   BoolColumn get backgroundRequested => boolean()();
   IntColumn get backgroundConsentVersion => integer()();
+  BoolColumn get streetLegalOnQuickRestart =>
+      boolean().withDefault(const Constant(false))();
+  IntColumn get streetLegalStockMode => integer().nullable()();
 
   @override
   List<String> get customConstraints => [
@@ -337,7 +340,13 @@ final class AppDatabase extends _$AppDatabase {
         await migrator.alterTable(
           TableMigration(
             bikePreferences,
-            newColumns: [bikePreferences.setOnConnect],
+            // A table migration builds the current table. The columns that
+            // schema v7 adds do not exist yet, so they take their defaults.
+            newColumns: [
+              bikePreferences.setOnConnect,
+              bikePreferences.streetLegalOnQuickRestart,
+              bikePreferences.streetLegalStockMode,
+            ],
             columnTransformer: {
               bikePreferences.setOnConnect: const CustomExpression<String>(
                 "'{' || "
@@ -364,6 +373,19 @@ final class AppDatabase extends _$AppDatabase {
           await migrator.createTable(bikeCustomModes);
         });
       }
+      // Before v3 the table migration above already created the columns.
+      if (from < 7 && from >= 3) {
+        await transaction(() async {
+          await migrator.addColumn(
+            bikePreferences,
+            bikePreferences.streetLegalOnQuickRestart,
+          );
+          await migrator.addColumn(
+            bikePreferences,
+            bikePreferences.streetLegalStockMode,
+          );
+        });
+      }
     },
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
@@ -371,7 +393,7 @@ final class AppDatabase extends _$AppDatabase {
   );
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 7;
 
   Future<void> refreshBackgroundSyncPlan() {
     return transaction(() async {
@@ -399,9 +421,13 @@ final class AppDatabase extends _$AppDatabase {
       final bike = row.readTable(bikes);
       final preferences = row.readTable(bikePreferences);
       final moduleSerial = bike.moduleSerial;
+      // With the street-legal preference the foreground service owns the
+      // link. A native write with marker 1 hides a restart from the app
+      // session, so the native sync gets no plan.
       if (!preferences.backgroundRequested ||
           preferences.backgroundConsentVersion < backgroundSyncConsentVersion ||
           preferences.setOnConnect.isEmpty ||
+          preferences.streetLegalOnQuickRestart ||
           moduleSerial == null) {
         return;
       }

@@ -266,6 +266,29 @@ final class SetOnConnect {
   );
 }
 
+/// The stock mode that the street-legal lock writes when the rider did not
+/// choose one: EPAC (wire 4) on EU and CH, ECO (wire 0) on US, preset 0 on V2.
+int defaultStockMode(BikeRegion? region, BikeProtocolVersion protocol) {
+  return switch (protocol) {
+    BikeProtocolVersion.v2 => 0,
+    BikeProtocolVersion.v1 => switch (protocol.normalizeRegion(region)) {
+      BikeRegion.eu || BikeRegion.ch => 4,
+      _ => 0,
+    },
+  };
+}
+
+/// The stock mode of [bike]. A stored wire that the protocol does not offer
+/// (after a protocol change) gives the default.
+int resolveStockMode(SavedBike bike) {
+  final stored = bike.streetLegalStockMode;
+  if (stored != null &&
+      BikeControlValues.isValidMode(stored, bike.bike.protocol)) {
+    return stored;
+  }
+  return defaultStockMode(bike.bike.region, bike.bike.protocol);
+}
+
 const _unchanged = Object();
 
 enum BikeColor {
@@ -448,6 +471,8 @@ final class SavedBike {
     required this.bike,
     required this.setOnConnect,
     this.customModes = const [],
+    this.streetLegalOnQuickRestart = false,
+    this.streetLegalStockMode,
     this.backgroundPreference = const BackgroundPreference.defaults(),
     this.versions,
     this.odometer,
@@ -456,6 +481,14 @@ final class SavedBike {
   final Bike bike;
   final SetOnConnect setOnConnect;
   final List<CustomMode> customModes;
+
+  /// The street-legal lock: a quick restart or 10 minutes parked puts the
+  /// bike into its stock mode.
+  final bool streetLegalOnQuickRestart;
+
+  /// The stock mode of the lock. Null means the default of the region and
+  /// the protocol ([defaultStockMode]).
+  final int? streetLegalStockMode;
   final BackgroundPreference backgroundPreference;
   final CachedBikeVersions? versions;
   final CachedBikeOdometer? odometer;

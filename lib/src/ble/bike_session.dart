@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:signals/signals.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
+import 'package:superduper/src/ble/off_time_meter.dart';
 import 'package:superduper/src/domain/bike.dart';
 
 sealed class BikeSessionFailure implements Exception {
@@ -133,6 +134,9 @@ final class BikeSession {
       Duration(seconds: 10),
     ],
     BikeProtocolDefinition? connectedProtocol,
+    this._streetLegalOnQuickRestart = false,
+    this._streetLegalStockMode = 0,
+    this._counterSampleTimeout = const Duration(seconds: 3),
     DateTime Function()? clock,
   }) : _protocolVersion = protocol,
        _clock = clock ?? DateTime.now,
@@ -169,6 +173,7 @@ final class BikeSession {
         'Must not contain negative durations.',
       );
     }
+    BikeControlValues.validateMode(_streetLegalStockMode, protocol);
     BikeProtocol.authenticationResponse(
       challenge: List<int>.filled(20, 0),
       key: _authenticationKey,
@@ -200,6 +205,29 @@ final class BikeSession {
     null,
     options: const SignalOptions(name: 'bikeSession.speedKmh'),
   );
+  final Signal<bool> _streetLegalLocked = signal(
+    false,
+    options: const SignalOptions(name: 'bikeSession.streetLegalLocked'),
+  );
+  bool _streetLegalOnQuickRestart;
+  int _streetLegalStockMode;
+  final Duration _counterSampleTimeout;
+  late final OffTimeMeter _offTimeMeter = OffTimeMeter(clock: _clock);
+  StreamSubscription<List<int>>? _auxiliarySubscription;
+  Completer<void>? _counterSampleWaiter;
+  int? _lastSessionMarker;
+  Duration? _dropoutOnTime;
+
+  ReadonlySignal<bool> get streetLegalLocked => _streetLegalLocked.readonly();
+
+  /// The control-history marker of the last connect. Null when the
+  /// preference was off.
+  int? get lastSessionMarker => _lastSessionMarker;
+
+  /// The bike on time across the last dropout (marker 1), from the counter.
+  /// Null without counter samples.
+  Duration? get dropoutOnTime => _dropoutOnTime;
+
   DateTime? _lastSpeedAt;
   ReadonlySignal<double?> get speedKmh => _speedKmh.readonly();
   DateTime? get lastSpeedAt => _lastSpeedAt;
@@ -368,6 +396,92 @@ final class BikeSession {
     _nextConnectionIntent = settings;
   }
 
+  void updateStreetLegalOnQuickRestart(bool enabled, {required int stockMode}) {
+    if (_disposed) {
+      return;
+    }
+    BikeControlValues.validateMode(stockMode, _protocolVersion);
+    final wasEnabled = _streetLegalOnQuickRestart;
+    _streetLegalOnQuickRestart = enabled;
+    _streetLegalStockMode = stockMode;
+    if (!enabled) {
+      _streetLegalLocked.value = false;
+      _offTimeMeter.clear();
+      unawaited(_disableAuxiliaryCounter());
+      return;
+    }
+    if (!wasEnabled && _hasObservedConnection) {
+      // The counter starts at once, so the next restart has a sample.
+      final generation = _generation;
+      unawaited(
+        _commands
+            .add(() async {
+              if (_isCurrent(generation) && _hasObservedConnection) {
+                await _enableAuxiliaryCounter();
+              }
+            })
+            .catchError((Object _) {}),
+      );
+    }
+  }
+
+  /// The rider chose a mode: the lock ends, and the next write carries
+  /// marker 1.
+  void endStreetLegalLock() {
+    if (!_disposed) {
+      _streetLegalLocked.value = false;
+    }
+  }
+
+  /// Puts back a lock that a failed mode choice ended too early.
+  void restoreStreetLegalLock(bool locked) {
+    if (!_disposed) {
+      _streetLegalLocked.value = locked;
+    }
+  }
+
+  /// The parked fallback: writes the stock mode with marker 2. The lock
+  /// starts only when the bike accepted the write.
+  Future<void> startStreetLegalLock() {
+    _ensureNotDisposed();
+    if (!canChangeConfiguration) {
+      throw const BikeSessionNotReady();
+    }
+    final generation = _generation;
+    return _commands.add(() async {
+      if (!_isCurrent(generation) || !_hasObservedConnection) {
+        throw const BikeSessionDisposedFailure();
+      }
+      final current = _observed.peek();
+      if (current == null) {
+        throw const BikeSessionNotReady();
+      }
+      final target = current.copyWith(mode: _streetLegalStockMode);
+      _pollTimer?.cancel();
+      _state.value = const SessionSynchronizing(attempt: 1);
+      try {
+        await _protocol.writeConfiguration(
+          target,
+          marker: BikeGatt.sessionLockedMarker,
+        );
+        if (!_isCurrent(generation) || !_hasObservedConnection) {
+          throw const BikeSessionDisposedFailure();
+        }
+      } on Object catch (error) {
+        final failure = _asFailure(error);
+        if (_isConnectionFailure(failure)) {
+          _scheduleReconnect(failure);
+        } else if (failure is! BikeSessionDisposedFailure) {
+          _state.value = SessionFailed(failure: failure, canRetry: true);
+        }
+        throw failure;
+      }
+      _publishObserved(target);
+      _streetLegalLocked.value = true;
+      _markReady(target);
+    });
+  }
+
   Future<void> disconnect() async {
     _ensureNotDisposed();
     final wasManuallyPaused = _manualReconnectPaused;
@@ -449,6 +563,7 @@ final class BikeSession {
     _versions.dispose();
     _odometerMeters.dispose();
     _speedKmh.dispose();
+    _streetLegalLocked.dispose();
   }
 
   Future<void> _startConnect() {
@@ -516,6 +631,10 @@ final class BikeSession {
           return;
         }
         await _enableNotifications();
+        if (!_isCurrent(generation)) {
+          return;
+        }
+        await _enableAuxiliaryCounter();
         if (!_isCurrent(generation)) {
           return;
         }
@@ -701,6 +820,7 @@ final class BikeSession {
   }
 
   Future<void> _disableNotifications({required bool updatePeripheral}) async {
+    await _disableAuxiliaryCounter();
     final subscription = _telemetrySubscription;
     _telemetrySubscription = null;
     if (subscription == null) {
@@ -728,6 +848,7 @@ final class BikeSession {
     if (_disposed || _disconnectRequested || !_hasObservedConnection) {
       return;
     }
+    _offTimeMeter.recordNotification();
     try {
       final speed = _protocol.decodeSpeedKmh(packet);
       if (speed != null) {
@@ -754,6 +875,7 @@ final class BikeSession {
     if (_disposed) {
       return;
     }
+    _offTimeMeter.linkLost();
     _reconnectTimer?.cancel();
     _generation++;
     _hasObservedConnection = false;
@@ -761,6 +883,125 @@ final class BikeSession {
     _invalidateConfigurationState();
     unawaited(_disableNotifications(updatePeripheral: false));
     _scheduleReconnect(BikeSessionTransportFailure(error));
+  }
+
+  Future<void> _enableAuxiliaryCounter() async {
+    await _disableAuxiliaryCounter();
+    if (!_streetLegalOnQuickRestart ||
+        !connection.hasCharacteristic(
+          serviceUuid: BikeGatt.auxiliaryService,
+          characteristicUuid: BikeGatt.auxiliaryCounter,
+        )) {
+      return;
+    }
+    _auxiliarySubscription = connection
+        .characteristicNotifications(
+          serviceUuid: BikeGatt.auxiliaryService,
+          characteristicUuid: BikeGatt.auxiliaryCounter,
+        )
+        .listen(_onAuxiliaryCounter, onError: (Object _) {});
+    try {
+      await _timed(
+        connection.setCharacteristicNotifications(
+          serviceUuid: BikeGatt.auxiliaryService,
+          characteristicUuid: BikeGatt.auxiliaryCounter,
+          enabled: true,
+        ),
+        'Enabling the bike counter',
+      );
+    } on Object {
+      await _disableAuxiliaryCounter();
+    }
+  }
+
+  Future<void> _disableAuxiliaryCounter() async {
+    final cancelled = _auxiliarySubscription?.cancel();
+    _auxiliarySubscription = null;
+    await cancelled;
+  }
+
+  void _onAuxiliaryCounter(List<int> packet) {
+    if (_disposed || _disconnectRequested || !_hasObservedConnection) {
+      return;
+    }
+    final counter = BikeProtocol.decodeAuxiliaryCounter(packet);
+    if (counter == null) {
+      return;
+    }
+    _offTimeMeter.recordCounter(counter);
+    final waiter = _counterSampleWaiter;
+    if (waiter != null && !waiter.isCompleted) {
+      waiter.complete();
+    }
+  }
+
+  /// Waits at most [_counterSampleTimeout] for the first counter sample
+  /// after a loss.
+  Future<void> _awaitCounterSample() async {
+    if (_auxiliarySubscription == null || !_offTimeMeter.awaitsCounterSample) {
+      return;
+    }
+    final waiter = Completer<void>();
+    _counterSampleWaiter = waiter;
+    try {
+      await waiter.future.timeout(_counterSampleTimeout, onTimeout: () {});
+    } finally {
+      _counterSampleWaiter = null;
+    }
+  }
+
+  Future<int> _readSessionMarker() async {
+    try {
+      final record = await _protocol.readProtocolRecord(
+        _protocol.controlHistorySelector,
+        invalidateRetained: true,
+      );
+      return record[5];
+    } on BikeProtocolFailure {
+      return 0;
+    }
+  }
+
+  int get _writeMarker => _streetLegalLocked.peek()
+      ? BikeGatt.sessionLockedMarker
+      : BikeGatt.sessionAppliedMarker;
+
+  /// Reads the marker and decides the lock ("Decision at each connect").
+  /// Returns the configuration of the first write: the stock mode after a
+  /// quick restart, else the observed configuration.
+  Future<BikeConfiguration> _decideStreetLegalLock(
+    int generation,
+    BikeConfiguration observed,
+    DateTime readAt,
+  ) async {
+    final marker = await _readSessionMarker();
+    if (marker != BikeGatt.sessionLockedMarker) {
+      await _awaitCounterSample();
+    }
+    if (!_isCurrent(generation) || !_hasObservedConnection) {
+      throw const BikeSessionDisposedFailure();
+    }
+    final gap = _offTimeMeter.takeGap(readAt);
+    _lastSessionMarker = marker;
+    _dropoutOnTime = marker == BikeGatt.sessionAppliedMarker
+        ? gap?.onTime
+        : null;
+    switch (marker) {
+      case BikeGatt.sessionLockedMarker:
+        _streetLegalLocked.value = true;
+        return observed;
+      case BikeGatt.sessionAppliedMarker:
+        _streetLegalLocked.value = false;
+        return observed;
+      default:
+        // The bike restarted. Only a quick restart starts the lock. An
+        // unknown off time is not quick.
+        final quick = gap?.quickRestart ?? false;
+        _streetLegalLocked.value = quick;
+        return quick
+            ? observed.copyWith(mode: _streetLegalStockMode)
+            : observed;
+    }
   }
 
   BikeConfiguration _publishObserved(BikeConfiguration configuration) {
@@ -772,30 +1013,45 @@ final class BikeSession {
     final generation = _generation;
     _pollTimer?.cancel();
     final observed = await _readConfiguration();
+    final readAt = _clock();
     if (!_isCurrent(generation) || !_hasObservedConnection) {
       throw const BikeSessionDisposedFailure();
     }
     _publishObserved(observed);
 
+    var base = observed;
     if (initialConnection) {
-      await _protocol.writeConfiguration(observed);
+      if (_streetLegalOnQuickRestart) {
+        base = await _decideStreetLegalLock(generation, observed, readAt);
+      } else {
+        _lastSessionMarker = null;
+        _dropoutOnTime = null;
+      }
+      await _protocol.writeConfiguration(base, marker: _writeMarker);
       if (!_isCurrent(generation) || !_hasObservedConnection) {
         throw const BikeSessionDisposedFailure();
       }
+      if (base != observed) {
+        _publishObserved(base);
+      }
     }
 
-    final intent = _connectionIntent;
+    // During the lock the session writes the light and the assist values,
+    // not the set-on-connect mode.
+    final intent = _streetLegalLocked.peek()
+        ? _connectionIntent.copyWith(mode: null)
+        : _connectionIntent;
     if (intent.isEmpty) {
-      _markReady(observed);
+      _markReady(base);
       return;
     }
-    final target = intent.applyTo(observed);
-    if (!initialConnection && intent.matches(observed)) {
-      _markReady(observed);
+    final target = intent.applyTo(base);
+    if (!initialConnection && intent.matches(base)) {
+      _markReady(base);
       return;
     }
     _state.value = const SessionSynchronizing(attempt: 1);
-    await _protocol.writeConfiguration(target);
+    await _protocol.writeConfiguration(target, marker: _writeMarker);
     if (!_isCurrent(generation) || !_hasObservedConnection) {
       throw const BikeSessionDisposedFailure();
     }
@@ -845,7 +1101,7 @@ final class BikeSession {
         _pollTimer?.cancel();
         late BikeConfiguration written;
         try {
-          await _protocol.writeConfiguration(target);
+          await _protocol.writeConfiguration(target, marker: _writeMarker);
           if (!_isCurrent(generation) || !_hasObservedConnection) {
             throw const BikeSessionDisposedFailure();
           }
@@ -959,6 +1215,9 @@ final class BikeSession {
     _disconnectRequested = true;
     final disconnectGeneration = ++_generation;
     _expectedDisconnect = true;
+    // A deliberate disconnect is no bike restart: the next connect has an
+    // unknown off time.
+    _offTimeMeter.clear();
     _pollTimer?.cancel();
     _reconnectTimer?.cancel();
     _invalidateConfigurationState();
@@ -1017,6 +1276,8 @@ final class BikeSession {
         _state.peek() is SessionIdle) {
       return;
     }
+    // Only an unexpected loss can be a bike restart.
+    _offTimeMeter.linkLost();
     _reconnectTimer?.cancel();
     _generation++;
     _pollTimer?.cancel();

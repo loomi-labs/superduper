@@ -634,6 +634,52 @@ void main() {
     });
   });
 
+  group('street-legal lock', () {
+    test('the preference and the stock mode round-trip', () async {
+      await repository.addBike(deviceId: 'b', region: BikeRegion.ch);
+      var saved = (await repository.getBikes()).single;
+      expect(saved.streetLegalOnQuickRestart, isFalse);
+      expect(saved.streetLegalStockMode, null);
+
+      await repository.setStreetLegalOnQuickRestart('b', true);
+      await repository.setStreetLegalStockMode('b', 5);
+      saved = (await repository.getBikes()).single;
+      expect(saved.streetLegalOnQuickRestart, isTrue);
+      expect(saved.streetLegalStockMode, 5);
+
+      await repository.setStreetLegalStockMode('b', null);
+      expect((await repository.getBikes()).single.streetLegalStockMode, null);
+    });
+
+    test(
+      'a stock mode that the protocol does not offer never reaches SQLite',
+      () async {
+        await repository.addBike(deviceId: 'b');
+
+        await expectLater(
+          repository.setStreetLegalStockMode('b', 8),
+          throwsRangeError,
+        );
+        expect((await repository.getBikes()).single.streetLegalStockMode, null);
+      },
+    );
+
+    test('a region change keeps a stored stock mode', () async {
+      await repository.addBike(deviceId: 'b', region: BikeRegion.eu);
+      await repository.setStreetLegalStockMode('b', 5);
+
+      await repository.updateBikeDetails(
+        'b',
+        displayName: 'B',
+        region: BikeRegion.us,
+        color: BikeColor.royalHorizon,
+        protocol: BikeProtocolVersion.v1,
+      );
+
+      expect((await repository.getBikes()).single.streetLegalStockMode, 5);
+    });
+  });
+
   group('background sync', () {
     Future<void> addSyncedBike(SetOnConnect setOnConnect) async {
       await settingsRepository.initialize();
@@ -653,6 +699,32 @@ void main() {
         const SetOnConnect(mode: NativeModeRef(2), assist: 3),
       );
 
+      final command = await database
+          .select(database.backgroundSyncCommands)
+          .getSingle();
+      expect(command.payload[4], 2);
+    });
+
+    test('the street-legal preference removes the background plan', () async {
+      await addSyncedBike(
+        const SetOnConnect(mode: NativeModeRef(2), assist: 3),
+      );
+      expect(
+        await database.select(database.backgroundSyncPlans).get(),
+        hasLength(1),
+      );
+
+      await repository.setStreetLegalOnQuickRestart('b', true);
+      expect(
+        await database.select(database.backgroundSyncPlans).get(),
+        isEmpty,
+      );
+      expect(
+        await database.select(database.backgroundSyncCommands).get(),
+        isEmpty,
+      );
+
+      await repository.setStreetLegalOnQuickRestart('b', false);
       final command = await database
           .select(database.backgroundSyncCommands)
           .getSingle();

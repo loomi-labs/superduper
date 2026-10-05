@@ -82,6 +82,15 @@ class BackgroundControlSyncTest {
         }
     }
 
+    @Test
+    fun lockedRecordsSkipWithoutWritingForBothProtocols() {
+        for (id in listOf(0xd1, 0xc1)) {
+            val record = command(id).also { it[4] = 4; it[5] = 2 }
+            val result = inspect(BackgroundControlSync(command(id)), record)
+            assertEquals(BackgroundControlSync.Action.Complete(false), result)
+        }
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun rejectsUnknownControlPackets() {
         BackgroundControlSync(command(0xaa))

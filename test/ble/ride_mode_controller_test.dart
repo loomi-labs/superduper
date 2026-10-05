@@ -18,6 +18,8 @@ void main() {
   SavedBike chBike({
     SetOnConnect setOnConnect = const SetOnConnect(),
     List<CustomMode> customModes = const [seededChMode],
+    bool streetLegal = false,
+    int? stockMode,
   }) {
     return SavedBike(
       bike: Bike(
@@ -33,6 +35,8 @@ void main() {
       ),
       setOnConnect: setOnConnect,
       customModes: customModes,
+      streetLegalOnQuickRestart: streetLegal,
+      streetLegalStockMode: stockMode,
     );
   }
 
@@ -41,14 +45,24 @@ void main() {
     required int bootWire,
     Duration speedTimeout = const Duration(seconds: 5),
     DateTime Function()? clock,
+    int historyMarker = BikeGatt.sessionAppliedMarker,
   }) async {
     connection.readFrames.add(v1StateFrame(mode: bootWire));
+    if (bike.streetLegalOnQuickRestart) {
+      connection.readFrames.add(
+        v1HistoryFrame(marker: historyMarker, mode: bootWire),
+      );
+    }
     session = BikeSession(
       connection: connection,
       setOnConnect: resolveSetOnConnect(bike).patch,
       protocol: BikeProtocolVersion.v1,
       readDiagnosticsOnConnect: false,
       reconnectDelays: const [Duration(milliseconds: 10)],
+      streetLegalOnQuickRestart: bike.streetLegalOnQuickRestart,
+      streetLegalStockMode: resolveStockMode(bike),
+      counterSampleTimeout: const Duration(milliseconds: 20),
+      clock: clock,
     );
     controller = RideModeController(
       session: session,
@@ -371,5 +385,251 @@ void main() {
     await controller.select(const CustomRideMode(exact));
     expect(modeWrites().last, 1);
     expect(controller.needsBackgroundHold.value, isFalse);
+  });
+
+  group('street-legal lock', () {
+    late DateTime now;
+
+    setUp(() => now = DateTime(2026, 10, 3, 12));
+
+    SavedBike lockingBike({int? stockMode}) => chBike(
+      setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+      streetLegal: true,
+      stockMode: stockMode,
+    );
+
+    Future<void> startLocking({
+      int? stockMode,
+      int historyMarker = BikeGatt.sessionAppliedMarker,
+      int? counter,
+    }) async {
+      connection.auxiliaryCounter = counter;
+      await start(
+        lockingBike(stockMode: stockMode),
+        bootWire: 7,
+        clock: () => now,
+        historyMarker: historyMarker,
+      );
+    }
+
+    Future<void> tick() =>
+        Future<void>.delayed(const Duration(milliseconds: 50));
+
+    /// Waits until the lock is on, at most 1 second.
+    Future<void> waitForLock() async {
+      final deadline = DateTime.now().add(const Duration(seconds: 1));
+      while (!session.streetLegalLocked.value &&
+          DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+    }
+
+    CharacteristicWrite lastControlWrite() => connection.writes.lastWhere(
+      (w) =>
+          w.characteristicUuid == BikeGatt.stateRegister && w.value[1] == 0xd1,
+    );
+
+    test('the preference holds the background on a native mode', () async {
+      await start(chBike(streetLegal: true), bootWire: 7, clock: () => now);
+
+      expect(controller.selection.value, const NativeRideMode(7));
+      expect(controller.needsBackgroundHold.value, isTrue);
+
+      await session.disconnect();
+      expect(controller.needsBackgroundHold.value, isFalse);
+    });
+
+    test('the lock selects the wire the bike reports', () async {
+      await startLocking(historyMarker: BikeGatt.sessionLockedMarker);
+
+      expect(session.streetLegalLocked.value, isTrue);
+      expect(controller.selection.value, const NativeRideMode(7));
+      expect(controller.parkedMinutesLeft.value, isNull);
+
+      now = now.add(const Duration(minutes: 20));
+      await tick();
+      expect(modeWrites(), everyElement(7));
+    });
+
+    test('a mode choice ends the lock and starts the timer', () async {
+      await startLocking(historyMarker: BikeGatt.sessionLockedMarker);
+
+      await controller.select(const CustomRideMode(seededChMode));
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(lastControlWrite().value[5], BikeGatt.sessionAppliedMarker);
+      expect(controller.parkedMinutesLeft.value, 10);
+    });
+
+    test('a failed mode choice keeps the lock', () async {
+      await startLocking(historyMarker: BikeGatt.sessionLockedMarker);
+      await session.disconnect();
+
+      await expectLater(
+        controller.select(const CustomRideMode(seededChMode)),
+        throwsA(isA<BikeSessionNotReady>()),
+      );
+
+      expect(session.streetLegalLocked.value, isTrue);
+    });
+
+    test('the timer does not run with the preference off', () async {
+      await start(
+        chBike(
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        ),
+        bootWire: 7,
+        clock: () => now,
+      );
+      expect(controller.parkedMinutesLeft.value, isNull);
+
+      now = now.add(const Duration(minutes: 20));
+      await tick();
+
+      expect(modeWrites().last, 1);
+      expect(session.streetLegalLocked.value, isFalse);
+    });
+
+    test('the timer does not run in the stock mode', () async {
+      await start(chBike(streetLegal: true), bootWire: 7, clock: () => now);
+      expect(controller.parkedMinutesLeft.value, 10);
+
+      await controller.select(const NativeRideMode(4));
+      expect(controller.parkedMinutesLeft.value, isNull);
+
+      now = now.add(const Duration(minutes: 20));
+      await tick();
+
+      expect(session.streetLegalLocked.value, isFalse);
+    });
+
+    test(
+      'expiry writes the stock mode with marker 2 and starts the lock',
+      () async {
+        await startLocking();
+        expect(controller.parkedMinutesLeft.value, 10);
+
+        now = now.add(const Duration(minutes: 10));
+        await waitForLock();
+
+        final last = lastControlWrite();
+        expect(last.value[4], 4);
+        expect(last.value[5], BikeGatt.sessionLockedMarker);
+        expect(session.streetLegalLocked.value, isTrue);
+        expect(controller.selection.value, const NativeRideMode(4));
+        expect(controller.parkedMinutesLeft.value, isNull);
+        expect(controller.needsBackgroundHold.value, isTrue);
+      },
+    );
+
+    test('speed above 0 restarts the timer', () async {
+      await startLocking();
+      now = now.add(const Duration(minutes: 9));
+      speed(5);
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(minutes: 9));
+      await tick();
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(controller.parkedMinutesLeft.value, 1);
+
+      now = now.add(const Duration(minutes: 1));
+      await waitForLock();
+      expect(session.streetLegalLocked.value, isTrue);
+    });
+
+    test('assist, light and zero speed do not restart the timer', () async {
+      await startLocking();
+      now = now.add(const Duration(minutes: 9));
+      await session.setAssist(2);
+      await session.setLight(true);
+      speed(0);
+      await Future<void>.delayed(Duration.zero);
+
+      now = now.add(const Duration(minutes: 1));
+      await waitForLock();
+
+      expect(session.streetLegalLocked.value, isTrue);
+    });
+
+    test('a mode choice restarts the timer', () async {
+      await startLocking();
+      now = now.add(const Duration(minutes: 9));
+      await controller.select(const NativeRideMode(7));
+
+      now = now.add(const Duration(minutes: 9));
+      await tick();
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(controller.parkedMinutesLeft.value, 1);
+    });
+
+    test('expiry stops the speed switching of a custom mode first', () async {
+      await startLocking(stockMode: 5);
+      final gate = Completer<void>();
+      connection
+        ..configurationWriteGate = gate
+        ..configurationWriteGateAfterStarts =
+            connection.configurationWriteStarts;
+      now = now.add(const Duration(minutes: 10));
+      await tick();
+      final before = modeWrites().length;
+
+      // Above the limit the custom mode would write its cap wire 4.
+      speed(30);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      gate.complete();
+      connection.configurationWriteGate = null;
+      await waitForLock();
+
+      expect(modeWrites().sublist(before), [5]);
+      expect(session.streetLegalLocked.value, isTrue);
+      expect(controller.selection.value, const NativeRideMode(5));
+    });
+
+    test('a failed lock write leaves the lock off and tries again', () async {
+      await startLocking();
+      connection.writeError = StateError('write failed');
+      now = now.add(const Duration(minutes: 10));
+      await tick();
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(controller.selection.value, const CustomRideMode(seededChMode));
+
+      connection
+        ..writeError = null
+        ..readFrames.addAll([v1StateFrame(mode: 1), v1HistoryFrame(mode: 1)]);
+      await waitForLock();
+
+      final last = lastControlWrite();
+      expect(last.value[4], 4);
+      expect(last.value[5], BikeGatt.sessionLockedMarker);
+      expect(session.streetLegalLocked.value, isTrue);
+    });
+
+    test('a dropout pauses the timer and marker 1 continues it', () async {
+      await startLocking(counter: 100);
+      now = now.add(const Duration(minutes: 6));
+      await tick();
+      expect(controller.parkedMinutesLeft.value, 4);
+
+      // The link is down for 3 minutes. The bike is on for 2 of them.
+      connection
+        ..auxiliaryCounter = 220
+        ..readFrames.addAll([v1StateFrame(mode: 1), v1HistoryFrame(mode: 1)])
+        ..emitState(BikeConnectionState.disconnected);
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(minutes: 3));
+      await tick();
+
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.streetLegalLocked.value, isFalse);
+      // 6 minutes before the dropout and 2 minutes of bike on time.
+      expect(controller.parkedMinutesLeft.value, 2);
+
+      now = now.add(const Duration(minutes: 2));
+      await waitForLock();
+      expect(session.streetLegalLocked.value, isTrue);
+    });
   });
 }

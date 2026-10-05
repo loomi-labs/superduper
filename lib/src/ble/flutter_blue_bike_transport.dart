@@ -207,6 +207,7 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
         BikeGatt.metricsService,
         BikeGatt.authenticationService,
         BikeGatt.deviceInformationService,
+        BikeGatt.auxiliaryService,
       };
       for (final service in services) {
         final serviceUuid = service.uuid.str128.toLowerCase();
@@ -462,6 +463,7 @@ const Set<String> _supportedServiceUuids = {
   BikeGatt.metricsService,
   BikeGatt.authenticationService,
   BikeGatt.deviceInformationService,
+  BikeGatt.auxiliaryService,
 };
 
 const Set<String> _knownCharacteristics = {
@@ -475,4 +477,5 @@ const Set<String> _knownCharacteristics = {
   BikeGatt.firmwareRevision,
   BikeGatt.hardwareRevision,
   BikeGatt.softwareRevision,
+  BikeGatt.auxiliaryCounter,
 };

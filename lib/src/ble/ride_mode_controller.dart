@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:signals/signals.dart';
+import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/ride_modes.dart';
@@ -14,20 +15,30 @@ final class RideModeController {
     required this._bike,
     DateTime Function()? clock,
     this.speedTimeout = const Duration(seconds: 5),
+    this.parkedTimeout = const Duration(minutes: 10),
     Duration watchdogInterval = const Duration(seconds: 1),
   }) : _clock = clock ?? DateTime.now {
     _stateCleanup = session.state.subscribe(_onState);
     _observedCleanup = session.observed.subscribe(_onObserved);
     _speedCleanup = session.speedKmh.subscribe(_onSpeed);
-    _watchdog = Timer.periodic(watchdogInterval, (_) => _checkSpeedStream());
+    _lockCleanup = session.streetLegalLocked.subscribe(_onStreetLegalLocked);
+    _watchdog = Timer.periodic(watchdogInterval, (_) {
+      _checkSpeedStream();
+      _checkParked();
+    });
   }
 
   final BikeSession session;
   final Duration speedTimeout;
+  final Duration parkedTimeout;
   final DateTime Function() _clock;
   final Signal<RideModeSelection?> _selection = signal(
     null,
     options: const SignalOptions(name: 'rideMode.selection'),
+  );
+  final Signal<int?> _parkedMinutesLeft = signal(
+    null,
+    options: const SignalOptions(name: 'rideMode.parkedMinutesLeft'),
   );
   final Signal<bool> _needsBackgroundHold = signal(
     false,
@@ -36,6 +47,7 @@ final class RideModeController {
   late final EffectCleanup _stateCleanup;
   late final EffectCleanup _observedCleanup;
   late final EffectCleanup _speedCleanup;
+  late final EffectCleanup _lockCleanup;
   late final Timer _watchdog;
   SavedBike _bike;
   int? _assertedWire;
@@ -44,6 +56,11 @@ final class RideModeController {
   // selection: the new mode is not on the bike yet.
   var _selectInFlight = false;
   RideModeSelection? _holdSelection;
+  // The parked fallback timer. It runs from _parkedSince on a settled link.
+  // A dropout pauses it and keeps the elapsed time in _parkedPaused.
+  DateTime? _parkedSince;
+  Duration? _parkedPaused;
+  var _parkedWriteInFlight = false;
   var _wasReady = false;
   var _linkSettled = false;
   var _disposed = false;
@@ -52,6 +69,10 @@ final class RideModeController {
   ReadonlySignal<bool> get needsBackgroundHold =>
       _needsBackgroundHold.readonly();
   int? get assertedWire => _assertedWire;
+
+  /// The minutes until the parked fallback writes the stock mode, rounded
+  /// up. Null while the timer does not run.
+  ReadonlySignal<int?> get parkedMinutesLeft => _parkedMinutesLeft.readonly();
   BikeRegion? get _region => _bike.bike.region;
 
   /// The selection the hold follows until the bike confirms one: the
@@ -62,6 +83,15 @@ final class RideModeController {
         final mode? => CustomRideMode(mode),
         null => null,
       };
+
+  bool get _parkedApplies {
+    if (!_bike.streetLegalOnQuickRestart || session.streetLegalLocked.peek()) {
+      return false;
+    }
+    final current = _selection.peek();
+    return current != null &&
+        current != NativeRideMode(resolveStockMode(_bike));
+  }
 
   bool get _ready => switch (session.state.peek()) {
     SessionReady() || SessionSynchronizing() => session.canChangeConfiguration,
@@ -77,16 +107,23 @@ final class RideModeController {
     final wire = initialWireFor(next, _region);
     final previousSelection = _selection.peek();
     final previousWire = _assertedWire;
+    final previousLock = session.streetLegalLocked.peek();
+    // A mode choice ends the lock. Its write carries marker 1.
+    session.endStreetLegalLock();
     _selectInFlight = true;
     _holdSelection = previousSelection;
     _selection.value = next;
     _assertedWire = wire;
     try {
       await session.setMode(wire);
+      // A mode choice restarts the parked fallback timer.
+      _parkedSince = null;
+      _parkedPaused = null;
     } on Object {
       if (!_disposed) {
         _selection.value = previousSelection;
         _assertedWire = previousWire;
+        session.restoreStreetLegalLock(previousLock);
       }
       rethrow;
     } finally {
@@ -96,6 +133,7 @@ final class RideModeController {
       // ends in the background pauses the session, which must not happen
       // during this write.
       _publishHold();
+      _updateParkedTimer();
     }
   }
 
@@ -122,6 +160,7 @@ final class RideModeController {
       }
     }
     _publishHold();
+    _updateParkedTimer();
   }
 
   void dispose() {
@@ -133,9 +172,11 @@ final class RideModeController {
     _stateCleanup();
     _observedCleanup();
     _speedCleanup();
+    _lockCleanup();
     _needsBackgroundHold.value = false;
     _selection.dispose();
     _needsBackgroundHold.dispose();
+    _parkedMinutesLeft.dispose();
   }
 
   void _onState(BikeSessionState state) {
@@ -153,12 +194,35 @@ final class RideModeController {
     }
     _wasReady = ready;
     _publishHold();
+    _updateParkedTimer();
+  }
+
+  /// The lock leaves the bike on the wire it reports: no custom mode runs.
+  void _onStreetLegalLocked(bool locked) {
+    if (_disposed) {
+      return;
+    }
+    if (locked && _ready) {
+      final observed = session.observed.peek()?.mode;
+      if (observed != null) {
+        _selection.value = NativeRideMode(observed);
+        _assertedWire = observed;
+      }
+    }
+    _updateParkedTimer();
+    _publishHold();
   }
 
   /// Decides the selection for a fresh connection.
   void _onBecameReady() {
+    _continueParkedTimer();
     final observed = session.observed.peek()?.mode;
     if (observed == null) {
+      return;
+    }
+    if (session.streetLegalLocked.peek()) {
+      _selection.value = NativeRideMode(observed);
+      _assertedWire = observed;
       return;
     }
     final current = _selection.peek();
@@ -195,11 +259,19 @@ final class RideModeController {
       _selection.value = NativeRideMode(observed.mode);
       _assertedWire = observed.mode;
       _publishHold();
+      _updateParkedTimer();
     }
   }
 
   void _onSpeed(double? speedKmh) {
-    if (_disposed || speedKmh == null || !_ready) {
+    if (_disposed || speedKmh == null) {
+      return;
+    }
+    if (speedKmh > 0 && _parkedSince != null) {
+      _parkedSince = _clock();
+      _publishParked();
+    }
+    if (!_ready || _parkedWriteInFlight) {
       return;
     }
     final current = _selection.peek();
@@ -217,7 +289,7 @@ final class RideModeController {
   /// Without speed samples a mode with an unlimited base must go back on its
   /// cap, and the bike must be asked to stream again.
   void _checkSpeedStream() {
-    if (_disposed) {
+    if (_disposed || _parkedWriteInFlight) {
       return;
     }
     if (!_ready) {
@@ -256,6 +328,75 @@ final class RideModeController {
     );
   }
 
+  void _updateParkedTimer() {
+    if (_disposed) {
+      return;
+    }
+    if (!_parkedApplies) {
+      _parkedSince = null;
+      _parkedPaused = null;
+    } else if (_linkSettled) {
+      _parkedSince ??= _clock().subtract(_parkedPaused ?? Duration.zero);
+      _parkedPaused = null;
+    } else if (_parkedSince case final since?) {
+      // A dropout pauses the timer.
+      _parkedPaused = _clock().difference(since);
+      _parkedSince = null;
+    }
+    _publishParked();
+  }
+
+  /// After a dropout (marker 1) the timer continues, and the bike on time
+  /// of the dropout counts as parked time. After a restart it starts again.
+  void _continueParkedTimer() {
+    final paused = _parkedPaused;
+    if (paused == null) {
+      return;
+    }
+    _parkedPaused = session.lastSessionMarker == BikeGatt.sessionAppliedMarker
+        ? paused + (session.dropoutOnTime ?? Duration.zero)
+        : null;
+  }
+
+  void _checkParked() {
+    final since = _parkedSince;
+    if (_disposed || since == null || _parkedWriteInFlight || _selectInFlight) {
+      return;
+    }
+    _publishParked();
+    if (_clock().difference(since) >= parkedTimeout) {
+      unawaited(_onParkedExpired());
+    }
+  }
+
+  Future<void> _onParkedExpired() async {
+    // The speed check stops first, so no custom wire follows the stock mode.
+    _parkedWriteInFlight = true;
+    try {
+      await session.startStreetLegalLock();
+    } on Object {
+      // The lock starts only when the bike accepted the stock mode. The timer
+      // stays expired, so the next tick on a settled link tries again.
+    } finally {
+      _parkedWriteInFlight = false;
+    }
+  }
+
+  void _publishParked() {
+    if (_disposed) {
+      return;
+    }
+    final since = _parkedSince;
+    if (since == null) {
+      _parkedMinutesLeft.value = null;
+      return;
+    }
+    final left = parkedTimeout - _clock().difference(since);
+    _parkedMinutesLeft.value = left <= Duration.zero
+        ? 0
+        : (left.inSeconds + 59) ~/ 60;
+  }
+
   void _publishHold() {
     if (_disposed) {
       return;
@@ -270,6 +411,9 @@ final class RideModeController {
       SessionDisposed() => false,
       _ => true,
     };
-    _needsBackgroundHold.value = dynamic && linkWanted;
+    // The street-legal preference needs the link to see the next restart,
+    // in any ride mode.
+    _needsBackgroundHold.value =
+        (dynamic || _bike.streetLegalOnQuickRestart) && linkWanted;
   }
 }
