@@ -20,13 +20,15 @@ void main() {
     List<CustomMode> customModes = const [seededChMode],
     bool streetLegal = false,
     int? stockMode,
+    BikeRegion region = BikeRegion.ch,
+    BikeProtocolVersion protocol = BikeProtocolVersion.v1,
   }) {
     return SavedBike(
       bike: Bike(
         deviceId: 'bike',
         displayName: 'CH',
-        protocol: BikeProtocolVersion.v1,
-        region: BikeRegion.ch,
+        protocol: protocol,
+        region: region,
         color: BikeColor.royalHorizon,
         sortOrder: 0,
         createdAt: DateTime(2026),
@@ -387,6 +389,26 @@ void main() {
     expect(controller.needsBackgroundHold.value, isFalse);
   });
 
+  test(
+    'a native choice on a wire of the set-on-connect pair stays native',
+    () async {
+      await start(
+        chBike(
+          region: BikeRegion.eu,
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        ),
+        bootWire: 4,
+      );
+      expect(controller.selection.value, const CustomRideMode(seededChMode));
+
+      await controller.select(const NativeRideMode(4));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(controller.selection.value, const NativeRideMode(4));
+      expect(controller.needsBackgroundHold.value, isFalse);
+    },
+  );
+
   group('street-legal lock', () {
     late DateTime now;
 
@@ -630,6 +652,108 @@ void main() {
       now = now.add(const Duration(minutes: 2));
       await waitForLock();
       expect(session.streetLegalLocked.value, isTrue);
+    });
+
+    test('the hold says whether a speed limit runs', () async {
+      await start(chBike(streetLegal: true), bootWire: 7, clock: () => now);
+      expect(controller.needsBackgroundHold.value, isTrue);
+      expect(controller.holdsSpeedLimit.value, isFalse);
+
+      await controller.select(const CustomRideMode(seededChMode));
+      expect(controller.needsBackgroundHold.value, isTrue);
+      expect(controller.holdsSpeedLimit.value, isTrue);
+
+      await controller.select(const NativeRideMode(7));
+      expect(controller.holdsSpeedLimit.value, isFalse);
+    });
+
+    test(
+      'the stock mode with a set-on-connect custom mode stops the timer',
+      () async {
+        await startLocking();
+        expect(controller.parkedMinutesLeft.value, 10);
+
+        await controller.select(const NativeRideMode(4));
+        await tick();
+        expect(controller.selection.value, const NativeRideMode(4));
+        expect(controller.parkedMinutesLeft.value, isNull);
+
+        now = now.add(const Duration(minutes: 20));
+        await tick();
+        expect(session.streetLegalLocked.value, isFalse);
+      },
+    );
+
+    test(
+      'a native mode asks for ride data again while the timer runs',
+      () async {
+        await start(
+          chBike(streetLegal: true),
+          bootWire: 7,
+          clock: () => now,
+          speedTimeout: const Duration(milliseconds: 30),
+        );
+        int requests() => connection.writes
+            .where((w) => w.value[0] == 2 && w.value[1] == 3)
+            .length;
+        speed(5);
+        await Future<void>.delayed(Duration.zero);
+        final before = requests();
+
+        // The bike stopped its stream at a standstill.
+        now = now.add(const Duration(minutes: 9));
+        await tick();
+        expect(requests(), greaterThan(before));
+
+        // The new request brings samples back: the timer starts again.
+        speed(6);
+        await Future<void>.delayed(Duration.zero);
+        now = now.add(const Duration(minutes: 9));
+        await tick();
+        expect(session.streetLegalLocked.value, isFalse);
+        expect(modeWrites(), everyElement(7));
+      },
+    );
+
+    test('a V2 bike has no parked timer', () async {
+      await start(
+        chBike(streetLegal: true, protocol: BikeProtocolVersion.v2),
+        bootWire: 7,
+        clock: () => now,
+      );
+      expect(controller.selection.value, const NativeRideMode(7));
+      expect(controller.parkedMinutesLeft.value, isNull);
+
+      now = now.add(const Duration(minutes: 20));
+      await tick();
+
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(modeWrites(), everyElement(7));
+    });
+
+    test('a mode choice during the parked write wins', () async {
+      // The stock wire 5 is not in the pair of the seeded mode (1 and 4).
+      await startLocking(stockMode: 5);
+      final gate = Completer<void>();
+      connection
+        ..configurationWriteGate = gate
+        ..configurationWriteGateAfterStarts =
+            connection.configurationWriteStarts;
+      now = now.add(const Duration(minutes: 10));
+      await tick();
+
+      final choice = controller.select(const CustomRideMode(seededChMode));
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      gate.complete();
+      connection.configurationWriteGate = null;
+      await choice;
+      await tick();
+
+      final last = lastControlWrite();
+      expect(last.value[4], 1);
+      expect(last.value[5], BikeGatt.sessionAppliedMarker);
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(controller.selection.value, const CustomRideMode(seededChMode));
     });
   });
 }

@@ -13,7 +13,7 @@ The fork adds these features to upstream:
 - The region CH, with custom modes: a speed limit (25 to 45 km/h) with or without throttle, per bike.
 - A ride mode controller that switches firmware profiles as the speed crosses the limit.
 - An Android foreground service that keeps the Bluetooth link alive while a switching custom mode is selected or the street-legal preference is on.
-- The street-legal lock, per bike: a quick restart (off and on within 10 seconds) or 10 minutes parked puts the bike into its stock mode and keeps it there.
+- The street-legal lock, per bike: a quick restart (off and on within 10 seconds), or 10 minutes parked on a V1 bike, puts the bike into its stock mode and keeps it there.
 - A release build that refuses the debug certificate.
 
 ## Commands
@@ -87,7 +87,13 @@ With the preference on, the session subscribes to the auxiliary counter (`0x1581
 
 During the lock, each control write carries marker 2, the session does not write the set-on-connect mode, and the ride mode controller selects the wire the bike reports. A mode choice in the app or a slow restart ends the lock.
 
-Parked fallback: when the lock is off and the selected mode is not the stock mode, 10 minutes without a speed sample above 0 km/h on a ready link write the stock mode with marker 2 and start the lock. A dropout pauses the timer. At marker 1 the timer continues, and the bike on time of the dropout counts as parked time.
+Parked fallback: when the lock is off and the selected mode is not the stock mode, 10 minutes without a speed sample above 0 km/h on a ready link write the stock mode with marker 2 and start the lock. A dropout pauses the timer. At marker 1 the timer continues, and the bike on time of the dropout counts as parked time. While the timer runs, the controller asks the bike for ride data again each time the samples stop, because the bike stops its ride data at a standstill.
+
+A V2 bike sends no speed samples. It has no parked fallback, only the quick restart lock. The settings page says so below the switch.
+
+A mode choice waits for a parked write that runs, so the choice always comes last and ends the lock that the write starts.
+
+At each connect, a marker read that fails twice, or a record shorter than 6 bytes, gives an unknown off time: the lock stays off. The meter keeps the counter samples from before the first link loss until the session takes a gap.
 
 Limit: only a connected app can measure the off time. On iOS the lock works only while the app is in the foreground.
 
@@ -97,9 +103,11 @@ Limit: only a connected app can measure the off time. On iOS the lock works only
 - While the hold is on, the app stays connected when it goes to the background. Otherwise the session pauses in the background.
 - When the hold ends while the app is in the background, the session pauses.
 - The app follows a mode change on the bike only while the link is ready. The wire that the app reads before the set-on-connect write does not change the selection.
+- The controller decides the selection from the set-on-connect mode once for each new connection. A confirmed write on a settled link does not decide it again.
 - During the write of a mode choice, the hold follows the previous selection. It changes only when the bike accepted the new mode.
-- When the foreground service does not start, the app tries again when it goes to the background.
-- iOS has no hold. A switching mode and the street-legal lock stop when the app leaves the foreground. The control page and the settings page say so.
+- When the foreground service does not start, the app tries again when it goes to the background. An error in the start of the service also allows a new start.
+- The notification has two texts. While a switching custom mode runs it says "Superduper CH is holding your speed limit". When the hold comes only from the street-legal preference it says "Superduper CH keeps the link to your bike". The text changes while the service runs when the reason changes.
+- iOS has no hold. A switching mode and the street-legal lock stop when the app leaves the foreground. The control page says so for a switching mode. The settings page says so for the street-legal lock.
 
 ## Repository rules
 

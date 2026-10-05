@@ -647,6 +647,38 @@ void main() {
       },
     );
 
+    test('the hold reason follows the mode while the service runs', () async {
+      await addChBike();
+      await bikes.setStreetLegalOnQuickRestart('ch', true);
+      final ready = await startActive('ch', bootWire: 7);
+      await Future<void>.delayed(Duration.zero);
+      expect(hold.held, isTrue);
+      expect(hold.speedLimit, isTrue);
+
+      await ready.rideMode.select(const NativeRideMode(7));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(hold.held, isTrue);
+      expect(hold.speedLimit, isFalse);
+
+      await ready.rideMode.select(const CustomRideMode(seededChMode));
+      await Future<void>.delayed(Duration.zero);
+      expect(hold.speedLimit, isTrue);
+    });
+
+    test(
+      'the preference alone holds for the link, not a speed limit',
+      () async {
+        await bikes.addBike(deviceId: 'eu', region: BikeRegion.eu);
+        await bikes.setStreetLegalOnQuickRestart('eu', true);
+        await startActive('eu', bootWire: 4);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(hold.held, isTrue);
+        expect(hold.speedLimit, isFalse);
+      },
+    );
+
     test(
       'a preference change reaches the session and the controller',
       () async {
@@ -735,16 +767,20 @@ Future<void> _waitUntil(bool Function() condition) async {
 
 final class RecordingHold implements BackgroundHoldGateway {
   bool held = false;
+  bool speedLimit = true;
   bool failNext = false;
   final List<bool> calls = [];
 
   @override
-  Future<void> setHeld(bool value) async {
+  Future<void> setHeld(bool value, {bool speedLimit = true}) async {
     if (value && failNext) {
       failNext = false;
       throw StateError('service did not start');
     }
     held = value;
+    if (value) {
+      this.speedLimit = speedLimit;
+    }
     calls.add(value);
   }
 }

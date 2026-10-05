@@ -162,4 +162,41 @@ void main() {
     expect(meter.takeGap(now), isNotNull);
     expect(meter.takeGap(now), isNull);
   });
+
+  test('a second loss before the decision keeps the first samples', () {
+    // A slow restart of 37 s off, then a dropout before the decision.
+    meter
+      ..recordCounter(1000)
+      ..linkLost();
+    advance(const Duration(seconds: 40));
+    meter
+      ..recordCounter(1003)
+      ..linkLost();
+    advance(const Duration(seconds: 2));
+    meter.recordCounter(1005);
+
+    final gap = meter.takeGap(now)!;
+
+    expect(gap.onTime, const Duration(seconds: 5));
+    expect(gap.offTime, const Duration(seconds: 37));
+    expect(gap.quickRestart, isFalse);
+  });
+
+  test('a loss after a taken gap uses the new samples', () {
+    meter
+      ..recordCounter(1000)
+      ..linkLost();
+    advance(const Duration(seconds: 5));
+    meter.recordCounter(1002);
+    expect(meter.takeGap(now), isNotNull);
+
+    advance(const Duration(seconds: 30));
+    meter
+      ..recordCounter(1032)
+      ..linkLost();
+    advance(const Duration(seconds: 3));
+    meter.recordCounter(1035);
+
+    expect(meter.takeGap(now)!.offTime, Duration.zero);
+  });
 }

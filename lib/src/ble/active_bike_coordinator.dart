@@ -374,15 +374,24 @@ final class ActiveBikeCoordinator {
     } else {
       if (_rideMode?.needsBackgroundHold.peek() ?? false) {
         // A service that did not start keeps the process at risk.
-        await backgroundHold.setHeld(true).catchError((Object _) {});
+        await backgroundHold
+            .setHeld(
+              true,
+              speedLimit: _rideMode?.holdsSpeedLimit.peek() ?? true,
+            )
+            .catchError((Object _) {});
         return;
       }
       await _session?.pauseForBackground();
     }
   }
 
-  void _onHoldChanged(bool held) {
-    unawaited(backgroundHold.setHeld(held).catchError((Object _) {}));
+  void _onHoldChanged(bool held, {required bool speedLimit}) {
+    unawaited(
+      backgroundHold
+          .setHeld(held, speedLimit: speedLimit)
+          .catchError((Object _) {}),
+    );
     // Without the hold Android stops the process at an unknown time. An
     // orderly pause matches the behaviour without a dynamic mode.
     if (!held && !_foreground && !_discoveryPaused) {
@@ -546,7 +555,19 @@ final class ActiveBikeCoordinator {
       _session = next;
       final rideMode = _rideModeBuilder(next, preparedBike);
       _rideMode = rideMode;
-      _holdCleanup = rideMode.needsBackgroundHold.subscribe(_onHoldChanged);
+      final hold = computed(
+        () => (
+          held: rideMode.needsBackgroundHold.value,
+          speedLimit: rideMode.holdsSpeedLimit.value,
+        ),
+      );
+      final stopHold = hold.subscribe(
+        (value) => _onHoldChanged(value.held, speedLimit: value.speedLimit),
+      );
+      _holdCleanup = () {
+        stopHold();
+        hold.dispose();
+      };
       _sessionStateCleanup = next.state.subscribe((sessionState) {
         if (!_disposed && _session == next) {
           _publishSessionState(sessionState);

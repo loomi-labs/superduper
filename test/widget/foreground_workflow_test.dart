@@ -337,6 +337,40 @@ void main() {
     expect(tester.widget<ChoiceChip>(epac).selected, isTrue);
   });
 
+  testWidgets('bike settings say that the parked fallback needs a V1 bike', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fixture = await _pumpReadyBikeApp(tester, 'street_legal_v2');
+    const note =
+        'The 10 minute parked fallback needs a V1 bike. A V2 bike gets the '
+        'quick restart lock only.';
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    expect(find.text(note), findsNothing);
+
+    await tester.runAsync(() async {
+      await fixture.services.bikeRepository.updateBikeDetails(
+        'active-bike',
+        displayName: 'Commuter',
+        region: null,
+        color: BikeColor.frostedMint,
+        protocol: BikeProtocolVersion.v2,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text(note),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    expect(find.text(note), findsOneWidget);
+  });
+
   testWidgets('bike settings say that iOS needs the app in the foreground', (
     tester,
   ) async {

@@ -585,6 +585,14 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
                       ),
                     ),
             ),
+            if (saved.bike.protocol == BikeProtocolVersion.v2)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 0, 20, 12),
+                child: Text(
+                  'The 10 minute parked fallback needs a V1 bike. A V2 bike '
+                  'gets the quick restart lock only.',
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 18),
               child: Column(

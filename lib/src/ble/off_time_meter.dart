@@ -65,14 +65,17 @@ final class OffTimeMeter {
     }
   }
 
-  /// An unexpected link loss. A loss without a new sample since the last
-  /// loss keeps the samples of the last loss.
+  /// An unexpected link loss. While no gap is taken, the samples from before
+  /// the first loss stay: the counter difference is right across all losses.
+  /// A loss without a new sample since the last loss changes nothing.
   void linkLost() {
     if (_lastSeenAt == null) {
       return;
     }
-    _lostSeenAt = _lastSeenAt;
-    _lostCounter = _lastCounter;
+    if (_lostSeenAt == null) {
+      _lostSeenAt = _lastSeenAt;
+      _lostCounter = _lastCounter;
+    }
     _firstCounterAfterLoss = null;
     _lastSeenAt = null;
     _lastCounter = null;

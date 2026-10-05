@@ -1740,20 +1740,90 @@ void main() {
       },
     );
 
-    test('a bike with no history record counts as restarted', () async {
+    test('a failed marker read leaves the lock off', () async {
       await connectLocking();
       // Only the state frame is queued: each history read gets the retained
-      // state frame, so the marker read fails.
+      // state frame, so both marker reads fail. A dropout has a gap near 0 s
+      // and must not start the lock.
       connection
         ..auxiliaryCounter = 1002
         ..readFrames.add(v1StateFrame(mode: 7))
         ..emitState(BikeConnectionState.disconnected);
       await Future<void>.delayed(Duration.zero);
       now = now.add(const Duration(seconds: 5));
-      await Future<void>.delayed(const Duration(milliseconds: 250));
+      await Future<void>.delayed(const Duration(milliseconds: 600));
 
       expect(session.state.value, isA<SessionReady>());
-      expect(session.streetLegalLocked.value, isTrue);
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(session.lastSessionMarker, isNull);
+    });
+
+    test('a marker read that fails once is read again', () async {
+      await connectLocking();
+      connection
+        ..auxiliaryCounter = 1002
+        ..readFrames.addAll([
+          v1StateFrame(mode: 7),
+          // The first read gets four frames that are not the record.
+          for (var i = 0; i < 4; i++) v1StateFrame(mode: 7),
+          v1HistoryFrame(mode: 7),
+        ])
+        ..emitState(BikeConnectionState.disconnected);
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(seconds: 5));
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+
+      // Marker 1 is a dropout: the lock stays off.
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.lastSessionMarker, BikeGatt.sessionAppliedMarker);
+      expect(session.streetLegalLocked.value, isFalse);
+    });
+
+    test('a record shorter than 6 bytes is a failed read', () async {
+      final protocol = _FakeConnectedProtocol(
+        const BikeConfiguration(light: false, mode: 2, assist: 3),
+      )..controlRecord = [0, 0xd1, 0, 0];
+      session = createSession(
+        readDiagnosticsOnConnect: false,
+        connectedProtocol: protocol,
+        streetLegalOnQuickRestart: true,
+        streetLegalStockMode: 4,
+        counterSampleTimeout: const Duration(milliseconds: 20),
+      );
+
+      await session.connect();
+
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.streetLegalLocked.value, isFalse);
+      expect(protocol.controlRecordReads, 2);
+    });
+
+    test('a mode choice during the lock write keeps the lock off', () async {
+      await connectLocking();
+      final gate = Completer<void>();
+      connection
+        ..configurationWriteGate = gate
+        ..configurationWriteGateAfterStarts =
+            connection.configurationWriteStarts;
+
+      final lock = session.startStreetLegalLock();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      session.endStreetLegalLock();
+      gate.complete();
+      connection.configurationWriteGate = null;
+      await lock;
+
+      expect(session.streetLegalLocked.value, isFalse);
+    });
+
+    test('turning the preference off stops the counter on the bike', () async {
+      await connectLocking();
+      expect(connection.auxiliaryNotificationsEnabled, isTrue);
+
+      session.updateStreetLegalOnQuickRestart(false, stockMode: 4);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.auxiliaryNotificationsEnabled, isFalse);
     });
 
     test('a dropout reports the bike on time of the dropout', () async {
@@ -1807,6 +1877,17 @@ final class _FakeConnectedProtocol extends BikeProtocolDefinition {
   final List<BikeConfiguration> configurationWrites = [];
   int rideDataRequests = 0;
   Error? rideDataError;
+  List<int>? controlRecord;
+  int controlRecordReads = 0;
+
+  @override
+  Future<List<int>> readProtocolRecord(
+    List<int> selector, {
+    bool invalidateRetained = false,
+  }) async {
+    controlRecordReads++;
+    return controlRecord ?? (throw UnsupportedError('No record is set.'));
+  }
 
   @override
   Future<void> requestRideData() async {

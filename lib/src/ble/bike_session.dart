@@ -216,6 +216,8 @@ final class BikeSession {
   StreamSubscription<List<int>>? _auxiliarySubscription;
   Completer<void>? _counterSampleWaiter;
   int? _lastSessionMarker;
+  // Counts the mode choices that ended the lock.
+  var _lockEpoch = 0;
   Duration? _dropoutOnTime;
 
   ReadonlySignal<bool> get streetLegalLocked => _streetLegalLocked.readonly();
@@ -408,6 +410,19 @@ final class BikeSession {
       _streetLegalLocked.value = false;
       _offTimeMeter.clear();
       unawaited(_disableAuxiliaryCounter());
+      if (wasEnabled && _hasObservedConnection) {
+        // The bike stops its notifications, one each second.
+        final generation = _generation;
+        unawaited(
+          _commands
+              .add(() async {
+                if (_isCurrent(generation) && _hasObservedConnection) {
+                  await _stopAuxiliaryCounterOnBike();
+                }
+              })
+              .catchError((Object _) {}),
+        );
+      }
       return;
     }
     if (!wasEnabled && _hasObservedConnection) {
@@ -429,6 +444,7 @@ final class BikeSession {
   /// marker 1.
   void endStreetLegalLock() {
     if (!_disposed) {
+      _lockEpoch++;
       _streetLegalLocked.value = false;
     }
   }
@@ -448,6 +464,7 @@ final class BikeSession {
       throw const BikeSessionNotReady();
     }
     final generation = _generation;
+    final epoch = _lockEpoch;
     return _commands.add(() async {
       if (!_isCurrent(generation) || !_hasObservedConnection) {
         throw const BikeSessionDisposedFailure();
@@ -477,7 +494,10 @@ final class BikeSession {
         throw failure;
       }
       _publishObserved(target);
-      _streetLegalLocked.value = true;
+      // A mode choice after this call ended the lock: it stays off.
+      if (epoch == _lockEpoch) {
+        _streetLegalLocked.value = true;
+      }
       _markReady(target);
     });
   }
@@ -914,6 +934,28 @@ final class BikeSession {
     }
   }
 
+  Future<void> _stopAuxiliaryCounterOnBike() async {
+    if (!connection.hasCharacteristic(
+      serviceUuid: BikeGatt.auxiliaryService,
+      characteristicUuid: BikeGatt.auxiliaryCounter,
+    )) {
+      return;
+    }
+    try {
+      await _timed(
+        connection.setCharacteristicNotifications(
+          serviceUuid: BikeGatt.auxiliaryService,
+          characteristicUuid: BikeGatt.auxiliaryCounter,
+          enabled: false,
+        ),
+        'Disabling the bike counter',
+      );
+    } on Object {
+      // The link is down or the bike refuses: its notifications end with the
+      // link.
+    }
+  }
+
   Future<void> _disableAuxiliaryCounter() async {
     final cancelled = _auxiliarySubscription?.cancel();
     _auxiliarySubscription = null;
@@ -950,16 +992,23 @@ final class BikeSession {
     }
   }
 
-  Future<int> _readSessionMarker() async {
-    try {
-      final record = await _protocol.readProtocolRecord(
-        _protocol.controlHistorySelector,
-        invalidateRetained: true,
-      );
-      return record[5];
-    } on BikeProtocolFailure {
-      return 0;
+  /// The marker of the control-history record, or null when two reads gave
+  /// no usable record. A short record is a failed read.
+  Future<int?> _readSessionMarker() async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final record = await _protocol.readProtocolRecord(
+          _protocol.controlHistorySelector,
+          invalidateRetained: true,
+        );
+        if (record.length > 5) {
+          return record[5];
+        }
+      } on BikeProtocolFailure {
+        // The next attempt reads the record again.
+      }
     }
+    return null;
   }
 
   int get _writeMarker => _streetLegalLocked.peek()
@@ -983,6 +1032,13 @@ final class BikeSession {
     }
     final gap = _offTimeMeter.takeGap(readAt);
     _lastSessionMarker = marker;
+    if (marker == null) {
+      // Without a record the bike may have kept running: the off time is
+      // unknown, and an unknown off time is not quick.
+      _dropoutOnTime = null;
+      _streetLegalLocked.value = false;
+      return observed;
+    }
     _dropoutOnTime = marker == BikeGatt.sessionAppliedMarker
         ? gap?.onTime
         : null;
