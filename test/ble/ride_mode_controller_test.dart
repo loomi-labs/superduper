@@ -110,6 +110,54 @@ void main() {
     },
   );
 
+  late Future<void> connecting;
+
+  Future<void> connectGated(SavedBike bike) async {
+    connection
+      ..connectGate = Completer<void>()
+      ..readFrames.add(v1StateFrame(mode: 7));
+    session = BikeSession(
+      connection: connection,
+      setOnConnect: resolveSetOnConnect(bike).patch,
+      protocol: BikeProtocolVersion.v1,
+      readDiagnosticsOnConnect: false,
+      reconnectDelays: const [Duration(milliseconds: 10)],
+    );
+    controller = RideModeController(session: session, bike: bike);
+    connecting = session.connect();
+    await Future<void>.delayed(Duration.zero);
+  }
+
+  test(
+    'a switching set-on-connect mode holds before the first connection',
+    () async {
+      await connectGated(
+        chBike(
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        ),
+      );
+
+      expect(controller.selection.value, isNull);
+      expect(controller.needsBackgroundHold.value, isTrue);
+
+      connection.connectGate!.complete();
+      await connecting;
+    },
+  );
+
+  test(
+    'without set-on-connect nothing holds before the first connection',
+    () async {
+      await connectGated(chBike());
+
+      expect(controller.selection.value, isNull);
+      expect(controller.needsBackgroundHold.value, isFalse);
+
+      connection.connectGate!.complete();
+      await connecting;
+    },
+  );
+
   test(
     'without set-on-connect the selection follows the observed wire',
     () async {
@@ -192,6 +240,30 @@ void main() {
     expect(modeWrites().sublist(before), everyElement(7));
   });
 
+  test(
+    'a power cycle onto a foreign wire keeps the hold with set-on-connect',
+    () async {
+      await start(
+        chBike(
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        ),
+        bootWire: 7,
+      );
+      final holds = <bool>[];
+      final cleanup = controller.needsBackgroundHold.subscribe(holds.add);
+
+      connection.readFrames.add(v1StateFrame(mode: 7));
+      connection.emitState(BikeConnectionState.disconnected);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      cleanup();
+
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.observed.value?.mode, 1);
+      expect(controller.selection.value, const CustomRideMode(seededChMode));
+      expect(holds, everyElement(isTrue));
+    },
+  );
+
   test('speed while reconnecting writes nothing', () async {
     await start(
       chBike(
@@ -262,7 +334,7 @@ void main() {
     expect(controller.needsBackgroundHold.value, isFalse);
   });
 
-  test('the hold ends after 15 minutes without a connection', () async {
+  test('the hold stays while the bike is unreachable', () async {
     var now = DateTime(2026, 1, 1, 12);
     await start(
       chBike(
@@ -277,13 +349,9 @@ void main() {
       ..connectGate = Completer<void>()
       ..emitState(BikeConnectionState.disconnected);
     await Future<void>.delayed(const Duration(milliseconds: 30));
-    now = now.add(const Duration(minutes: 14));
+    now = now.add(const Duration(hours: 2));
     await Future<void>.delayed(const Duration(milliseconds: 30));
     expect(controller.needsBackgroundHold.value, isTrue);
-
-    now = now.add(const Duration(minutes: 2));
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    expect(controller.needsBackgroundHold.value, isFalse);
 
     connection.readFrames.add(v1StateFrame(mode: 1));
     connection.connectGate!.complete();

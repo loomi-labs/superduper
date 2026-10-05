@@ -15,7 +15,6 @@ final class RideModeController {
     DateTime Function()? clock,
     this.speedTimeout = const Duration(seconds: 5),
     Duration watchdogInterval = const Duration(seconds: 1),
-    this.holdReleaseAfter = const Duration(minutes: 15),
   }) : _clock = clock ?? DateTime.now {
     _stateCleanup = session.state.subscribe(_onState);
     _observedCleanup = session.observed.subscribe(_onObserved);
@@ -25,10 +24,6 @@ final class RideModeController {
 
   final BikeSession session;
   final Duration speedTimeout;
-
-  /// A bike that stays unreachable this long (switched off after a ride)
-  /// releases the background hold until it is ready again.
-  final Duration holdReleaseAfter;
   final DateTime Function() _clock;
   final Signal<RideModeSelection?> _selection = signal(
     null,
@@ -45,12 +40,12 @@ final class RideModeController {
   SavedBike _bike;
   int? _assertedWire;
   DateTime? _lastRideDataRequestAt;
-  DateTime? _notReadySince;
   // While a select write is in flight, the hold follows the previous
   // selection: the new mode is not on the bike yet.
   var _selectInFlight = false;
   RideModeSelection? _holdSelection;
   var _wasReady = false;
+  var _linkSettled = false;
   var _disposed = false;
 
   ReadonlySignal<RideModeSelection?> get selection => _selection.readonly();
@@ -58,6 +53,15 @@ final class RideModeController {
       _needsBackgroundHold.readonly();
   int? get assertedWire => _assertedWire;
   BikeRegion? get _region => _bike.bike.region;
+
+  /// The selection the hold follows until the bike confirms one: the
+  /// set-on-connect custom mode, so a rider who leaves the app during the
+  /// first connection keeps the speed check.
+  RideModeSelection? get _savedSelection =>
+      switch (resolveSetOnConnect(_bike).rideMode) {
+        final mode? => CustomRideMode(mode),
+        null => null,
+      };
 
   bool get _ready => switch (session.state.peek()) {
     SessionReady() || SessionSynchronizing() => session.canChangeConfiguration,
@@ -138,12 +142,12 @@ final class RideModeController {
     if (_disposed) {
       return;
     }
+    _linkSettled = switch (state) {
+      SessionReady() => true,
+      SessionSynchronizing() => _linkSettled,
+      _ => false,
+    };
     final ready = state is SessionReady;
-    if (ready) {
-      _notReadySince = null;
-    } else if (_wasReady) {
-      _notReadySince = _clock();
-    }
     if (ready && !_wasReady) {
       _onBecameReady();
     }
@@ -178,6 +182,11 @@ final class RideModeController {
     if (_disposed || observed == null) {
       return;
     }
+    // During a connection the session publishes the wire it reads before the
+    // set-on-connect write. That wire is not a rider choice.
+    if (!_linkSettled) {
+      return;
+    }
     final current = _selection.peek();
     if (current == null) {
       return;
@@ -210,9 +219,6 @@ final class RideModeController {
   void _checkSpeedStream() {
     if (_disposed) {
       return;
-    }
-    if (_notReadySince != null) {
-      _publishHold();
     }
     if (!_ready) {
       return;
@@ -254,7 +260,9 @@ final class RideModeController {
     if (_disposed) {
       return;
     }
-    final current = _selectInFlight ? _holdSelection : _selection.peek();
+    final current =
+        (_selectInFlight ? _holdSelection : _selection.peek()) ??
+        _savedSelection;
     final dynamic = current != null && isDynamicSelection(current, _region);
     final linkWanted = switch (session.state.peek()) {
       SessionDisconnected(manuallyPaused: true) ||
@@ -262,10 +270,6 @@ final class RideModeController {
       SessionDisposed() => false,
       _ => true,
     };
-    final notReadySince = _notReadySince;
-    final gaveUp =
-        notReadySince != null &&
-        _clock().difference(notReadySince) >= holdReleaseAfter;
-    _needsBackgroundHold.value = dynamic && linkWanted && !gaveUp;
+    _needsBackgroundHold.value = dynamic && linkWanted;
   }
 }

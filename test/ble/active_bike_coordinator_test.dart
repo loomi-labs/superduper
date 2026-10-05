@@ -6,6 +6,7 @@ import 'package:signals/signals.dart';
 import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_session.dart';
+import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/persistence/app_database.dart';
@@ -24,7 +25,9 @@ void main() {
   late ActiveBikeCoordinator coordinator;
   late Map<String, List<FakeBikeConnection>> connections;
   late Map<String, List<List<int>>> connectionFrames;
+  late Map<String, Completer<void>> connectionGates;
   late bool throwWhenBuildingSession;
+  late List<Duration> reconnectDelays;
   late bool databaseClosed;
 
   BikeSession buildTestSession(SavedBike bike) {
@@ -37,13 +40,14 @@ void main() {
             const [
               [0, 0, 0, 0, 0, 0],
             ],
-      );
+      )
+      ..connectGate = connectionGates[bike.bike.deviceId];
     connections.putIfAbsent(bike.bike.deviceId, () => []).add(connection);
     return BikeSession(
       connection: connection,
       setOnConnect: resolveSetOnConnect(bike).patch,
       protocol: bike.bike.protocol,
-      reconnectDelays: const [],
+      reconnectDelays: reconnectDelays,
     );
   }
 
@@ -54,7 +58,9 @@ void main() {
     permissions = FakeBluetoothPermissionGateway();
     connections = {};
     connectionFrames = {};
+    connectionGates = {};
     throwWhenBuildingSession = false;
+    reconnectDelays = const [];
     databaseClosed = false;
     await settings.initialize();
     await bikes.addBike(deviceId: 'first', displayName: 'First');
@@ -556,6 +562,75 @@ void main() {
       },
     );
 
+    test(
+      'the hold follows the set-on-connect mode before the first connection',
+      () async {
+        await addChBike();
+        connectionFrames['ch'] = [v1StateFrame(mode: 7)];
+        final gate = connectionGates['ch'] = Completer<void>();
+        await settings.makeBikeActive('ch');
+        await coordinator.dispose();
+        coordinator = ActiveBikeCoordinator(
+          bikeRepository: bikes,
+          settingsRepository: settings,
+          permissions: permissions,
+          buildSession: buildTestSession,
+          backgroundHold: hold,
+        );
+        await coordinator.start();
+        await Future<void>.delayed(Duration.zero);
+
+        await coordinator.setForeground(false);
+        gate.complete();
+        await _waitFor(
+          coordinator.state,
+          (state) =>
+              state is ActiveBikeSessionStatus &&
+              state.sessionState is SessionReady,
+        );
+
+        expect(hold.held, isTrue);
+      },
+    );
+
+    test('a power cycle onto a foreign wire keeps the hold', () async {
+      reconnectDelays = const [Duration(milliseconds: 10)];
+      await addChBike();
+      final ready = await startActive('ch', bootWire: 7);
+      await Future<void>.delayed(Duration.zero);
+      await coordinator.setForeground(false);
+      final connection = connections['ch']!.single;
+      expect(hold.held, isTrue);
+      hold.calls.clear();
+
+      connection.readFrames.add(v1StateFrame(mode: 7));
+      connection.emitState(BikeConnectionState.disconnected);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await _waitFor(
+        coordinator.state,
+        (state) =>
+            state is ActiveBikeSessionStatus &&
+            state.sessionState is SessionReady,
+      );
+
+      expect(hold.calls, isNot(contains(false)));
+      expect(ready.session.observed.value?.mode, 1);
+    });
+
+    test('a failed service start is tried again in the background', () async {
+      await addChBike();
+      hold.failNext = true;
+      await startActive('ch', bootWire: 7);
+      await Future<void>.delayed(Duration.zero);
+      expect(hold.held, isFalse);
+
+      await coordinator.setForeground(false);
+
+      expect(hold.held, isTrue);
+      final state = coordinator.state.value as ActiveBikeSessionStatus;
+      expect(state.sessionState, isA<SessionReady>());
+    });
+
     test('manual disconnect releases the hold', () async {
       await addChBike();
       await startActive('ch', bootWire: 7);
@@ -626,10 +701,15 @@ Future<void> _waitUntil(bool Function() condition) async {
 
 final class RecordingHold implements BackgroundHoldGateway {
   bool held = false;
+  bool failNext = false;
   final List<bool> calls = [];
 
   @override
   Future<void> setHeld(bool value) async {
+    if (value && failNext) {
+      failNext = false;
+      throw StateError('service did not start');
+    }
     held = value;
     calls.add(value);
   }

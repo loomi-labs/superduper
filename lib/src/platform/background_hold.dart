@@ -65,13 +65,17 @@ final class AndroidForegroundServiceHold implements BackgroundHoldGateway {
         await FlutterForegroundTask.requestIgnoreBatteryOptimization();
       }
       if (!await FlutterForegroundTask.isRunningService) {
-        await FlutterForegroundTask.startService(
+        final result = await FlutterForegroundTask.startService(
           serviceTypes: [ForegroundServiceTypes.connectedDevice],
           serviceId: serviceId,
           notificationTitle: 'Superduper CH is holding your speed limit',
           notificationText: 'Tap to return to the app',
           callback: backgroundHoldCallback,
         );
+        if (result case ServiceRequestFailure(:final error)) {
+          _held = false;
+          throw StateError('The foreground service did not start: $error');
+        }
       }
     } else if (await FlutterForegroundTask.isRunningService) {
       await FlutterForegroundTask.stopService();

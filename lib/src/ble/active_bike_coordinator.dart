@@ -373,6 +373,8 @@ final class ActiveBikeCoordinator {
       }
     } else {
       if (_rideMode?.needsBackgroundHold.peek() ?? false) {
+        // A service that did not start keeps the process at risk.
+        await backgroundHold.setHeld(true).catchError((Object _) {});
         return;
       }
       await _session?.pauseForBackground();

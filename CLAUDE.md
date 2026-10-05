@@ -68,11 +68,12 @@ US offers wires 0 to 3, EU offers 4 to 7, CH offers 7 and the custom modes. A V2
 
 ## Background hold
 
-- The hold is on only while the selected ride mode is a custom mode that switches (base and cap differ) and the rider wants the link (no manual disconnect, no final failure).
+- The hold is on while the selected ride mode is a custom mode that switches (base and cap differ) and the rider wants the link (no manual disconnect, no final failure). Before the bike confirms a mode, the hold follows the set-on-connect custom mode.
 - While the hold is on, the app stays connected when it goes to the background. Otherwise the session pauses in the background.
 - When the hold ends while the app is in the background, the session pauses.
-- When the session is not ready for 15 minutes, the hold ends until the session is ready again.
+- The app follows a mode change on the bike only while the link is ready. The wire that the app reads before the set-on-connect write does not change the selection.
 - During the write of a mode choice, the hold follows the previous selection. It changes only when the bike accepted the new mode.
+- When the foreground service does not start, the app tries again when it goes to the background.
 - iOS has no hold. A switching mode stops when the app leaves the foreground, and the control page says so.
 
 ## Repository rules
