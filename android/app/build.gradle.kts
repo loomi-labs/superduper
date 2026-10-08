@@ -1,10 +1,9 @@
-import java.util.Properties
 import java.io.FileInputStream
+import java.util.Properties
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    // The Flutter Gradle Plugin must be applied after the Android plugin.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -15,30 +14,26 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "io.kbl.superduper"
-    compileSdk = 36
-    ndkVersion = "28.2.13676358"
+    namespace = "com.loomilabs.superduperch"
+    compileSdk = 37
+    ndkVersion = flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
-
     defaultConfig {
-        applicationId = "io.kbl.superduper"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-build-configuration.
-        minSdk = 29
-        targetSdk = 36
+        applicationId = "com.loomilabs.superduperch"
+        minSdk = 31
+        targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
 
     signingConfigs {
-        create("release") {
-            if (keystorePropertiesFile.exists()) {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
                 keyAlias = keystoreProperties["keyAlias"] as String
                 keyPassword = keystoreProperties["keyPassword"] as String
                 storeFile = keystoreProperties["storeFile"]?.let { file(it) }
@@ -49,47 +44,32 @@ android {
 
     buildTypes {
         release {
-            // Debug signing here is a local-build convenience only. The
-            // task-graph check below stops it reaching a real release artifact.
-            signingConfig = if (keystorePropertiesFile.exists())
-                signingConfigs.getByName("release")
-            else
-                signingConfigs.getByName("debug")
+            signingConfig =
+                if (keystorePropertiesFile.exists()) {
+                    signingConfigs.getByName("release")
+                } else {
+                    signingConfigs.getByName("debug")
+                }
         }
     }
 }
 
-// A distributed artifact must never carry the debug certificate. The check runs
-// when a release task runs, not while the project configures: the buildTypes
-// block above configures on every Gradle invocation, so failing there would
-// break debug builds too.
-//
-// A task action rather than gradle.taskGraph.whenReady: whenReady is a
-// configuration-phase callback that the configuration cache rejects, and
-// Gradle 9 drops it. Only the captured Boolean crosses into the action, so this
-// form stays cache-safe.
-//
-// Compared against "true", not just tested for presence: hasProperty() is
-// satisfied by -PallowDebugSigning=false as well.
+// A distributed artifact must never carry the debug certificate. The check
+// runs as a task action, so the configuration cache accepts it.
 val allowDebugSigning = project.findProperty("allowDebugSigning")?.toString() == "true"
 
 if (!keystorePropertiesFile.exists()) {
     tasks.configureEach {
         val signsRelease = name.contains("Release") &&
-            listOf("assemble", "bundle", "package", "signingConfigWriter")
-                .any { name.startsWith(it) }
+            listOf("assemble", "bundle", "package", "signingConfigWriter").any { name.startsWith(it) }
         if (signsRelease) {
             doFirst {
                 if (allowDebugSigning) {
-                    logger.warn(
-                        "WARNING: signing the release build with the DEBUG certificate. " +
-                            "This artifact is for local testing only. Do not distribute it."
-                    )
+                    logger.warn("WARNING: signing the release build with the DEBUG certificate. Do not distribute it.")
                 } else {
                     throw GradleException(
-                        "key.properties is missing, so the release build would be signed " +
-                            "with the debug certificate. Add key.properties, or set " +
-                            "ORG_GRADLE_PROJECT_allowDebugSigning=true for a local build."
+                        "key.properties is missing, so the release build would be signed with the debug " +
+                            "certificate. Add key.properties, or set ORG_GRADLE_PROJECT_allowDebugSigning=true for a local build."
                     )
                 }
             }
@@ -97,4 +77,16 @@ if (!keystorePropertiesFile.exists()) {
     }
 }
 
-flutter { source = "../.." }
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}

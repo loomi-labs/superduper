@@ -1,6 +1,6 @@
 # Privacy Policy for SuperDuper App
 
-**Effective Date: August 25, 2026**
+**Effective Date: May 4th, 2025**
 
 ## Introduction
 
@@ -22,17 +22,11 @@ SuperDuper is designed to connect to your ebike via Bluetooth. The app is design
 
 ### Data Stored on Your Device Only
 
-SuperDuper stores the following information on your device:
+The following information is stored locally on your device only and is never transmitted to us or any third parties:
 
 - Bluetooth information about your ebike(s) to enable connection
 - Custom bike names you create
 - Your preferred bike settings
-- Diagnostic logs of the app's Bluetooth activity, in a rotating file
-
-SuperDuper does not upload this information, and it sends none of it to us. The
-data leaves your device only when you start a transfer yourself. For example,
-the SHARE LOGS button transfers every log file that is on your device to the
-app or the person you select. You select the recipient, not the files.
 
 ### Required App Store Data
 
@@ -49,8 +43,7 @@ This information is collected by Apple and Google, not by SuperDuper, and is sub
 SuperDuper requests the following permissions:
 
 - **Bluetooth**: Required to connect to your ebike
-- **Location** (Android only): Required by Android's system for Bluetooth scanning
-- **Background processing** (Android only): keeps your locks and speed limiting working while the app is in the background
+- **Background processing** (for Android Background Sync)
 
 These permissions are used solely for the functionality of the app and not for data collection purposes.
 

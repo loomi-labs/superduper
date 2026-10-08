@@ -1,0 +1,787 @@
+import 'package:drift/drift.dart';
+import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/bike_names.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
+import 'package:superduper/src/persistence/app_database.dart';
+
+final class BikeRepository {
+  new({required this.database, DateTime Function()? clock})
+    : _clock = clock ?? DateTime.now;
+
+  final AppDatabase database;
+  final DateTime Function() _clock;
+
+  Stream<List<SavedBike>> watchBikes() {
+    return _savedBikesQuery().watch().asyncMap(
+      (rows) async => _mapAll(rows, await _customModeRows()),
+    );
+  }
+
+  Future<List<SavedBike>> getBikes() async {
+    final rows = await _savedBikesQuery().get();
+    return _mapAll(rows, await _customModeRows());
+  }
+
+  Future<SavedBike> addBike({
+    required String deviceId,
+    String? advertisedName,
+    String? displayName,
+    BikeRegion? region = BikeRegion.us,
+    BikeColor color = BikeColor.royalHorizon,
+    SetOnConnect setOnConnect = const SetOnConnect(),
+    List<CustomMode> customModes = const [],
+    BackgroundPreference backgroundPreference =
+        const BackgroundPreference.defaults(),
+    BikeVersionInfo? versions,
+    String? moduleSerial,
+    int? odometerMeters,
+  }) {
+    final normalizedId = deviceId.trim();
+    if (normalizedId.isEmpty) {
+      throw ArgumentError.value(deviceId, 'deviceId', 'Must not be empty.');
+    }
+    _validateBackgroundPreference(backgroundPreference);
+    final normalizedVersions = versions == null
+        ? null
+        : _normalizeVersionInfo(versions);
+    if (odometerMeters != null) {
+      _validateUnsigned(odometerMeters, 0xffffffff, 'odometerMeters');
+    }
+    final normalizedAdvertisedName =
+        (advertisedName ?? BikeProtocolVersion.v1.advertisedName).trim();
+    final protocol = BikeProtocolVersion.fromAdvertisedName(
+      normalizedAdvertisedName,
+    );
+    if (protocol == null) {
+      throw ArgumentError.value(
+        advertisedName,
+        'advertisedName',
+        'Must be a supported bike advertised name.',
+      );
+    }
+    _validateCustomModes(customModes);
+    _validateSetOnConnect(setOnConnect, protocol, customModes);
+    final persistedRegion = protocol.normalizeRegion(region);
+    final normalizedName = _normalizeName(displayName, normalizedId);
+    final normalizedSerial = moduleSerial == null
+        ? null
+        : _normalizeModuleSerial(moduleSerial);
+
+    return database.transaction(() async {
+      await _ensureSettings();
+      final existing =
+          await (database.select(database.bikes)
+                ..where((table) => table.deviceId.equals(normalizedId)))
+              .getSingleOrNull();
+      if (existing != null) {
+        throw BikeAlreadyExistsException(normalizedId);
+      }
+      final nextSortOrder = (await _highestSortOrder()) + 1;
+      final now = _clock().millisecondsSinceEpoch;
+
+      await database
+          .into(database.bikes)
+          .insert(
+            BikesCompanion.insert(
+              deviceId: normalizedId,
+              displayName: normalizedName,
+              advertisedName: normalizedAdvertisedName,
+              protocol: protocol,
+              region: Value(persistedRegion?.name),
+              colorKey: color.key,
+              sortOrder: nextSortOrder,
+              createdAtMs: now,
+              updatedAtMs: now,
+              moduleSerial: Value(normalizedSerial),
+              odometerMeters: Value(odometerMeters),
+              odometerReadAtMs: Value(odometerMeters == null ? null : now),
+            ),
+          );
+      await database
+          .into(database.bikePreferences)
+          .insert(
+            _setOnConnectInsert(
+              normalizedId,
+              setOnConnect,
+              backgroundPreference,
+            ),
+          );
+      await _insertCustomModes(normalizedId, customModes);
+      if (normalizedVersions != null) {
+        await database
+            .into(database.bikeVersions)
+            .insert(_versionsInsert(normalizedId, normalizedVersions, now));
+      }
+
+      final settings = await _getSettings();
+      if (settings.activeBikeId == null) {
+        await _updateSettings(
+          AppSettingsCompanion(activeBikeId: Value(normalizedId)),
+        );
+      }
+
+      await database.refreshBackgroundSyncPlan();
+
+      return (await _getBikeOrNull(normalizedId))!;
+    });
+  }
+
+  Future<void> forgetBike(String deviceId) {
+    return database.transaction(() async {
+      await _requireBike(deviceId);
+      await _ensureSettings();
+      final settings = await _getSettings();
+      await (database.delete(
+        database.bikes,
+      )..where((table) => table.deviceId.equals(deviceId))).go();
+
+      if (settings.activeBikeId == deviceId) {
+        await _updateSettings(
+          AppSettingsCompanion(
+            activeBikeId: Value(await _lowestSortedBikeId()),
+          ),
+        );
+      }
+      await database.refreshBackgroundSyncPlan();
+    });
+  }
+
+  Future<void> updateBikeDetails(
+    String deviceId, {
+    required String displayName,
+    required BikeRegion? region,
+    required BikeColor color,
+    required BikeProtocolVersion protocol,
+  }) {
+    final normalizedName = displayName.trim();
+    if (normalizedName.isEmpty) {
+      throw ArgumentError.value(
+        displayName,
+        'displayName',
+        'Must not be empty.',
+      );
+    }
+    final newRegion = protocol.normalizeRegion(region);
+    return database.transaction(() async {
+      final before = await _requireBike(deviceId);
+      await _updateBike(
+        deviceId,
+        BikesCompanion(
+          displayName: Value(normalizedName),
+          protocol: Value(protocol),
+          region: Value(newRegion?.name),
+          colorKey: Value(color.key),
+        ),
+      );
+      if (newRegion != null && before.region != newRegion.name) {
+        await _adaptModesToRegion(deviceId, newRegion);
+      }
+    });
+  }
+
+  /// A native wire belongs to one region. After a region change, a CH bike
+  /// gets the seeded custom mode, and a set-on-connect wire that the new
+  /// region does not offer is cleared (on CH it points at the seeded mode).
+  Future<void> _adaptModesToRegion(String deviceId, BikeRegion region) async {
+    var customModes = [
+      for (final row in await _customModeRows(deviceId: deviceId))
+        _mapCustomMode(row),
+    ];
+    if (region == BikeRegion.ch && customModes.isEmpty) {
+      await _insertCustomModes(deviceId, const [seededChMode]);
+      customModes = const [seededChMode];
+    }
+    final preferences = await (database.select(
+      database.bikePreferences,
+    )..where((table) => table.deviceId.equals(deviceId))).getSingle();
+    final setOnConnect = preferences.setOnConnect;
+    if (setOnConnect.mode case NativeModeRef(:final wire)
+        when !nativeWiresFor(region).contains(wire)) {
+      final seeded =
+          region == BikeRegion.ch &&
+          customModes.any((mode) => mode.id == seededChModeId);
+      await (database.update(
+        database.bikePreferences,
+      )..where((table) => table.deviceId.equals(deviceId))).write(
+        BikePreferencesCompanion(
+          setOnConnect: Value(
+            setOnConnect.copyWith(
+              mode: seeded ? const CustomModeRef(seededChModeId) : null,
+            ),
+          ),
+        ),
+      );
+    }
+    await database.refreshBackgroundSyncPlan();
+  }
+
+  Future<void> setOnConnect(String deviceId, SetOnConnect settings) {
+    return database.transaction(() async {
+      final bike = await _requireBike(deviceId);
+      final customModes = [
+        for (final row in await _customModeRows(deviceId: deviceId))
+          _mapCustomMode(row),
+      ];
+      _validateSetOnConnect(settings, bike.protocol, customModes);
+      await _updatePreferences(
+        deviceId,
+        BikePreferencesCompanion(setOnConnect: Value(settings)),
+      );
+    });
+  }
+
+  Future<void> setCustomModes(String deviceId, List<CustomMode> modes) {
+    _validateCustomModes(modes);
+    return database.transaction(() async {
+      final bike = await _requireBike(deviceId);
+      await (database.delete(
+        database.bikeCustomModes,
+      )..where((t) => t.deviceId.equals(deviceId))).go();
+      await _insertCustomModes(deviceId, modes);
+      final preferences = await (database.select(
+        database.bikePreferences,
+      )..where((t) => t.deviceId.equals(deviceId))).getSingle();
+      if (preferences.setOnConnect.mode case CustomModeRef(:final id)
+          when !modes.any((mode) => mode.id == id)) {
+        await (database.update(
+          database.bikePreferences,
+        )..where((t) => t.deviceId.equals(deviceId))).write(
+          BikePreferencesCompanion(
+            setOnConnect: Value(preferences.setOnConnect.copyWith(mode: null)),
+          ),
+        );
+      }
+      await (database.update(
+        database.bikes,
+      )..where((t) => t.deviceId.equals(bike.deviceId))).write(
+        BikesCompanion(updatedAtMs: Value(_clock().millisecondsSinceEpoch)),
+      );
+      await database.refreshBackgroundSyncPlan();
+    });
+  }
+
+  Future<void> _insertCustomModes(
+    String deviceId,
+    List<CustomMode> modes,
+  ) async {
+    for (var index = 0; index < modes.length; index++) {
+      final mode = modes[index];
+      await database
+          .into(database.bikeCustomModes)
+          .insert(
+            BikeCustomModesCompanion.insert(
+              deviceId: deviceId,
+              modeId: mode.id,
+              name: mode.name.trim(),
+              limitKmh: mode.effectiveLimitKmh,
+              throttle: mode.throttle,
+              sortOrder: index,
+            ),
+          );
+    }
+  }
+
+  void _validateCustomModes(List<CustomMode> modes) {
+    final ids = <String>{};
+    for (final mode in modes) {
+      if (mode.id.trim().isEmpty || !ids.add(mode.id)) {
+        throw ArgumentError.value(
+          mode.id,
+          'id',
+          'Custom mode ids must be unique and not empty.',
+        );
+      }
+      final name = mode.name.trim();
+      if (name.isEmpty || name.length > customModeNameMaxLength) {
+        throw ArgumentError.value(
+          mode.name,
+          'name',
+          'Must be 1 to $customModeNameMaxLength characters.',
+        );
+      }
+      if (mode.limitKmh < customLimitMin || mode.limitKmh > customLimitMax) {
+        throw ArgumentError.value(
+          mode.limitKmh,
+          'limitKmh',
+          'Must be $customLimitMin to $customLimitMax.',
+        );
+      }
+    }
+  }
+
+  Future<void> setStreetLegalOnQuickRestart(String deviceId, bool enabled) {
+    return _updatePreferences(
+      deviceId,
+      BikePreferencesCompanion(streetLegalOnQuickRestart: Value(enabled)),
+    );
+  }
+
+  /// Stores the stock mode of the street-legal lock. Null means the default
+  /// of the region and the protocol.
+  Future<void> setStreetLegalStockMode(String deviceId, int? wire) {
+    return database.transaction(() async {
+      final bike = await _requireBike(deviceId);
+      if (wire != null) {
+        BikeControlValues.validateMode(wire, bike.protocol);
+      }
+      await _updatePreferences(
+        deviceId,
+        BikePreferencesCompanion(streetLegalStockMode: Value(wire)),
+      );
+    });
+  }
+
+  Future<void> setBackgroundPreference(
+    String deviceId, {
+    required bool requested,
+    required int consentVersion,
+  }) {
+    final preference = BackgroundPreference(
+      requested: requested,
+      consentVersion: consentVersion,
+    );
+    _validateBackgroundPreference(preference);
+    return _updatePreferences(
+      deviceId,
+      BikePreferencesCompanion(
+        backgroundRequested: Value(requested),
+        backgroundConsentVersion: Value(consentVersion),
+      ),
+    );
+  }
+
+  Future<void> markConnected(String deviceId) {
+    return _updateBike(
+      deviceId,
+      BikesCompanion(lastConnectedAtMs: Value(_clock().millisecondsSinceEpoch)),
+      touchUpdatedAt: false,
+    );
+  }
+
+  Future<bool> saveVersions(String deviceId, BikeVersionInfo versions) {
+    final normalized = _normalizeVersionInfo(versions);
+    return database.transaction(() async {
+      await _requireBike(deviceId);
+      final current = await (database.select(
+        database.bikeVersions,
+      )..where((table) => table.deviceId.equals(deviceId))).getSingleOrNull();
+      if (current != null && _mapVersionInfo(current) == normalized) {
+        return false;
+      }
+      final now = _clock().millisecondsSinceEpoch;
+      await database
+          .into(database.bikeVersions)
+          .insertOnConflictUpdate(_versionsInsert(deviceId, normalized, now));
+      await (database.update(database.bikes)
+            ..where((table) => table.deviceId.equals(deviceId)))
+          .write(BikesCompanion(updatedAtMs: Value(now)));
+      return true;
+    });
+  }
+
+  Future<bool> saveModuleSerial(String deviceId, String moduleSerial) {
+    final normalized = _normalizeModuleSerial(moduleSerial);
+    return database.transaction(() async {
+      final bike = await _requireBike(deviceId);
+      if (bike.moduleSerial == normalized) {
+        return false;
+      }
+      await (database.update(
+        database.bikes,
+      )..where((table) => table.deviceId.equals(deviceId))).write(
+        BikesCompanion(
+          moduleSerial: Value(normalized),
+          updatedAtMs: Value(_clock().millisecondsSinceEpoch),
+        ),
+      );
+      await database.refreshBackgroundSyncPlan();
+      return true;
+    });
+  }
+
+  Future<bool> saveOdometer(String deviceId, int meters) {
+    _validateUnsigned(meters, 0xffffffff, 'meters');
+    return database.transaction(() async {
+      final bike = await _requireBike(deviceId);
+      final changed = bike.odometerMeters != meters;
+      await (database.update(
+        database.bikes,
+      )..where((table) => table.deviceId.equals(deviceId))).write(
+        BikesCompanion(
+          odometerMeters: Value(meters),
+          odometerReadAtMs: Value(_clock().millisecondsSinceEpoch),
+        ),
+      );
+      return changed;
+    });
+  }
+
+  Future<void> _updateBike(
+    String deviceId,
+    BikesCompanion changes, {
+    bool touchUpdatedAt = true,
+  }) {
+    return database.transaction(() async {
+      await _requireBike(deviceId);
+      final update = touchUpdatedAt
+          ? changes.copyWith(
+              updatedAtMs: Value(_clock().millisecondsSinceEpoch),
+            )
+          : changes;
+      await (database.update(
+        database.bikes,
+      )..where((table) => table.deviceId.equals(deviceId))).write(update);
+      if (touchUpdatedAt) {
+        await database.refreshBackgroundSyncPlan();
+      }
+    });
+  }
+
+  Future<void> _updatePreferences(
+    String deviceId,
+    BikePreferencesCompanion changes,
+  ) {
+    return database.transaction(() async {
+      await _requireBike(deviceId);
+      await (database.update(
+        database.bikePreferences,
+      )..where((table) => table.deviceId.equals(deviceId))).write(changes);
+      await (database.update(
+        database.bikes,
+      )..where((table) => table.deviceId.equals(deviceId))).write(
+        BikesCompanion(updatedAtMs: Value(_clock().millisecondsSinceEpoch)),
+      );
+      await database.refreshBackgroundSyncPlan();
+    });
+  }
+
+  Future<void> _ensureSettings() async {
+    await database
+        .into(database.appSettings)
+        .insert(
+          AppSettingsCompanion.insert(
+            singletonId: const Value(1),
+            migrationNoticePending: false,
+          ),
+          mode: InsertMode.insertOrIgnore,
+        );
+  }
+
+  Future<AppSettingRow> _getSettings() {
+    return (database.select(
+      database.appSettings,
+    )..where((table) => table.singletonId.equals(1))).getSingle();
+  }
+
+  Future<void> _updateSettings(AppSettingsCompanion changes) async {
+    await (database.update(
+      database.appSettings,
+    )..where((table) => table.singletonId.equals(1))).write(changes);
+  }
+
+  Future<SavedBike?> _getBikeOrNull(String deviceId) async {
+    final query = _savedBikesQuery()
+      ..where(database.bikes.deviceId.equals(deviceId));
+    final row = await query.getSingleOrNull();
+    if (row == null) {
+      return null;
+    }
+    return _mapBike(
+      row.readTable(database.bikes),
+      row.readTable(database.bikePreferences),
+      row.readTableOrNull(database.bikeVersions),
+      await _customModeRows(deviceId: deviceId),
+    );
+  }
+
+  List<SavedBike> _mapAll(
+    List<TypedResult> rows,
+    List<BikeCustomModeRow> customModeRows,
+  ) {
+    final customModesByBike = <String, List<BikeCustomModeRow>>{};
+    for (final row in customModeRows) {
+      customModesByBike.putIfAbsent(row.deviceId, () => []).add(row);
+    }
+    return List.unmodifiable(
+      rows.map((row) {
+        final bike = row.readTable(database.bikes);
+        return _mapBike(
+          bike,
+          row.readTable(database.bikePreferences),
+          row.readTableOrNull(database.bikeVersions),
+          customModesByBike[bike.deviceId] ?? const [],
+        );
+      }),
+    );
+  }
+
+  Future<List<BikeCustomModeRow>> _customModeRows({String? deviceId}) {
+    final query = database.select(database.bikeCustomModes);
+    if (deviceId != null) {
+      query.where((table) => table.deviceId.equals(deviceId));
+    }
+    query.orderBy([(table) => OrderingTerm.asc(table.sortOrder)]);
+    return query.get();
+  }
+
+  CustomMode _mapCustomMode(BikeCustomModeRow row) {
+    return CustomMode(
+      id: row.modeId,
+      name: row.name,
+      limitKmh: row.limitKmh,
+      throttle: row.throttle,
+    );
+  }
+
+  JoinedSelectStatement<HasResultSet, dynamic> _savedBikesQuery() {
+    final query = database.select(database.bikes).join([
+      innerJoin(
+        database.bikePreferences,
+        database.bikePreferences.deviceId.equalsExp(database.bikes.deviceId),
+      ),
+      leftOuterJoin(
+        database.bikeVersions,
+        database.bikeVersions.deviceId.equalsExp(database.bikes.deviceId),
+      ),
+    ]);
+    return query..orderBy([
+      OrderingTerm.asc(database.bikes.sortOrder),
+      OrderingTerm.asc(database.bikes.createdAtMs),
+      OrderingTerm.asc(database.bikes.deviceId),
+    ]);
+  }
+
+  Future<BikeRow> _requireBike(String deviceId) async {
+    final bike = await (database.select(
+      database.bikes,
+    )..where((table) => table.deviceId.equals(deviceId))).getSingleOrNull();
+    if (bike == null) {
+      throw BikeNotFoundException(deviceId);
+    }
+    return bike;
+  }
+
+  Future<int> _highestSortOrder() async {
+    final maxSortOrder = database.bikes.sortOrder.max();
+    final row = await (database.selectOnly(
+      database.bikes,
+    )..addColumns([maxSortOrder])).getSingle();
+    return row.read<int>(maxSortOrder) ?? -1;
+  }
+
+  Future<String?> _lowestSortedBikeId() async {
+    final row =
+        await (database.select(database.bikes)
+              ..orderBy([
+                (table) => OrderingTerm.asc(table.sortOrder),
+                (table) => OrderingTerm.asc(table.createdAtMs),
+                (table) => OrderingTerm.asc(table.deviceId),
+              ])
+              ..limit(1))
+            .getSingleOrNull();
+    return row?.deviceId;
+  }
+
+  SavedBike _mapBike(
+    BikeRow bike,
+    BikePreferenceRow preferences,
+    BikeVersionRow? versions,
+    List<BikeCustomModeRow> customModes,
+  ) {
+    final region = switch (bike.region) {
+      'us' => BikeRegion.us,
+      'eu' => BikeRegion.eu,
+      'ch' => BikeRegion.ch,
+      null => null,
+      final value => throw StateError('Unknown bike region "$value".'),
+    };
+    final color = BikeColor.fromKey(bike.colorKey);
+    if (color == null) {
+      throw StateError('Unknown bike color "${bike.colorKey}".');
+    }
+    return SavedBike(
+      bike: Bike(
+        deviceId: bike.deviceId,
+        displayName: bike.displayName,
+        advertisedName: bike.advertisedName,
+        protocol: bike.protocol,
+        region: region,
+        color: color,
+        sortOrder: bike.sortOrder,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(bike.createdAtMs),
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(bike.updatedAtMs),
+        lastConnectedAt: bike.lastConnectedAtMs == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(bike.lastConnectedAtMs!),
+        moduleSerial: bike.moduleSerial,
+      ),
+      setOnConnect: preferences.setOnConnect,
+      customModes: List.unmodifiable(customModes.map(_mapCustomMode)),
+      streetLegalOnQuickRestart: preferences.streetLegalOnQuickRestart,
+      streetLegalStockMode: preferences.streetLegalStockMode,
+      backgroundPreference: BackgroundPreference(
+        requested: preferences.backgroundRequested,
+        consentVersion: preferences.backgroundConsentVersion,
+      ),
+      versions: versions == null
+          ? null
+          : CachedBikeVersions(
+              info: _mapVersionInfo(versions),
+              readAt: DateTime.fromMillisecondsSinceEpoch(versions.readAtMs),
+            ),
+      odometer: bike.odometerMeters == null || bike.odometerReadAtMs == null
+          ? null
+          : CachedBikeOdometer(
+              meters: bike.odometerMeters!,
+              readAt: DateTime.fromMillisecondsSinceEpoch(
+                bike.odometerReadAtMs!,
+              ),
+            ),
+    );
+  }
+
+  BikeVersionInfo _mapVersionInfo(BikeVersionRow row) {
+    return BikeVersionInfo(
+      hardwareRevision: row.hardwareRevision,
+      firmwareRevision: row.firmwareRevision,
+      softwareRevision: row.softwareRevision,
+      stmFirmwareVersion: row.stmFirmwareVersion,
+      controllerVariant: row.controllerVariant,
+      bootloaderHandoff: row.bootloaderHandoff,
+      motorControllerVersion: row.motorControllerVersion,
+      bmsVersion: row.bmsVersion,
+    );
+  }
+
+  BikePreferencesCompanion _setOnConnectInsert(
+    String deviceId,
+    SetOnConnect setOnConnect,
+    BackgroundPreference backgroundPreference,
+  ) {
+    return BikePreferencesCompanion.insert(
+      deviceId: deviceId,
+      setOnConnect: setOnConnect,
+      backgroundRequested: backgroundPreference.requested,
+      backgroundConsentVersion: backgroundPreference.consentVersion,
+    );
+  }
+
+  BikeVersionsCompanion _versionsInsert(
+    String deviceId,
+    BikeVersionInfo versions,
+    int readAtMs,
+  ) {
+    return BikeVersionsCompanion.insert(
+      deviceId: deviceId,
+      hardwareRevision: versions.hardwareRevision,
+      firmwareRevision: versions.firmwareRevision,
+      softwareRevision: versions.softwareRevision,
+      stmFirmwareVersion: versions.stmFirmwareVersion,
+      controllerVariant: versions.controllerVariant,
+      bootloaderHandoff: versions.bootloaderHandoff,
+      motorControllerVersion: versions.motorControllerVersion,
+      bmsVersion: versions.bmsVersion,
+      readAtMs: readAtMs,
+    );
+  }
+
+  String _normalizeName(String? displayName, String deviceId) {
+    final normalized = displayName?.trim() ?? '';
+    return normalized.isEmpty ? defaultBikeName(deviceId) : normalized;
+  }
+
+  String _normalizeModuleSerial(String moduleSerial) {
+    final normalized = moduleSerial.trim().toLowerCase();
+    if (!RegExp(r'^[0-9a-f]{16}$').hasMatch(normalized)) {
+      throw ArgumentError.value(
+        moduleSerial,
+        'moduleSerial',
+        'Must be a 16-character hexadecimal chip ID.',
+      );
+    }
+    return normalized;
+  }
+
+  void _validateSetOnConnect(
+    SetOnConnect settings,
+    BikeProtocolVersion protocol,
+    List<CustomMode> customModes,
+  ) {
+    if (settings.light == false) {
+      throw ArgumentError.value(
+        settings.light,
+        'light',
+        'Set on connect can only turn the light on.',
+      );
+    }
+    switch (settings.mode) {
+      case null:
+        break;
+      case NativeModeRef(:final wire):
+        BikeControlValues.validateMode(wire, protocol);
+      case CustomModeRef(:final id):
+        if (!customModes.any((mode) => mode.id == id)) {
+          throw ArgumentError.value(
+            id,
+            'mode',
+            'Must be one of the bike custom modes.',
+          );
+        }
+    }
+    if (settings.assist case final assist?) {
+      BikeControlValues.validateAssist(assist);
+    }
+  }
+
+  void _validateBackgroundPreference(BackgroundPreference preference) {
+    if (preference.consentVersion < 0) {
+      throw ArgumentError.value(
+        preference.consentVersion,
+        'consentVersion',
+        'Must not be negative.',
+      );
+    }
+  }
+
+  BikeVersionInfo _normalizeVersionInfo(BikeVersionInfo versions) {
+    final hardware = versions.hardwareRevision.trim();
+    final firmware = versions.firmwareRevision.trim();
+    final software = versions.softwareRevision.trim();
+    if (hardware.isEmpty || firmware.isEmpty || software.isEmpty) {
+      throw ArgumentError.value(
+        versions,
+        'versions',
+        'Revision strings must not be empty.',
+      );
+    }
+    _validateUnsigned(
+      versions.stmFirmwareVersion,
+      0xffffff,
+      'stmFirmwareVersion',
+    );
+    _validateUnsigned(versions.controllerVariant, 0xffff, 'controllerVariant');
+    _validateUnsigned(versions.bootloaderHandoff, 0xff, 'bootloaderHandoff');
+    _validateUnsigned(
+      versions.motorControllerVersion,
+      0xffffffff,
+      'motorControllerVersion',
+    );
+    _validateUnsigned(versions.bmsVersion, 0xffffffff, 'bmsVersion');
+    return BikeVersionInfo(
+      hardwareRevision: hardware,
+      firmwareRevision: firmware,
+      softwareRevision: software,
+      stmFirmwareVersion: versions.stmFirmwareVersion,
+      controllerVariant: versions.controllerVariant,
+      bootloaderHandoff: versions.bootloaderHandoff,
+      motorControllerVersion: versions.motorControllerVersion,
+      bmsVersion: versions.bmsVersion,
+    );
+  }
+
+  void _validateUnsigned(int value, int maximum, String name) {
+    if (value < 0 || value > maximum) {
+      throw RangeError.range(value, 0, maximum, name);
+    }
+  }
+}

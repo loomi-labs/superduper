@@ -8,4 +8,4 @@ git push --tags
 
 # URL encode
 CLEANVER=$(jq -rn --arg x "$VER" '$x|@uri')
-echo "Release notes: https://github.com/blopker/superduper/releases/new?tag=$CLEANVER&title=Release%20$CLEANVER"
+echo "Release notes: https://github.com/loomi-labs/superduper/releases/new?tag=$CLEANVER&title=Release%20$CLEANVER"

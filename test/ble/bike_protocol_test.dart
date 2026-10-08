@@ -1,0 +1,519 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:superduper/src/ble/bike_protocol.dart';
+import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/distance.dart';
+
+void main() {
+  group('module serial', () {
+    test('decodes the eight-byte COMODULE manufacturer payload', () {
+      expect(
+        BikeProtocol.decodeModuleSerial(const [
+          0x00,
+          0x11,
+          0x22,
+          0x33,
+          0xaa,
+          0xbb,
+          0xcc,
+          0xdd,
+        ]),
+        '00112233aabbccdd',
+      );
+    });
+
+    test('ignores missing or malformed manufacturer payloads', () {
+      expect(BikeProtocol.decodeModuleSerial(null), isNull);
+      expect(BikeProtocol.decodeModuleSerial(const [0, 1]), isNull);
+      expect(
+        BikeProtocol.decodeModuleSerial(const [0, 1, 2, 3, 4, 5, 6, 256]),
+        isNull,
+      );
+    });
+  });
+
+  group('protocol identification', () {
+    test('uses only complete documented advertised names', () {
+      expect(
+        BikeProtocolVersion.fromAdvertisedName(
+          BikeProtocolVersion.v1.advertisedName,
+        ),
+        BikeProtocolVersion.v1,
+      );
+      expect(
+        BikeProtocolVersion.fromAdvertisedName(
+          BikeProtocolVersion.v2.advertisedName,
+        ),
+        BikeProtocolVersion.v2,
+      );
+      expect(
+        BikeProtocolVersion.fromAdvertisedName(
+          '${BikeProtocolVersion.v1.advertisedName}-X',
+        ),
+        isNull,
+      );
+      expect(
+        BikeProtocolVersion.fromAdvertisedName(
+          ' ${BikeProtocolVersion.v1.advertisedName} ',
+        ),
+        isNull,
+      );
+    });
+  });
+
+  group('authentication', () {
+    test('computes SHA1 of the exact challenge followed by the key', () {
+      final challenge = List<int>.generate(20, (index) => index);
+
+      expect(
+        BikeProtocol.authenticationResponse(
+          challenge: challenge,
+          key: BikeProtocol.defaultAuthenticationKey,
+        ),
+        [
+          0x13,
+          0x44,
+          0xd4,
+          0x9a,
+          0x08,
+          0xc2,
+          0x0a,
+          0x39,
+          0x2a,
+          0x05,
+          0xf6,
+          0x0e,
+          0x0c,
+          0x26,
+          0x9d,
+          0x94,
+          0xd3,
+          0x86,
+          0x48,
+          0xec,
+        ],
+      );
+    });
+
+    test('rejects malformed challenge and key lengths', () {
+      expect(
+        () => BikeProtocol.authenticationResponse(
+          challenge: const [1],
+          key: BikeProtocol.defaultAuthenticationKey,
+        ),
+        throwsA(isA<InvalidAuthenticationValue>()),
+      );
+      expect(
+        () => BikeProtocol.authenticationResponse(
+          challenge: List<int>.filled(20, 1),
+          key: const [1],
+        ),
+        throwsA(isA<InvalidAuthenticationValue>()),
+      );
+    });
+  });
+
+  group('decodeV1State', () {
+    test('decodes US boundaries', () {
+      expect(
+        BikeProtocol.v1.decodeState([3, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        const BikeConfiguration(light: false, mode: 0, assist: 0),
+      );
+      expect(
+        BikeProtocol.v1.decodeState([3, 0, 4, 0, 1, 3, 0, 0, 0, 0]),
+        const BikeConfiguration(light: true, mode: 3, assist: 4),
+      );
+    });
+
+    test('decodes EU wire modes four through seven', () {
+      for (var wireMode = 4; wireMode <= 7; wireMode++) {
+        expect(
+          BikeProtocol.v1.decodeState([3, 0, 2, 0, 1, wireMode, 0, 0, 0, 0]),
+          BikeConfiguration(light: true, mode: wireMode, assist: 2),
+        );
+      }
+    });
+
+    test('rejects short and malformed frames', () {
+      expect(
+        () => BikeProtocol.v1.decodeState([0, 1]),
+        throwsA(isA<ShortBikeFrame>()),
+      );
+      expect(
+        () => BikeProtocol.v1.decodeState([3, 0, 0, 0, -1, 0, 0, 0, 0, 0]),
+        throwsA(isA<MalformedBikeFrame>()),
+      );
+    });
+
+    test('rejects unsupported field values instead of clamping', () {
+      expect(
+        () => BikeProtocol.v1.decodeState([3, 0, 5, 0, 0, 0, 0, 0, 0, 0]),
+        throwsA(isA<UnsupportedBikeValue>()),
+      );
+      expect(
+        () => BikeProtocol.v1.decodeState([3, 0, 0, 0, 2, 0, 0, 0, 0, 0]),
+        throwsA(isA<UnsupportedBikeValue>()),
+      );
+      expect(
+        () => BikeProtocol.v1.decodeState([3, 0, 0, 0, 0, 8, 0, 0, 0, 0]),
+        throwsA(isA<UnsupportedBikeValue>()),
+      );
+      expect(
+        () => BikeProtocol.v1.decodeState([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        throwsA(isA<UnexpectedBikePacket>()),
+      );
+    });
+  });
+
+  group('decodeV2State', () {
+    test('combines validated D0 and D9 history records', () {
+      expect(
+        BikeProtocol.v2.decodeState(
+          d0: const [0, 0xd0, 3, 0, 1, 88, 0, 0, 0, 0],
+          d9: const [0, 0xd9, 0, 0, 0, 2, 0, 0, 0, 0],
+        ),
+        const BikeConfiguration(light: true, mode: 2, assist: 3),
+      );
+    });
+
+    test('rejects mismatched records and unsupported control values', () {
+      expect(
+        () => BikeProtocol.v2.decodeState(
+          d0: const [0, 0xd1, 3, 0, 1, 88, 0, 0, 0, 0],
+          d9: const [0, 0xd9, 0, 0, 0, 2, 0, 0, 0, 0],
+        ),
+        throwsA(isA<UnexpectedBikePacket>()),
+      );
+      expect(
+        () => BikeProtocol.v2.decodeState(
+          d0: const [0, 0xd0, 5, 0, 1, 88, 0, 0, 0, 0],
+          d9: const [0, 0xd9, 0, 0, 0, 4, 0, 0, 0, 0],
+        ),
+        throwsA(isA<UnsupportedBikeValue>()),
+      );
+    });
+  });
+
+  group('decodeTelemetry', () {
+    test('V1 reports every field carried by the state frame', () {
+      expect(
+        BikeProtocol.v1.decodeTelemetry(const [3, 0, 4, 0, 1, 3, 0, 0, 0, 0]),
+        isA<BikeControlPatch>()
+            .having((patch) => patch.light, 'light', isTrue)
+            .having((patch) => patch.mode, 'mode', 3)
+            .having((patch) => patch.assist, 'assist', 4),
+      );
+    });
+
+    test('V2 D0 reports only light and assist', () {
+      expect(
+        BikeProtocol.v2.decodeTelemetry(const [
+          0,
+          0xd0,
+          4,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+        ]),
+        isA<BikeControlPatch>()
+            .having((patch) => patch.light, 'light', isTrue)
+            .having((patch) => patch.assist, 'assist', 4),
+      );
+    });
+
+    test('V2 D9 reports only mode and cannot confirm light', () {
+      expect(
+        BikeProtocol.v2.decodeTelemetry(const [
+          0,
+          0xd9,
+          0,
+          0,
+          0,
+          3,
+          0,
+          0,
+          0,
+          0,
+        ]),
+        isA<BikeControlPatch>().having((patch) => patch.mode, 'mode', 3),
+      );
+    });
+  });
+
+  group('decodeOdometerMeters', () {
+    test(
+      'decodes the captured V1 total-distance record in 100-meter units',
+      () {
+        final meters = BikeProtocol.v1.decodeOdometer(const [
+          0x02,
+          0x02,
+          0x00,
+          0x42,
+          0x00,
+          0x00,
+          0x47,
+          0x35,
+          0x00,
+          0x00,
+        ]);
+        expect(meters, 1363900);
+        expect(formatOdometerDistance(meters), '1363.9 km · 847.5 mi');
+      },
+    );
+
+    test('converts the protocol-specific distance units to meters', () {
+      expect(
+        BikeProtocol.v1.decodeOdometer(const [
+          2,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0x72,
+          0x4c,
+          0,
+          0,
+        ]),
+        1957000,
+      );
+      expect(
+        BikeProtocol.v2.decodeOdometer(const [
+          0,
+          0xd0,
+          0,
+          0,
+          0,
+          0,
+          0xef,
+          0xcd,
+          0xab,
+          0x90,
+        ]),
+        0x90abcdef,
+      );
+    });
+
+    test('rejects a record from the wrong protocol', () {
+      expect(
+        () => BikeProtocol.v1.decodeOdometer(const [
+          0,
+          0xd0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+        ]),
+        throwsA(isA<UnexpectedBikePacket>()),
+      );
+    });
+  });
+
+  group('decodeVersionInfo', () {
+    test('combines Device Information with full FCFC and FAFA records', () {
+      expect(
+        BikeProtocol.decodeVersionInfo(
+          hardwareRevision: 'v3.3.0',
+          firmwareRevision: '250426',
+          softwareRevision: '250426',
+          fcfc: const [0xfc, 0xfc, 0x01, 0x23, 0x45, 0x96, 0x01, 0x08, 0, 1],
+          fafa: const [
+            0xfa,
+            0xfa,
+            0x12,
+            0x34,
+            0x56,
+            0x78,
+            0x9a,
+            0xbc,
+            0xde,
+            0xf0,
+          ],
+        ),
+        const BikeVersionInfo(
+          hardwareRevision: 'v3.3.0',
+          firmwareRevision: '250426',
+          softwareRevision: '250426',
+          stmFirmwareVersion: 0x012345,
+          controllerVariant: 0x0196,
+          bootloaderHandoff: 8,
+          motorControllerVersion: 0x12345678,
+          bmsVersion: 0x9abcdef0,
+        ),
+      );
+    });
+
+    test('rejects incomplete strings and mismatched history records', () {
+      const fcfc = [0xfc, 0xfc, 0, 0, 1, 0, 1, 8, 0, 1];
+      const fafa = [0xfa, 0xfa, 0, 0, 0, 1, 0, 0, 0, 2];
+
+      expect(
+        () => BikeProtocol.decodeVersionInfo(
+          hardwareRevision: '',
+          firmwareRevision: '250426',
+          softwareRevision: '250426',
+          fcfc: fcfc,
+          fafa: fafa,
+        ),
+        throwsA(isA<MalformedBikeFrame>()),
+      );
+      expect(
+        () => BikeProtocol.decodeVersionInfo(
+          hardwareRevision: 'v3.3.0',
+          firmwareRevision: '250426',
+          softwareRevision: '250426',
+          fcfc: const [0xfa, 0xfa, 0, 0, 1, 0, 1, 8, 0, 1],
+          fafa: fafa,
+        ),
+        throwsA(isA<UnexpectedBikePacket>()),
+      );
+    });
+  });
+
+  group('encodeConfiguration', () {
+    test('encodes complete US and EU payloads', () {
+      expect(
+        BikeProtocol.v1.encodeConfiguration(
+          const BikeConfiguration(light: true, mode: 3, assist: 4),
+        ),
+        [0, 0xd1, 1, 4, 3, 1, 0, 0, 0, 0],
+      );
+      expect(
+        BikeProtocol.v1.encodeConfiguration(
+          const BikeConfiguration(light: false, mode: 4, assist: 0),
+        ),
+        [0, 0xd1, 0, 0, 4, 1, 0, 0, 0, 0],
+      );
+      expect(
+        BikeProtocol.v2.encodeConfiguration(
+          const BikeConfiguration(light: true, mode: 2, assist: 3),
+        ),
+        [0, 0xc1, 1, 3, 2, 1, 0, 0, 0, 0],
+      );
+    });
+
+    test('rejects invalid configuration ranges', () {
+      expect(
+        () => BikeProtocol.v1.encodeConfiguration(
+          const BikeConfiguration(light: false, mode: 8, assist: 0),
+        ),
+        throwsRangeError,
+      );
+      expect(
+        () => BikeProtocol.v2.encodeConfiguration(
+          const BikeConfiguration(light: false, mode: 0, assist: -1),
+        ),
+        throwsRangeError,
+      );
+    });
+  });
+
+  group('V1 wire modes', () {
+    test('decodes the wire byte as the mode, no region', () {
+      final configuration = BikeProtocol.v1.decodeState([
+        3,
+        0,
+        2,
+        0,
+        1,
+        6,
+        0,
+        0,
+        0,
+        0,
+      ]);
+      expect(
+        configuration,
+        const BikeConfiguration(light: true, mode: 6, assist: 2),
+      );
+    });
+
+    test('encodes the wire byte unchanged', () {
+      final packet = BikeProtocol.v1.encodeConfiguration(
+        const BikeConfiguration(light: false, mode: 7, assist: 4),
+      );
+      expect(packet, [0, 0xd1, 0, 4, 7, 1, 0, 0, 0, 0]);
+    });
+
+    test('rejects a wire above 7', () {
+      expect(
+        () => BikeProtocol.v1.decodeState([3, 0, 0, 0, 0, 8, 0, 0, 0, 0]),
+        throwsA(isA<UnsupportedBikeValue>()),
+      );
+    });
+
+    test('region is inferred from the wire bank', () {
+      expect(BikeRegion.fromV1Wire(3), BikeRegion.us);
+      expect(BikeRegion.fromV1Wire(4), BikeRegion.eu);
+    });
+
+    test('V2 still rejects a preset above 3', () {
+      expect(
+        () => BikeProtocol.v2.encodeConfiguration(
+          const BikeConfiguration(light: false, mode: 4, assist: 0),
+        ),
+        throwsA(isA<RangeError>()),
+      );
+    });
+  });
+
+  group('speed telemetry', () {
+    test('decodes [2, 1, lo, hi] as km/h times 100', () {
+      expect(
+        BikeProtocol.v1.decodeSpeedKmh([2, 1, 0xc4, 0x09, 0, 0, 0, 0, 0, 0]),
+        25.0,
+      );
+    });
+
+    test('ignores other packets and short frames', () {
+      expect(
+        BikeProtocol.v1.decodeSpeedKmh([3, 0, 1, 2, 3, 4, 0, 0, 0, 0]),
+        isNull,
+      );
+      expect(BikeProtocol.v1.decodeSpeedKmh([2, 1, 5]), isNull);
+      expect(BikeProtocol.v2.decodeSpeedKmh([2, 1, 0xc4, 0x09]), isNull);
+    });
+  });
+  group('street-legal marker', () {
+    test('encodes the marker in byte 5', () {
+      expect(
+        BikeProtocol.v1.encodeConfiguration(
+          const BikeConfiguration(light: false, mode: 4, assist: 0),
+          marker: BikeGatt.sessionLockedMarker,
+        ),
+        [0, 0xd1, 0, 0, 4, 2, 0, 0, 0, 0],
+      );
+      expect(
+        BikeProtocol.v2.encodeConfiguration(
+          const BikeConfiguration(light: true, mode: 0, assist: 1),
+          marker: BikeGatt.sessionLockedMarker,
+        ),
+        [0, 0xc1, 1, 1, 0, 2, 0, 0, 0, 0],
+      );
+    });
+
+    test('the control-history selector follows the protocol', () {
+      expect(BikeProtocol.v1.controlHistorySelector, [0x00, 0xd1]);
+      expect(BikeProtocol.v2.controlHistorySelector, [0x00, 0xc1]);
+    });
+  });
+
+  group('auxiliary counter', () {
+    test('decodes bytes 0 and 1 little-endian and ignores byte 2', () {
+      expect(BikeProtocol.decodeAuxiliaryCounter([0x95, 0x27, 0x07]), 10133);
+      expect(BikeProtocol.decodeAuxiliaryCounter([0xff, 0xff]), 65535);
+    });
+
+    test('ignores a short frame', () {
+      expect(BikeProtocol.decodeAuxiliaryCounter([0x01]), isNull);
+      expect(BikeProtocol.decodeAuxiliaryCounter(const []), isNull);
+    });
+  });
+}

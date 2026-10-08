@@ -1,0 +1,534 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:signals/signals_flutter.dart';
+import 'package:superduper/src/app_services.dart';
+import 'package:superduper/src/ble/active_bike_coordinator.dart';
+import 'package:superduper/src/ble/bike_session.dart';
+import 'package:superduper/src/ble/ride_mode_controller.dart';
+import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/domain/ride_modes.dart';
+import 'package:superduper/src/features/bike_settings/bike_settings_page.dart';
+import 'package:superduper/src/features/help/help_page.dart';
+import 'package:superduper/src/theme/app_theme.dart';
+import 'package:superduper/src/user_facing_error.dart';
+import 'package:superduper/src/widgets/app_design.dart';
+import 'package:superduper/src/widgets/bike_session_presentation.dart';
+import 'package:superduper/src/widgets/bike_value_selector.dart';
+import 'package:superduper/src/widgets/ride_mode_selector.dart';
+
+final class BikeControlPage extends SignalStatefulWidget {
+  const new({required this.deviceId, super.key});
+
+  final String deviceId;
+
+  @override
+  State<BikeControlPage> createState() => _BikeControlPageState();
+}
+
+final class _BikeControlPageState extends State<BikeControlPage> {
+  late AppServices _services;
+  var _initialized = false;
+  var _selectionStarted = false;
+  var _temporarySelection = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_initialized) {
+      return;
+    }
+    _initialized = true;
+    _services = AppServicesScope.of(context);
+  }
+
+  @override
+  void dispose() {
+    if (_temporarySelection) {
+      unawaited(_services.activeBikeCoordinator.returnToActiveBike());
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final coordinator = _services.activeBikeCoordinator;
+    final saved = coordinator.bikes.value.where(
+      (bike) => bike.bike.deviceId == widget.deviceId,
+    );
+    if (saved.isEmpty) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('RIDE CONTROLS')),
+        body: const AppPageBody(child: Center(child: Text('Bike not found'))),
+      );
+    }
+    if (!_selectionStarted) {
+      _selectionStarted = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _selectBike());
+    }
+    final bike = saved.single;
+    final activeState = coordinator.state.value;
+    final matchingStatus =
+        activeState is ActiveBikeSessionStatus &&
+            activeState.bike.bike.deviceId == widget.deviceId
+        ? activeState
+        : null;
+    final session = matchingStatus?.session;
+    final rideMode = matchingStatus?.rideMode;
+    final speed = session?.speedKmh.value;
+    final matchingSessionState = matchingStatus?.sessionState;
+    final coordinatorFailure = switch (activeState) {
+      ActiveBikeCoordinatorFailure(:final error) => error,
+      _ => null,
+    };
+    final sessionState =
+        matchingSessionState ??
+        switch (activeState) {
+          ActiveBikePermissionRequired() => const SessionFailed(
+            failure: BikeBluetoothUnavailable(
+              'Bluetooth permission is required before this bike can connect.',
+              canRetry: true,
+            ),
+            canRetry: true,
+          ),
+          ActiveBikeCoordinatorFailure() => null,
+          _ => const SessionConnecting(),
+        };
+    final pendingConfiguration = session?.pending.value;
+    final observedConfiguration = session?.observed.value;
+    final configuration = pendingConfiguration ?? observedConfiguration;
+    final canControl =
+        session?.canChangeConfiguration == true && configuration != null;
+    final canConnect =
+        matchingSessionState is SessionDisconnected ||
+        matchingSessionState is SessionFailed ||
+        matchingSessionState == null &&
+            (activeState is ActiveBikePermissionRequired ||
+                activeState is ActiveBikeCoordinatorFailure);
+    final canRetry =
+        coordinatorFailure != null ||
+        sessionState is SessionDisconnected ||
+        switch (sessionState) {
+          SessionFailed(:final canRetry) => canRetry,
+          _ => false,
+        };
+    final isActive = coordinator.activeBikeId.value == widget.deviceId;
+    return BikePageScaffold(
+      title: 'Ride controls',
+      color: bike.bike.color,
+      maxWidth: 860,
+      actions: [
+        IconButton(
+          tooltip: 'Help & tips',
+          onPressed: () => Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(builder: (_) => const HelpPage()),
+          ),
+          icon: const Icon(Icons.help_outline_rounded),
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          tooltip: canConnect ? 'Connect' : 'Disconnect',
+          onPressed: session != null || canConnect
+              ? () => unawaited(
+                  _runConnectionAction(
+                    canConnect
+                        ? coordinator.retry
+                        : coordinator.disconnectManually,
+                  ),
+                )
+              : null,
+          icon: Icon(
+            canConnect
+                ? Icons.bluetooth_rounded
+                : Icons.bluetooth_disabled_rounded,
+          ),
+        ),
+        const SizedBox(width: 12),
+      ],
+      children: [
+        BikeHeader(
+          color: bike.bike.color,
+          name: bike.bike.displayName,
+          isActive: isActive,
+          region: bike.bike.region,
+          compact: true,
+          trailing: IconButton(
+            tooltip: 'Bike settings',
+            onPressed: () => _openSettings(bike),
+            icon: const Icon(Icons.tune_rounded),
+          ),
+        ),
+        const SizedBox(height: 10),
+        _ConnectionSummary(
+          state: sessionState,
+          coordinatorFailure: coordinatorFailure,
+        ),
+        const SizedBox(height: 14),
+        _SettingSection(
+          icon: Icons.lightbulb_outline_rounded,
+          title: 'Light',
+          toggleValue: configuration?.light ?? false,
+          onToggleChanged: canControl
+              ? (value) => _runCommand(() => session!.setLight(value))
+              : null,
+          setOnConnectValue: bike.setOnConnect.light == true ? 'On' : null,
+        ),
+        const SizedBox(height: 14),
+        _SettingSection(
+          icon: Icons.speed_rounded,
+          title: 'Mode',
+          trailingText: speed == null
+              ? null
+              : bike.bike.region == BikeRegion.us
+              ? '${(speed / 1.609344).round()} mph'
+              : '${speed.round()} km/h',
+          control: bike.bike.protocol == BikeProtocolVersion.v1
+              ? RideModeSelector(
+                  options: selectableRideModes(
+                    region: bike.bike.region ?? BikeRegion.us,
+                    customModes: bike.customModes,
+                  ),
+                  selected: rideMode?.selection.value,
+                  region: bike.bike.region,
+                  enabled: canControl && rideMode != null,
+                  observedWire: configuration?.mode,
+                  onSelected: (selection) => _runCommand(() async {
+                    await rideMode!.select(selection);
+                    return session!.observed.peek()!;
+                  }),
+                )
+              : BikeValueSelector(
+                  values: BikeControlValues.modesFor(BikeProtocolVersion.v2),
+                  selected: configuration?.mode,
+                  enabled: canControl && rideMode != null,
+                  semanticLabel: 'Mode',
+                  label: (mode) => '${mode + 1}',
+                  // The controller ends the lock and restarts the parked timer.
+                  onChanged: (mode) => _runCommand(() async {
+                    await rideMode!.select(NativeRideMode(mode));
+                    return session!.observed.peek()!;
+                  }),
+                ),
+          setOnConnectValue: _setOnConnectModeLabel(bike),
+          footnote: _modeFootnote(bike, session, rideMode),
+        ),
+        const SizedBox(height: 14),
+        _SettingSection(
+          icon: Icons.bolt_rounded,
+          title: 'Assist',
+          control: BikeValueSelector(
+            values: BikeControlValues.assistLevels,
+            selected: configuration?.assist,
+            enabled: canControl,
+            semanticLabel: 'Assist level',
+            label: (assist) => '$assist',
+            onChanged: (assist) =>
+                _runCommand(() => session!.setAssist(assist)),
+          ),
+          setOnConnectValue: bike.setOnConnect.assist?.toString(),
+        ),
+        if (canRetry) ...[
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: () => unawaited(_runConnectionAction(coordinator.retry)),
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Reconnect'),
+          ),
+        ],
+      ],
+    );
+  }
+
+  String? _setOnConnectModeLabel(SavedBike bike) =>
+      switch (bike.setOnConnect.mode) {
+        null => null,
+        NativeModeRef(:final wire) =>
+          bike.bike.protocol == BikeProtocolVersion.v1
+              ? profileByWire(wire).label(bike.bike.region)
+              : '${wire + 1}',
+        CustomModeRef(:final id) =>
+          bike.customModes.where((mode) => mode.id == id).firstOrNull?.name,
+      };
+
+  String? _modeFootnote(
+    SavedBike bike,
+    BikeSession? session,
+    RideModeController? rideMode,
+  ) {
+    if (session?.streetLegalLocked.value ?? false) {
+      return 'Street-legal lock: stock mode';
+    }
+    final parked = switch (rideMode?.parkedMinutesLeft.value) {
+      null => null,
+      1 => 'Stock mode in 1 minute when parked',
+      final minutes => 'Stock mode in $minutes minutes when parked',
+    };
+    final selection = rideMode?.selection.value;
+    final switching =
+        selection is CustomRideMode &&
+        isDynamicSelection(selection, bike.bike.region);
+    final speedNote = !switching
+        ? null
+        : defaultTargetPlatform == TargetPlatform.iOS
+        ? 'Speed switching stops when the app is in the background on iOS.'
+        : 'Superduper CH keeps the link alive in the background to hold this limit.';
+    final lines = [?parked, ?speedNote];
+    return lines.isEmpty ? null : lines.join('\n');
+  }
+
+  Future<void> _runCommand(Future<BikeConfiguration> Function() command) async {
+    try {
+      await command();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              userFacingError(error, context: UserErrorContext.bikeControl),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _runConnectionAction(Future<void> Function() action) async {
+    try {
+      await action();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              userFacingError(error, context: UserErrorContext.bikeConnection),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _selectBike() async {
+    if (!mounted ||
+        _services.activeBikeCoordinator.activeBikeId.peek() ==
+            widget.deviceId) {
+      return;
+    }
+    _temporarySelection = true;
+    try {
+      await _services.activeBikeCoordinator.selectTemporarily(widget.deviceId);
+    } on Object catch (error) {
+      _temporarySelection = false;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              userFacingError(error, context: UserErrorContext.bikeConnection),
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _openSettings(SavedBike bike) async {
+    final result = await Navigator.of(context).push<BikeSettingsOutcome>(
+      MaterialPageRoute<BikeSettingsOutcome>(
+        builder: (_) => BikeSettingsPage(initialBike: bike),
+      ),
+    );
+    if (result == BikeSettingsOutcome.forgotten && mounted) {
+      Navigator.pop(context);
+    }
+  }
+}
+
+final class _ConnectionSummary extends StatelessWidget {
+  const new({required this.state, required this.coordinatorFailure});
+
+  final BikeSessionState? state;
+  final Object? coordinatorFailure;
+
+  @override
+  Widget build(BuildContext context) {
+    if (state is SessionReady || state is SessionSynchronizing) {
+      final synchronizing = state is SessionSynchronizing;
+      return SizedBox(
+        height: 32,
+        child: Row(
+          children: [
+            Icon(
+              synchronizing ? Icons.sync_rounded : Icons.check_circle_rounded,
+              color: synchronizing ? AppColors.yellow : AppColors.mint,
+              size: 20,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              synchronizing ? 'Syncing…' : 'Connected',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+          ],
+        ),
+      );
+    }
+    final presentation = coordinatorFailure == null
+        ? BikeSessionPresentation.from(state ?? const SessionConnecting())
+        : BikeSessionPresentation.savedBikesFailure(coordinatorFailure!);
+    return SurfacePanel(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(presentation.icon, color: presentation.color, size: 32),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                StatusPill(
+                  label: presentation.label,
+                  color: presentation.color,
+                ),
+                const SizedBox(height: 11),
+                Text(
+                  presentation.title,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 5),
+                Text(presentation.detail),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _SettingSection extends StatelessWidget {
+  const new({
+    required this.icon,
+    required this.title,
+    required this.setOnConnectValue,
+    this.control,
+    this.toggleValue,
+    this.onToggleChanged,
+    this.trailingText,
+    this.footnote,
+  });
+
+  final IconData icon;
+  final String title;
+  final Widget? control;
+  final String? trailingText;
+  final String? footnote;
+  final bool? toggleValue;
+  final ValueChanged<bool>? onToggleChanged;
+  final String? setOnConnectValue;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = BikeColorTheme.maybeOf(context);
+    final accent = palette?.accent ?? AppColors.magentaSoft;
+    return SurfacePanel(
+      padding: EdgeInsets.zero,
+      child: Column(
+        children: [
+          if (toggleValue case final toggled?)
+            SwitchListTile(
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 8,
+              ),
+              secondary: Icon(icon, color: accent, size: 30),
+              title: _SettingHeader(
+                title: title,
+                setOnConnectValue: setOnConnectValue,
+              ),
+              value: toggled,
+              onChanged: onToggleChanged,
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Icon(icon, color: accent, size: 30),
+                      const SizedBox(width: 13),
+                      Expanded(
+                        child: _SettingHeader(
+                          title: title,
+                          setOnConnectValue: setOnConnectValue,
+                        ),
+                      ),
+                      if (trailingText case final trailing?)
+                        Text(
+                          trailing,
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                    ],
+                  ),
+                  if (control case final body?) ...[
+                    const SizedBox(height: 18),
+                    body,
+                  ],
+                  if (footnote case final note?) ...[
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        note,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _SettingHeader extends StatelessWidget {
+  const new({required this.title, required this.setOnConnectValue});
+
+  final String title;
+  final String? setOnConnectValue;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Wrap(
+      spacing: 6,
+      runSpacing: 2,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.titleMedium),
+        if (setOnConnectValue case final value?)
+          Semantics(
+            key: ValueKey('set-on-connect-indicator-${title.toLowerCase()}'),
+            label: 'Set on connect: $value',
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.lock_rounded, size: 15, color: scheme.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    value,
+                    style: Theme.of(context).textTheme.labelLarge
+                        ?.copyWith(color: scheme.primary),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}

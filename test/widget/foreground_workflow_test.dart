@@ -1,0 +1,643 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:superduper/src/app.dart';
+import 'package:superduper/src/app_services.dart';
+import 'package:superduper/src/ble/active_bike_coordinator.dart';
+import 'package:superduper/src/ble/bike_identity_resolver.dart';
+import 'package:superduper/src/ble/bike_protocol.dart';
+import 'package:superduper/src/ble/bike_session.dart';
+import 'package:superduper/src/ble/bike_transport.dart';
+import 'package:superduper/src/domain/bike.dart';
+import 'package:superduper/src/persistence/app_database.dart';
+import 'package:superduper/src/persistence/installed_data_importer.dart';
+import 'package:superduper/src/platform/bluetooth_permissions.dart';
+import 'package:superduper/src/repositories/bike_repository.dart';
+import 'package:superduper/src/repositories/settings_repository.dart';
+import 'package:superduper/src/theme/app_theme.dart';
+import 'package:superduper/src/widgets/app_design.dart';
+
+import '../support/fake_bike_transport.dart';
+
+void main() {
+  testWidgets('ready active bike opens controls and ignores inactive', (
+    tester,
+  ) async {
+    final fixture = await _pumpReadyBikeApp(tester, 'ready');
+
+    expect(find.text('RIDE CONTROLS'), findsOneWidget);
+    expect(find.widgetWithText(SwitchListTile, 'Light'), findsOneWidget);
+    expect(find.byTooltip('Disconnect'), findsOneWidget);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    expect(fixture.connection.disconnectCalls, 0);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+
+    final configurationWrites = fixture.connection.writes.where(
+      (write) =>
+          write.characteristicUuid == BikeGatt.stateRegister &&
+          !BikeProtocol.hasPacketId(write.value, BikeGatt.rideDataSelector),
+    );
+    expect(configurationWrites.last.value, [0, 0xd1, 1, 2, 3, 1, 0, 0, 0, 0]);
+  });
+
+  testWidgets('the speed readout uses mph on a US bike', (tester) async {
+    final fixture = await _pumpReadyBikeApp(tester, 'speed');
+
+    fixture.connection.emitNotification([2, 1, 0xc4, 0x09, 0, 0, 0, 0, 0, 0]);
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('16 mph'), findsOneWidget);
+    expect(find.text('25 km/h'), findsNothing);
+  });
+
+  testWidgets('bike color theme stays scoped to bike routes', (tester) async {
+    await _pumpReadyBikeApp(tester, 'theme');
+
+    expect(
+      Theme.of(tester.element(find.text('RIDE CONTROLS'))).colorScheme.primary,
+      BikeColor.frostedMint.gradientColors.last,
+    );
+    await tester.tap(find.byTooltip('Help & tips'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('HELP & TIPS'), findsOneWidget);
+    expect(
+      Theme.of(tester.element(find.text('HELP & TIPS'))).colorScheme.primary,
+      AppColors.magenta,
+    );
+  });
+
+  testWidgets('Background Sync can identify an existing bike', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    expect(defaultTargetPlatform, TargetPlatform.android);
+    final fixture = await _pumpReadyBikeApp(
+      tester,
+      'background_identity',
+      moduleSerial: null,
+    );
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('BIKE SETTINGS'), findsOneWidget);
+    expect(find.text('Bike not found'), findsNothing);
+    final label = find.text('Background Sync');
+    // The settings list builds lazily; scroll until the row exists.
+    await tester.scrollUntilVisible(
+      label,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pump();
+
+    final backgroundSwitch = find.ancestor(
+      of: label,
+      matching: find.byType(SwitchListTile),
+    );
+    expect(backgroundSwitch, findsOneWidget);
+    expect(
+      tester.widget<SwitchListTile>(backgroundSwitch).onChanged,
+      isNotNull,
+    );
+    expect(
+      (await fixture.services.bikeRepository.getBikes())
+          .single
+          .bike
+          .moduleSerial,
+      '00112233aabbccdd',
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('Set on connect is configured separately from live controls', (
+    tester,
+  ) async {
+    final fixture = await _pumpReadyBikeApp(tester, 'set_on_connect');
+    final writesBeforeSettings = fixture.connection.configurationWriteStarts;
+
+    final modeIndicator = find.byKey(
+      const ValueKey('set-on-connect-indicator-mode'),
+    );
+    expect(modeIndicator, findsOneWidget);
+    expect(
+      find.descendant(of: modeIndicator, matching: find.text('OFFROAD')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('set-on-connect-mode')), findsNothing);
+
+    expect(
+      find.descendant(of: modeIndicator, matching: find.byType(TextButton)),
+      findsNothing,
+    );
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    expect(find.text('BIKE SETTINGS'), findsOneWidget);
+
+    final modeSwitch = find.byKey(const Key('set-on-connect-mode'));
+    final assistSwitch = find.byKey(const Key('set-on-connect-assist'));
+    expect(modeSwitch, findsOneWidget);
+    expect(assistSwitch, findsOneWidget);
+    expect(tester.widget<SwitchListTile>(modeSwitch).value, isTrue);
+    expect(tester.widget<SwitchListTile>(assistSwitch).value, isFalse);
+
+    await tester.tap(assistSwitch);
+    await tester.pump();
+    await tester.runAsync(
+      () => _waitUntilAsync(
+        () async =>
+            (await fixture.services.bikeRepository.getBikes())
+                .single
+                .setOnConnect
+                .assist !=
+            null,
+      ),
+    );
+    await tester.pump();
+
+    final saved = (await fixture.services.bikeRepository.getBikes()).single;
+    expect(saved.setOnConnect.assist, isNotNull);
+    expect(fixture.connection.configurationWriteStarts, writesBeforeSettings);
+  });
+
+  testWidgets('bike settings save automatically and confirm protocol changes', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fixture = await _pumpReadyBikeApp(tester, 'settings');
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('BIKE SETTINGS'), findsOneWidget);
+    expect(find.text('Save changes'), findsNothing);
+
+    await tester.enterText(find.byType(TextField).first, 'Daily Rider');
+    final nameField = tester.widget<TextField>(find.byType(TextField).first);
+    await tester.runAsync(() async {
+      nameField.onChanged?.call('Daily Rider');
+      // Wait for the bike stream, which the page and the coordinator read,
+      // not only for the database row.
+      await _waitUntilAsync(
+        () async =>
+            fixture.services.activeBikeCoordinator.bikes
+                .peek()
+                .single
+                .bike
+                .displayName ==
+            'Daily Rider',
+      );
+    });
+    await tester.pump();
+
+    expect(
+      fixture.services.activeBikeCoordinator.bikes
+          .peek()
+          .single
+          .bike
+          .displayName,
+      'Daily Rider',
+    );
+    expect(find.text('Saved'), findsOneWidget);
+    // The street-legal settings push the protocol section down.
+    await tester.scrollUntilVisible(
+      find.text('V1'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('V1'), findsOneWidget);
+    await tester.tap(find.text('V1'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('V2').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('CHANGE BIKE PROTOCOL?'), findsOneWidget);
+    expect(find.text('Change protocol'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(
+      fixture.services.activeBikeCoordinator.bikes.peek().single.bike.protocol,
+      BikeProtocolVersion.v1,
+    );
+
+    await tester.scrollUntilVisible(
+      find.text('BIKE INFORMATION'),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('BIKE INFORMATION'), findsOneWidget);
+    expect(find.text('123.5 km · 76.7 mi'), findsOneWidget);
+    expect(find.text('v3.2.0'), findsOneWidget);
+    expect(find.text('00112233aabbccdd'), findsOneWidget);
+    expect(find.text('221122'), findsNWidgets(2));
+    expect(find.text('66051'), findsOneWidget);
+    expect(find.text('305419896'), findsOneWidget);
+    expect(find.text('2882400001'), findsOneWidget);
+  });
+
+  testWidgets('bike settings add a custom mode', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fixture = await _pumpReadyBikeApp(tester, 'custom_mode');
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    final add = find.byKey(const Key('custom-mode-add'));
+    await tester.ensureVisible(add);
+    await tester.pumpAndSettle();
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('custom-mode-save')));
+    await tester.runAsync(() async {
+      await _waitUntilAsync(
+        () async => fixture.services.activeBikeCoordinator.bikes
+            .peek()
+            .single
+            .customModes
+            .isNotEmpty,
+      );
+    });
+    await tester.pumpAndSettle();
+
+    final saved = (await tester.runAsync(
+      fixture.services.bikeRepository.getBikes,
+    ))!.single;
+    expect(saved.customModes.single.limitKmh, 25);
+    expect(saved.customModes.single.name, '16 mph');
+    expect(find.text('16 mph'), findsWidgets);
+  });
+
+  testWidgets('bike settings save the street-legal switch and the stock mode', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fixture = await _pumpReadyBikeApp(tester, 'street_legal');
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    final streetLegal = find.byKey(const Key('street-legal-quick-restart'));
+    await tester.ensureVisible(streetLegal);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(streetLegal).value, isFalse);
+    // The picker offers all native wires. A US bike defaults to ECO.
+    for (var wire = 0; wire <= 7; wire++) {
+      expect(find.byKey(ValueKey('stock-mode-$wire')), findsOneWidget);
+    }
+    expect(
+      tester.widget<ChoiceChip>(find.byKey(const ValueKey('stock-mode-0'))).selected,
+      isTrue,
+    );
+
+    await tester.tap(streetLegal);
+    await tester.pump();
+    await tester.runAsync(
+      () => _waitUntilAsync(
+        () async => fixture.services.activeBikeCoordinator.bikes
+            .peek()
+            .single
+            .streetLegalOnQuickRestart,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final epac = find.byKey(const ValueKey('stock-mode-4'));
+    await tester.ensureVisible(epac);
+    await tester.pumpAndSettle();
+    await tester.tap(epac);
+    await tester.pump();
+    await tester.runAsync(
+      () => _waitUntilAsync(
+        () async =>
+            fixture.services.activeBikeCoordinator.bikes
+                .peek()
+                .single
+                .streetLegalStockMode ==
+            4,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<ChoiceChip>(epac).selected, isTrue);
+  });
+
+  testWidgets('bike settings say that the parked fallback needs a V1 bike', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final fixture = await _pumpReadyBikeApp(tester, 'street_legal_v2');
+    const note =
+        'The 10 minute parked fallback needs a V1 bike. A V2 bike gets the '
+        'quick restart lock only.';
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    expect(find.text(note), findsNothing);
+
+    await tester.runAsync(() async {
+      await fixture.services.bikeRepository.updateBikeDetails(
+        'active-bike',
+        displayName: 'Commuter',
+        region: null,
+        color: BikeColor.frostedMint,
+        protocol: BikeProtocolVersion.v2,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text(note),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    expect(find.text(note), findsOneWidget);
+  });
+
+  testWidgets('bike settings say that iOS needs the app in the foreground', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(800, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await _pumpReadyBikeApp(tester, 'street_legal_ios');
+    const note =
+        'On iOS, the street-legal lock works only while the app is in the foreground.';
+
+    await tester.tap(find.byTooltip('Bike settings'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text(note),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    expect(find.text(note), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('ride controls show the parked timer and the lock', (
+    tester,
+  ) async {
+    final fixture = await _pumpReadyBikeApp(tester, 'street_legal_status');
+
+    await tester.runAsync(() async {
+      await fixture.services.bikeRepository.setStreetLegalOnQuickRestart(
+        'active-bike',
+        true,
+      );
+      await _waitUntilAsync(
+        () async => fixture.services.activeBikeCoordinator.bikes
+            .peek()
+            .single
+            .streetLegalOnQuickRestart,
+      );
+    });
+    await tester.pumpAndSettle();
+    // The bike rides OFFROAD (wire 3), not its stock mode ECO (wire 0).
+    expect(
+      find.textContaining('Stock mode in 10 minutes when parked'),
+      findsOneWidget,
+    );
+
+    await tester.runAsync(() async {
+      final status =
+          fixture.services.activeBikeCoordinator.state.peek()
+              as ActiveBikeSessionStatus;
+      await status.session.startStreetLegalLock();
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text('Street-legal lock: stock mode'), findsOneWidget);
+    expect(find.textContaining('when parked'), findsNothing);
+  });
+
+  testWidgets('Add Bike explains a blocked Bluetooth permission', (
+    tester,
+  ) async {
+    final database = AppDatabase(NativeDatabase.memory());
+    final transport = FakeBikeTransport();
+    final permissions = FakeBluetoothPermissionGateway();
+    final services = AppServices(
+      database: database,
+      transport: transport,
+      permissions: permissions,
+      importer: _emptyImporter(database, 'add'),
+    );
+    addTearDown(services.dispose);
+    permissions.state = BluetoothPermissionState.permanentlyDenied;
+    await tester.runAsync(services.startup.initialize);
+    await tester.pumpWidget(SuperduperApp(services: services));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Add bike'));
+    await tester.pump();
+    await tester.runAsync(() => _waitUntil(() => permissions.requests == 1));
+    await tester.pump();
+    expect(find.text('ADD BIKE'), findsOneWidget);
+    expect(find.text('Bluetooth permission needed'), findsOneWidget);
+    expect(find.text('Open settings'), findsOneWidget);
+    expect(transport.scanStarts, 0);
+  });
+
+  testWidgets('Ride controls render before bike settings are available', (
+    tester,
+  ) async {
+    final database = AppDatabase(NativeDatabase.memory());
+    final transport = FakeBikeTransport();
+    final services = AppServices(
+      database: database,
+      transport: transport,
+      permissions: FakeBluetoothPermissionGateway(),
+      importer: _emptyImporter(database, 'pending_controls'),
+    );
+    addTearDown(services.dispose);
+    await services.bikeRepository.addBike(
+      deviceId: 'pending-bike',
+      displayName: 'Pending Bike',
+      moduleSerial: '00112233aabbccdd',
+    );
+    transport.readFramesOnOpen['pending-bike'] = [
+      [3, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+    ];
+
+    await tester.runAsync(() async {
+      await services.startup.initialize();
+      await _waitUntil(() {
+        final state = services.activeBikeCoordinator.state.peek();
+        return state is ActiveBikeSessionStatus &&
+            state.sessionState is SessionFailed;
+      });
+    });
+    await tester.pumpWidget(SuperduperApp(services: services));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Open controls'));
+    await tester.pumpAndSettle();
+    expect(find.text('RIDE CONTROLS'), findsOneWidget);
+    expect(find.text('Light'), findsOneWidget);
+    expect(find.text('Mode'), findsOneWidget);
+    expect(find.text('Assist'), findsOneWidget);
+    expect(find.text('Waiting for bike'), findsNothing);
+  });
+}
+
+typedef _ReadyBikeFixture = ({
+  AppServices services,
+  FakeBikeConnection connection,
+});
+
+Future<_ReadyBikeFixture> _pumpReadyBikeApp(
+  WidgetTester tester,
+  String suffix, {
+  String? moduleSerial = '00112233aabbccdd',
+}) async {
+  final database = AppDatabase(NativeDatabase.memory());
+  final transport = FakeBikeTransport();
+  final permissions = FakeBluetoothPermissionGateway();
+  final bikeRepository = BikeRepository(database: database);
+  final settingsRepository = SettingsRepository(database: database);
+  final coordinator = ActiveBikeCoordinator(
+    bikeRepository: bikeRepository,
+    settingsRepository: settingsRepository,
+    permissions: permissions,
+    identityResolver: BikeIdentityResolver(
+      bikeRepository: bikeRepository,
+      transport: transport,
+    ),
+    buildSession: (bike) => BikeSession(
+      connection: transport.openConnection(bike.bike.deviceId),
+      setOnConnect: resolveSetOnConnect(bike).patch,
+      protocol: bike.bike.protocol,
+      onVersionsRead: (versions) async {
+        await bikeRepository.saveVersions(bike.bike.deviceId, versions);
+      },
+      onOdometerRead: (meters) async {
+        await bikeRepository.saveOdometer(bike.bike.deviceId, meters);
+      },
+    ),
+  );
+  final services = AppServices(
+    database: database,
+    transport: transport,
+    permissions: permissions,
+    bikeRepository: bikeRepository,
+    settingsRepository: settingsRepository,
+    activeBikeCoordinator: coordinator,
+    importer: _emptyImporter(database, suffix),
+  );
+  addTearDown(services.dispose);
+  await services.bikeRepository.addBike(
+    deviceId: 'active-bike',
+    displayName: 'Commuter',
+    moduleSerial: moduleSerial,
+    color: BikeColor.frostedMint,
+  );
+  if (moduleSerial == null) {
+    transport.replayedScanResults = [
+      DiscoveredBike(
+        deviceId: 'ACTIVE-BIKE',
+        name: BikeProtocolVersion.v1.advertisedName,
+        rssi: -20,
+        moduleSerial: '00112233aabbccdd',
+      ),
+    ];
+  }
+  await services.bikeRepository.setOnConnect(
+    'active-bike',
+    const SetOnConnect(mode: NativeModeRef(3)),
+  );
+  transport.readFramesOnOpen['active-bike'] = [
+    v1StateFrame(light: true, assist: 2),
+    v1StateFrame(light: true, mode: 3, assist: 2),
+  ];
+
+  await tester.runAsync(() async {
+    await services.startup.initialize();
+    await _waitForReady(services.activeBikeCoordinator);
+  });
+  await tester.pumpWidget(SuperduperApp(services: services));
+  await tester.pumpAndSettle();
+  return (
+    services: services,
+    connection: transport.connections['active-bike']!,
+  );
+}
+
+InstalledDataImporter _emptyImporter(AppDatabase database, String suffix) {
+  return InstalledDataImporter(
+    database: database,
+    documentsDirectory: () async =>
+        Directory('scratch/widget_tests/foreground_$suffix'),
+  );
+}
+
+Future<void> _waitForReady(ActiveBikeCoordinator coordinator) async {
+  final current = coordinator.state.peek();
+  if (current is ActiveBikeSessionStatus &&
+      current.sessionState is SessionReady) {
+    await current.session.connect();
+    return;
+  }
+  final completer = Completer<BikeSession>();
+  late final void Function() cleanup;
+  cleanup = coordinator.state.subscribe((state) {
+    if (!completer.isCompleted &&
+        state is ActiveBikeSessionStatus &&
+        state.sessionState is SessionReady) {
+      completer.complete(state.session);
+      cleanup();
+    }
+  });
+  final session = await completer.future.timeout(
+    const Duration(seconds: 2),
+    onTimeout: () {
+      final state = coordinator.state.peek();
+      final sessionState = state is ActiveBikeSessionStatus
+          ? state.sessionState.runtimeType
+          : null;
+      throw TimeoutException(
+        'Ready was not reached: ${state.runtimeType}, session: $sessionState, bikes: ${coordinator.bikes.peek().length}.',
+      );
+    },
+  );
+  await session.connect();
+}
+
+Future<void> _waitUntil(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      throw TimeoutException('The workflow did not reach its expected state.');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+  }
+}
+
+Future<void> _waitUntilAsync(Future<bool> Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (!await condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      throw TimeoutException('The workflow did not reach its expected state.');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+  }
+}
