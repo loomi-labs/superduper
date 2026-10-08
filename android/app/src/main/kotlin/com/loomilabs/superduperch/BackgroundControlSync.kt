@@ -1,7 +1,10 @@
 package com.loomilabs.superduperch
 
 /** Authenticated history inspection and receipt verification for one control command. */
-internal class BackgroundControlSync(command: ByteArray) {
+internal class BackgroundControlSync(
+    command: ByteArray,
+    private val log: (String) -> Unit = {},
+) {
     sealed interface Action {
         data class Select(val selector: ByteArray) : Action
         data class Read(val delayMs: Long = 100L) : Action
@@ -63,6 +66,7 @@ internal class BackgroundControlSync(command: ByteArray) {
             reads++
             if (reads < 20) return Action.Read()
             stage = Stage.FINISHED
+            log("history record not verified after $reads reads (stage read, verifying=$verifying)")
             return Action.Failed("Could not verify the selected bike history record")
         }
         if (stage == Stage.READ_BARRIER) {
@@ -73,9 +77,17 @@ internal class BackgroundControlSync(command: ByteArray) {
         // street-legal lock. Only a clear marker (a fresh power-up) is synced.
         if (verifying || value[5] != 0.toByte()) {
             stage = Stage.FINISHED
+            log(
+                if (verifying) {
+                    "read-back byte5=${value[5]} -> write confirmed"
+                } else {
+                    "record byte5=${value[5]} -> skip (the app wrote in this power cycle, or the lock holds)"
+                },
+            )
             return Action.Complete(applied = verifying)
         }
         stage = Stage.WRITE
+        log("record byte5=0 -> write wire ${markedCommand[4]} marker 1")
         return Action.Write(markedCommand.copyOf())
     }
 }

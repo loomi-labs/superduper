@@ -35,6 +35,12 @@ internal object NativeBackgroundSync {
             logTag,
             "Native sync requested: source=$source foreground=${BackgroundSyncRuntime.isActivityForeground}",
         )
+        DebugFileLog.log(
+            applicationContext,
+            deviceId,
+            "native",
+            "sync requested: source=$source foreground=${BackgroundSyncRuntime.isActivityForeground}",
+        )
         mainHandler.post {
             synchronizeOnMain(applicationContext, deviceId, source)
         }
@@ -61,6 +67,7 @@ internal object NativeBackgroundSync {
                     null,
                 ) ?: return@postDelayed
                 Log.d(logTag, "Bluetooth is on; resuming pending native sync")
+                DebugFileLog.log(applicationContext, deviceId, "native", "Bluetooth is on: resume pending sync")
                 synchronizeOnMain(applicationContext, deviceId, "bluetoothOn")
             },
             adapterResumeDelayMs,
@@ -140,10 +147,17 @@ internal object NativeBackgroundSync {
             return
         }
         val plan = result.getOrElse { error ->
+            nativeLog(context, "plan load failed: ${error.javaClass.simpleName}: ${error.message}")
             record(context, "failed", error.message ?: error.javaClass.simpleName)
             return
         }
         if (plan == null || plan.commands.isEmpty()) {
+            // The plan is absent when none is stored, and while the
+            // street-legal preference is on (the app removes the plan).
+            nativeLog(
+                context,
+                "no plan: none stored, or the street-legal preference is on (the plan is absent while it is on)",
+            )
             record(context, "skippedNoPlan", null)
             return
         }
@@ -165,6 +179,7 @@ internal object NativeBackgroundSync {
         )
         active = transaction
         Log.d(logTag, "Starting native background transaction")
+        nativeLog(context, "transaction start: commands=${plan.commands.size} wire=${plan.commands.first().getOrNull(4)}")
         transaction.start()
     }
 
@@ -191,7 +206,14 @@ internal object NativeBackgroundSync {
         record(transaction.context, "cancelled", reason)
     }
 
+    private fun nativeLog(context: Context, message: String) {
+        val deviceId = BackgroundCompanionManager.preferences(context)
+            .getString(BackgroundCompanionManager.deviceIdKey, null) ?: return
+        DebugFileLog.log(context, deviceId, "native", message)
+    }
+
     private fun record(context: Context, outcome: String, detail: String?) {
+        nativeLog(context, "outcome=$outcome" + if (detail != null) " detail=$detail" else "")
         BackgroundCompanionManager.preferences(context).edit()
             .putString(BackgroundCompanionManager.lastOutcomeKey, outcome)
             .putString(BackgroundCompanionManager.lastDetailKey, detail)
@@ -208,6 +230,7 @@ internal object NativeBackgroundSync {
     }
 
     private fun deferUntilBluetoothOn(context: Context) {
+        nativeLog(context, "Bluetooth is off: sync deferred until it turns on")
         BackgroundCompanionManager.preferences(context)
             .edit()
             .putBoolean(BackgroundCompanionManager.pendingSyncKey, true)
@@ -249,7 +272,9 @@ private class NativeBikeTransaction(
     private var authenticationCharacteristic: BluetoothGattCharacteristic? = null
     private var commandCharacteristic: BluetoothGattCharacteristic? = null
     private var historySelectorCharacteristic: BluetoothGattCharacteristic? = null
-    private val controlSync = BackgroundControlSync(plan.commands.single())
+    private val controlSync = BackgroundControlSync(plan.commands.single()) { message ->
+        DebugFileLog.log(context, plan.deviceId, "native", message)
+    }
     private var pendingHistoryRead: Runnable? = null
 
     private val callback = object : BluetoothGattCallback() {
@@ -329,6 +354,7 @@ private class NativeBikeTransaction(
         newState: Int,
     ) {
         if (state == State.FINISHED) return
+        log("gatt connection state: status=$status newState=$newState state=$state")
         if (status != BluetoothGatt.GATT_SUCCESS) {
             finish("failed", "GATT connection failed with status $status")
             return
@@ -370,6 +396,7 @@ private class NativeBikeTransaction(
             finish("failed", "The bike is missing a required GATT characteristic")
             return
         }
+        log("services discovered")
         responseCharacteristic = response
         authenticationCharacteristic = authentication
         commandCharacteristic = command
@@ -410,6 +437,7 @@ private class NativeBikeTransaction(
 
             State.READING_AUTHENTICATION -> {
                 if (characteristic.uuid != plan.authenticationStateUuid) return
+                log("authentication state bytes=${value.size}")
                 if (!value.contentEquals(plan.authenticatedState)) {
                     finish("failed", "Bike authentication was rejected")
                     return
@@ -524,10 +552,15 @@ private class NativeBikeTransaction(
         }
     }
 
+    private fun log(message: String) {
+        DebugFileLog.log(context, plan.deviceId, "native", message)
+    }
+
     @SuppressLint("MissingPermission")
     @Synchronized
     private fun finish(outcome: String, detail: String?) {
         if (state == State.FINISHED) return
+        log("transaction finish: state=$state outcome=$outcome" + if (detail != null) " detail=$detail" else "")
         state = State.FINISHED
         mainHandler.removeCallbacks(timeout)
         pendingHistoryRead?.let(mainHandler::removeCallbacks)

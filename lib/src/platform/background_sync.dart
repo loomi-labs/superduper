@@ -6,6 +6,7 @@ import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_identity_resolver.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/ble/exclusive_bluetooth_operation.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/platform/bluetooth_permissions.dart';
 import 'package:superduper/src/repositories/bike_repository.dart';
@@ -134,7 +135,14 @@ final class BackgroundSyncCoordinator {
     required this.identityResolver,
     required this.platform,
     this.moduleSerialDiscoveryTimeout = const Duration(seconds: 15),
+    this.debugLogFor = noDebugLogFor,
   });
+
+  final DebugLogFor debugLogFor;
+
+  void _log(String deviceId, String message) {
+    debugLogFor(deviceId).log('sync', message);
+  }
 
   final BikeRepository bikeRepository;
   final SettingsRepository settingsRepository;
@@ -202,6 +210,7 @@ final class BackgroundSyncCoordinator {
     String deviceId, {
     required bool enabled,
   }) async {
+    _log(deviceId, 'setAutomaticSetup enabled=$enabled');
     if (enabled) {
       final settings = await settingsRepository.get();
       final matches = (await bikeRepository.getBikes()).where(
@@ -236,6 +245,7 @@ final class BackgroundSyncCoordinator {
           deviceId: matches.single.bike.deviceId,
           requestAssociation: true,
         );
+        _log(deviceId, 'configure with association: ${registration.name}');
         if (registration != BackgroundSyncRegistration.configured) {
           throw const BackgroundSyncConfigurationFailure(
             'Android did not save the bike association. Try enabling Background Sync again.',
@@ -261,7 +271,8 @@ final class BackgroundSyncCoordinator {
           moduleSerial: serial,
         );
         _configurationKnown = true;
-      } on Object {
+      } on Object catch (error) {
+        _log(deviceId, 'setup failed: $error');
         if (preferenceEnabled) {
           await bikeRepository.setBackgroundPreference(
             deviceId,
@@ -369,7 +380,15 @@ final class BackgroundSyncCoordinator {
   Future<void> _drainRefreshes() async {
     while (_refreshRequested && !_disposed) {
       _refreshRequested = false;
-      await _refreshOnce();
+      try {
+        await _refreshOnce();
+      } on Object catch (error) {
+        final activeId = _settings?.activeBikeId;
+        if (activeId != null) {
+          _log(activeId, 'refresh failed: $error');
+        }
+        rethrow;
+      }
     }
   }
 
@@ -385,6 +404,10 @@ final class BackgroundSyncCoordinator {
     );
     if (inactiveRequests.isNotEmpty) {
       for (final saved in inactiveRequests.toList(growable: false)) {
+        _log(
+          saved.bike.deviceId,
+          'refresh: the bike is not the active bike, preference turned off',
+        );
         await bikeRepository.setBackgroundPreference(
           saved.bike.deviceId,
           requested: false,
@@ -407,16 +430,30 @@ final class BackgroundSyncCoordinator {
     final next = shouldEnable
         ? (deviceId: active.bike.deviceId, moduleSerial: serial)
         : null;
+    if (active != null) {
+      _log(
+        active.bike.deviceId,
+        'refresh: shouldEnable=$shouldEnable requested='
+        '${active.backgroundPreference.requested} consent='
+        '${active.backgroundPreference.consentVersion} '
+        'serial=${serial != null ? 'known' : 'unknown'} '
+        'configured=${_configured != null} known=$_configurationKnown',
+      );
+    }
     if (_configurationKnown && _configured == next) {
       return;
     }
     if (next == null) {
+      if (active != null) {
+        _log(active.bike.deviceId, 'native sync: cancel');
+      }
       await platform.cancel();
     } else {
       final registration = await platform.configure(
         deviceId: next.deviceId,
         requestAssociation: false,
       );
+      _log(next.deviceId, 'native sync: configure -> ${registration.name}');
       if (registration == BackgroundSyncRegistration.needsAssociation) {
         await bikeRepository.setBackgroundPreference(
           next.deviceId,

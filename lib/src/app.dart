@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:signals/signals_flutter.dart';
 import 'package:superduper/src/app_services.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/features/home/home_page.dart';
 import 'package:superduper/src/features/startup/startup_controller.dart';
 import 'package:superduper/src/persistence/app_database.dart';
@@ -24,6 +25,10 @@ final class SuperduperBootstrap extends StatefulWidget {
   final AppServicesFactory createServices;
   final AppDataReset resetData;
 
+  /// The debug log store of the running app. The error hooks of `main` flush
+  /// it.
+  static DebugLogStore? currentDebugLogStore;
+
   @override
   State<SuperduperBootstrap> createState() => _SuperduperBootstrapState();
 }
@@ -43,6 +48,7 @@ final class _SuperduperBootstrapState extends State<SuperduperBootstrap> {
     try {
       final services = widget.createServices();
       _services = services;
+      SuperduperBootstrap.currentDebugLogStore = services.debugLogStore;
       unawaited(services.startup.initialize());
     } on Object catch (error) {
       _creationError = error;
@@ -78,6 +84,7 @@ final class _SuperduperBootstrapState extends State<SuperduperBootstrap> {
       final replacement = widget.createServices();
       setState(() {
         _services = replacement;
+        SuperduperBootstrap.currentDebugLogStore = replacement.debugLogStore;
         _creationError = null;
         _restarting = false;
       });
@@ -176,6 +183,7 @@ final class _SuperduperAppState extends State<SuperduperApp>
   }
 
   void _setForeground(bool foreground) {
+    widget.services.debugLogStore.inBackground = !foreground;
     unawaited(
       widget.services.activeBikeCoordinator
           .setForeground(foreground)

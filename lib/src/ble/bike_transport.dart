@@ -34,7 +34,10 @@ final class BikeAdapterUnavailable extends BikeTransportFailure {
 }
 
 final class BikeConnectionFailure extends BikeTransportFailure {
-  const new(super.operation, super.message);
+  /// [cause] is the platform error. It goes to the debug log only.
+  const new(super.operation, super.message, {this.cause});
+
+  final Object? cause;
 }
 
 final class BikeGattNotSupported extends BikeTransportFailure {

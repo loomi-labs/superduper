@@ -893,6 +893,21 @@ class $BikePreferencesTable extends BikePreferences
     type: DriftSqlType.int,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _debugLogEnabledMeta = const VerificationMeta(
+    'debugLogEnabled',
+  );
+  @override
+  late final GeneratedColumn<bool> debugLogEnabled = GeneratedColumn<bool>(
+    'debug_log_enabled',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("debug_log_enabled" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     deviceId,
@@ -901,6 +916,7 @@ class $BikePreferencesTable extends BikePreferences
     backgroundConsentVersion,
     streetLegalOnQuickRestart,
     streetLegalStockMode,
+    debugLogEnabled,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -962,6 +978,15 @@ class $BikePreferencesTable extends BikePreferences
         ),
       );
     }
+    if (data.containsKey('debug_log_enabled')) {
+      context.handle(
+        _debugLogEnabledMeta,
+        debugLogEnabled.isAcceptableOrUnknown(
+          data['debug_log_enabled']!,
+          _debugLogEnabledMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -997,6 +1022,10 @@ class $BikePreferencesTable extends BikePreferences
         DriftSqlType.int,
         data['${effectivePrefix}street_legal_stock_mode'],
       ),
+      debugLogEnabled: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}debug_log_enabled'],
+      )!,
     );
   }
 
@@ -1017,6 +1046,7 @@ class BikePreferenceRow extends DataClass
   final int backgroundConsentVersion;
   final bool streetLegalOnQuickRestart;
   final int? streetLegalStockMode;
+  final bool debugLogEnabled;
   const BikePreferenceRow({
     required this.deviceId,
     required this.setOnConnect,
@@ -1024,6 +1054,7 @@ class BikePreferenceRow extends DataClass
     required this.backgroundConsentVersion,
     required this.streetLegalOnQuickRestart,
     this.streetLegalStockMode,
+    required this.debugLogEnabled,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1042,6 +1073,7 @@ class BikePreferenceRow extends DataClass
     if (!nullToAbsent || streetLegalStockMode != null) {
       map['street_legal_stock_mode'] = Variable<int>(streetLegalStockMode);
     }
+    map['debug_log_enabled'] = Variable<bool>(debugLogEnabled);
     return map;
   }
 
@@ -1055,6 +1087,7 @@ class BikePreferenceRow extends DataClass
       streetLegalStockMode: streetLegalStockMode == null && nullToAbsent
           ? const Value.absent()
           : Value(streetLegalStockMode),
+      debugLogEnabled: Value(debugLogEnabled),
     );
   }
 
@@ -1078,6 +1111,7 @@ class BikePreferenceRow extends DataClass
       streetLegalStockMode: serializer.fromJson<int?>(
         json['streetLegalStockMode'],
       ),
+      debugLogEnabled: serializer.fromJson<bool>(json['debugLogEnabled']),
     );
   }
   @override
@@ -1094,6 +1128,7 @@ class BikePreferenceRow extends DataClass
         streetLegalOnQuickRestart,
       ),
       'streetLegalStockMode': serializer.toJson<int?>(streetLegalStockMode),
+      'debugLogEnabled': serializer.toJson<bool>(debugLogEnabled),
     };
   }
 
@@ -1104,6 +1139,7 @@ class BikePreferenceRow extends DataClass
     int? backgroundConsentVersion,
     bool? streetLegalOnQuickRestart,
     Value<int?> streetLegalStockMode = const Value.absent(),
+    bool? debugLogEnabled,
   }) => BikePreferenceRow(
     deviceId: deviceId ?? this.deviceId,
     setOnConnect: setOnConnect ?? this.setOnConnect,
@@ -1115,6 +1151,7 @@ class BikePreferenceRow extends DataClass
     streetLegalStockMode: streetLegalStockMode.present
         ? streetLegalStockMode.value
         : this.streetLegalStockMode,
+    debugLogEnabled: debugLogEnabled ?? this.debugLogEnabled,
   );
   BikePreferenceRow copyWithCompanion(BikePreferencesCompanion data) {
     return BikePreferenceRow(
@@ -1134,6 +1171,9 @@ class BikePreferenceRow extends DataClass
       streetLegalStockMode: data.streetLegalStockMode.present
           ? data.streetLegalStockMode.value
           : this.streetLegalStockMode,
+      debugLogEnabled: data.debugLogEnabled.present
+          ? data.debugLogEnabled.value
+          : this.debugLogEnabled,
     );
   }
 
@@ -1145,7 +1185,8 @@ class BikePreferenceRow extends DataClass
           ..write('backgroundRequested: $backgroundRequested, ')
           ..write('backgroundConsentVersion: $backgroundConsentVersion, ')
           ..write('streetLegalOnQuickRestart: $streetLegalOnQuickRestart, ')
-          ..write('streetLegalStockMode: $streetLegalStockMode')
+          ..write('streetLegalStockMode: $streetLegalStockMode, ')
+          ..write('debugLogEnabled: $debugLogEnabled')
           ..write(')'))
         .toString();
   }
@@ -1158,6 +1199,7 @@ class BikePreferenceRow extends DataClass
     backgroundConsentVersion,
     streetLegalOnQuickRestart,
     streetLegalStockMode,
+    debugLogEnabled,
   );
   @override
   bool operator ==(Object other) =>
@@ -1168,7 +1210,8 @@ class BikePreferenceRow extends DataClass
           other.backgroundRequested == this.backgroundRequested &&
           other.backgroundConsentVersion == this.backgroundConsentVersion &&
           other.streetLegalOnQuickRestart == this.streetLegalOnQuickRestart &&
-          other.streetLegalStockMode == this.streetLegalStockMode);
+          other.streetLegalStockMode == this.streetLegalStockMode &&
+          other.debugLogEnabled == this.debugLogEnabled);
 }
 
 class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
@@ -1178,6 +1221,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
   final Value<int> backgroundConsentVersion;
   final Value<bool> streetLegalOnQuickRestart;
   final Value<int?> streetLegalStockMode;
+  final Value<bool> debugLogEnabled;
   final Value<int> rowid;
   const BikePreferencesCompanion({
     this.deviceId = const Value.absent(),
@@ -1186,6 +1230,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
     this.backgroundConsentVersion = const Value.absent(),
     this.streetLegalOnQuickRestart = const Value.absent(),
     this.streetLegalStockMode = const Value.absent(),
+    this.debugLogEnabled = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   BikePreferencesCompanion.insert({
@@ -1195,6 +1240,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
     required int backgroundConsentVersion,
     this.streetLegalOnQuickRestart = const Value.absent(),
     this.streetLegalStockMode = const Value.absent(),
+    this.debugLogEnabled = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : deviceId = Value(deviceId),
        setOnConnect = Value(setOnConnect),
@@ -1207,6 +1253,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
     Expression<int>? backgroundConsentVersion,
     Expression<bool>? streetLegalOnQuickRestart,
     Expression<int>? streetLegalStockMode,
+    Expression<bool>? debugLogEnabled,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1220,6 +1267,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
         'street_legal_on_quick_restart': streetLegalOnQuickRestart,
       if (streetLegalStockMode != null)
         'street_legal_stock_mode': streetLegalStockMode,
+      if (debugLogEnabled != null) 'debug_log_enabled': debugLogEnabled,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1231,6 +1279,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
     Value<int>? backgroundConsentVersion,
     Value<bool>? streetLegalOnQuickRestart,
     Value<int?>? streetLegalStockMode,
+    Value<bool>? debugLogEnabled,
     Value<int>? rowid,
   }) {
     return BikePreferencesCompanion(
@@ -1242,6 +1291,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
       streetLegalOnQuickRestart:
           streetLegalOnQuickRestart ?? this.streetLegalOnQuickRestart,
       streetLegalStockMode: streetLegalStockMode ?? this.streetLegalStockMode,
+      debugLogEnabled: debugLogEnabled ?? this.debugLogEnabled,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1275,6 +1325,9 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
         streetLegalStockMode.value,
       );
     }
+    if (debugLogEnabled.present) {
+      map['debug_log_enabled'] = Variable<bool>(debugLogEnabled.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1290,6 +1343,7 @@ class BikePreferencesCompanion extends UpdateCompanion<BikePreferenceRow> {
           ..write('backgroundConsentVersion: $backgroundConsentVersion, ')
           ..write('streetLegalOnQuickRestart: $streetLegalOnQuickRestart, ')
           ..write('streetLegalStockMode: $streetLegalStockMode, ')
+          ..write('debugLogEnabled: $debugLogEnabled, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();

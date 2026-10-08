@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:signals/signals.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_session.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/ride_modes.dart';
 
@@ -17,6 +18,7 @@ final class RideModeController {
     this.speedTimeout = const Duration(seconds: 5),
     this.parkedTimeout = const Duration(minutes: 10),
     Duration watchdogInterval = const Duration(seconds: 1),
+    this._debugLog = const NoopDebugLog(),
   }) : _clock = clock ?? DateTime.now {
     _stateCleanup = session.state.subscribe(_onState);
     _observedCleanup = session.observed.subscribe(_onObserved);
@@ -32,6 +34,7 @@ final class RideModeController {
   final Duration speedTimeout;
   final Duration parkedTimeout;
   final DateTime Function() _clock;
+  final DebugLog _debugLog;
   final Signal<RideModeSelection?> _selection = signal(
     null,
     options: const SignalOptions(name: 'rideMode.selection'),
@@ -56,6 +59,9 @@ final class RideModeController {
   SavedBike _bike;
   int? _assertedWire;
   DateTime? _lastRideDataRequestAt;
+  DateTime? _stallLoggedFor;
+  DateTime? _lastStallLogAt;
+  static const _stallLogInterval = Duration(minutes: 5);
   // While a select write is in flight, the hold follows the previous
   // selection: the new mode is not on the bike yet.
   var _selectInFlight = false;
@@ -68,6 +74,14 @@ final class RideModeController {
   Future<void>? _parkedWrite;
   var _linkSettled = false;
   var _disposed = false;
+  // Debug log state: what the last log lines said.
+  bool? _moving;
+  bool? _aboveLimit;
+  DateTime? _lastHeartbeatAt;
+  bool? _lastHold;
+  bool? _lastHoldsLimit;
+  int? _lastParkedMinutes;
+  bool? _lastParkedApplies;
 
   ReadonlySignal<RideModeSelection?> get selection => _selection.readonly();
   ReadonlySignal<bool> get needsBackgroundHold =>
@@ -82,6 +96,25 @@ final class RideModeController {
   /// up. Null while the timer does not run.
   ReadonlySignal<int?> get parkedMinutesLeft => _parkedMinutesLeft.readonly();
   BikeRegion? get _region => _bike.bike.region;
+
+  void _log(String area, String message) {
+    _debugLog.log(area, message, generation: session.generation);
+  }
+
+  static String _describe(RideModeSelection? selection) =>
+      selection?.toString() ?? 'none';
+
+  /// Logs a change of the selection once.
+  void _setSelection(RideModeSelection? next, String reason) {
+    final previous = _selection.peek();
+    _selection.value = next;
+    if (previous != next) {
+      _log(
+        'mode',
+        'selection ${_describe(previous)} -> ${_describe(next)}: $reason',
+      );
+    }
+  }
 
   /// The selection the hold follows until the bike confirms one: the
   /// set-on-connect custom mode, so a rider who leaves the app during the
@@ -118,6 +151,9 @@ final class RideModeController {
     }
     // A parked write that runs now finishes first: the rider's choice comes
     // after it and ends the lock that it starts.
+    if (_parkedWrite != null) {
+      _log('mode', 'select waits for the parked write');
+    }
     await _parkedWrite;
     if (_disposed) {
       return;
@@ -126,6 +162,11 @@ final class RideModeController {
     final previousSelection = _selection.peek();
     final previousWire = _assertedWire;
     final previousLock = session.streetLegalLocked.peek();
+    _log(
+      'mode',
+      'select ${_describe(previousSelection)} -> ${_describe(next)} '
+          'wire $previousWire -> $wire lock=$previousLock',
+    );
     // A mode choice ends the lock. Its write carries marker 1.
     session.endStreetLegalLock();
     _selectInFlight = true;
@@ -134,10 +175,17 @@ final class RideModeController {
     _assertedWire = wire;
     try {
       await session.setMode(wire);
+      _log('mode', 'select accepted: wire $wire');
       // A mode choice restarts the parked fallback timer.
       _parkedSince = null;
       _parkedPaused = null;
-    } on Object {
+    } on Object catch (error) {
+      _log(
+        'mode',
+        'select failed: $error -> rollback to '
+            '${_describe(previousSelection)} wire $previousWire lock='
+            '$previousLock',
+      );
       if (!_disposed) {
         _selection.value = previousSelection;
         _assertedWire = previousWire;
@@ -156,6 +204,12 @@ final class RideModeController {
   }
 
   void updateBike(SavedBike bike) {
+    _log(
+      'mode',
+      'updateBike streetLegal=${bike.streetLegalOnQuickRestart} '
+          'customModes=${bike.customModes.length} '
+          'setOnConnect=${bike.setOnConnect}',
+    );
     _bike = bike;
     if (_selection.peek() case CustomRideMode(:final mode)) {
       final stillThere = bike.customModes
@@ -163,16 +217,20 @@ final class RideModeController {
           .firstOrNull;
       if (stillThere == null) {
         final observed = session.observed.peek()?.mode;
-        _selection.value = observed == null ? null : NativeRideMode(observed);
+        _setSelection(
+          observed == null ? null : NativeRideMode(observed),
+          'the custom mode is gone',
+        );
         _assertedWire = observed;
       } else if (stillThere != mode) {
-        _selection.value = CustomRideMode(stillThere);
+        _setSelection(CustomRideMode(stillThere), 'the custom mode changed');
         _assertedWire = entryWireFor(stillThere, _region);
         if (_ready) {
           unawaited(
-            session
-                .setMode(_assertedWire!)
-                .catchError((Object _) => session.observed.peek()!),
+            session.setMode(_assertedWire!).catchError((Object error) {
+              _log('mode', 'write of the changed custom mode failed: $error');
+              return session.observed.peek()!;
+            }),
           );
         }
       }
@@ -185,6 +243,7 @@ final class RideModeController {
     if (_disposed) {
       return;
     }
+    _log('mode', 'controller disposed');
     _disposed = true;
     _watchdog.cancel();
     _stateCleanup();
@@ -209,6 +268,9 @@ final class RideModeController {
       SessionSynchronizing() => _linkSettled,
       _ => false,
     };
+    if (_linkSettled != wasSettled) {
+      _log('mode', 'link settled: $wasSettled -> $_linkSettled');
+    }
     if (state is SessionReady && !wasSettled) {
       _onBecameReady();
     }
@@ -221,10 +283,11 @@ final class RideModeController {
     if (_disposed) {
       return;
     }
+    _log('lock', 'session lock changed: locked=$locked ready=$_ready');
     if (locked && _ready) {
       final observed = session.observed.peek()?.mode;
       if (observed != null) {
-        _selection.value = NativeRideMode(observed);
+        _setSelection(NativeRideMode(observed), 'the lock is on');
         _assertedWire = observed;
       }
     }
@@ -238,26 +301,37 @@ final class RideModeController {
     _continueParkedTimer();
     final observed = session.observed.peek()?.mode;
     if (observed == null) {
+      _log('mode', 'became ready without an observed mode');
       return;
     }
     if (session.streetLegalLocked.peek()) {
-      _selection.value = NativeRideMode(observed);
+      _setSelection(NativeRideMode(observed), 'ready (1): the lock is on');
       _assertedWire = observed;
       return;
     }
     final current = _selection.peek();
     if (current is CustomRideMode && assertsWire(current, observed, _region)) {
+      _log(
+        'mode',
+        'ready (2): keeps ${_describe(current)}, bike wire $observed',
+      );
       _assertedWire = observed;
       return;
     }
     final resolved = resolveSetOnConnect(_bike);
     if (resolved.rideMode case final mode?
         when assertsWire(CustomRideMode(mode), observed, _region)) {
-      _selection.value = CustomRideMode(mode);
+      _setSelection(
+        CustomRideMode(mode),
+        'ready (3): set-on-connect custom mode, bike wire $observed',
+      );
       _assertedWire = observed;
       return;
     }
-    _selection.value = NativeRideMode(observed);
+    _setSelection(
+      NativeRideMode(observed),
+      'ready (4): follows the bike wire $observed',
+    );
     _assertedWire = observed;
   }
 
@@ -269,6 +343,10 @@ final class RideModeController {
     // During a connection the session publishes the wire it reads before the
     // set-on-connect write. That wire is not a rider choice.
     if (!_linkSettled) {
+      _log(
+        'mode',
+        'observed wire ${observed.mode} ignored: the link is not settled',
+      );
       return;
     }
     final current = _selection.peek();
@@ -276,7 +354,11 @@ final class RideModeController {
       return;
     }
     if (!assertsWire(current, observed.mode, _region)) {
-      _selection.value = NativeRideMode(observed.mode);
+      _setSelection(
+        NativeRideMode(observed.mode),
+        'the bike reports wire ${observed.mode}, '
+        '${_describe(current)} does not assert it (rider changed the mode)',
+      );
       _assertedWire = observed.mode;
       _publishHold();
       _updateParkedTimer();
@@ -287,6 +369,7 @@ final class RideModeController {
     if (_disposed || speedKmh == null) {
       return;
     }
+    _logSpeed(speedKmh);
     if (speedKmh > 0 && _parkedSince != null) {
       _parkedSince = _clock();
       _publishParked();
@@ -303,7 +386,56 @@ final class RideModeController {
     if (next == asserted) {
       return;
     }
-    _writeWire(next, previous: asserted);
+    _writeWire(
+      next,
+      previous: asserted,
+      reason: 'speed=$speedKmh limit=${current.mode.effectiveLimitKmh}',
+    );
+  }
+
+  static const _heartbeat = Duration(seconds: 5);
+
+  /// Logs a start or stop, a crossing of the limit, and a heartbeat each 5 s
+  /// while the bike moves. No line per sample.
+  void _logSpeed(double speedKmh) {
+    final moving = speedKmh > 0;
+    final now = _clock();
+    if (_moving != moving && (moving || _moving != null)) {
+      _log('speed', moving ? 'moving: speed=$speedKmh' : 'stopped: speed=0');
+      if (moving && _parkedSince != null) {
+        // One line for each ride, not for each sample.
+        _log('parked', 'timer reset by movement');
+      }
+    }
+    _moving = moving;
+    final current = _selection.peek();
+    if (current is CustomRideMode) {
+      final limit = current.mode.effectiveLimitKmh;
+      final above = speedKmh > limit;
+      if (_aboveLimit != null && _aboveLimit != above) {
+        _log(
+          'speed',
+          'crossed limit $limit ${above ? 'upward' : 'downward'}: '
+              'speed=$speedKmh asserted wire $_assertedWire',
+        );
+      }
+      _aboveLimit = above;
+    } else {
+      _aboveLimit = null;
+    }
+    if (!moving) {
+      _lastHeartbeatAt = null;
+      return;
+    }
+    final last = _lastHeartbeatAt;
+    if (last == null || now.difference(last) >= _heartbeat) {
+      _lastHeartbeatAt = now;
+      _log(
+        'speed',
+        'heartbeat speed=$speedKmh asserted wire $_assertedWire '
+            'mode=${_describe(current)}',
+      );
+    }
   }
 
   /// Without speed samples a mode with an unlimited base must go back on its
@@ -328,23 +460,49 @@ final class RideModeController {
     if (last != null && now.difference(last) < speedTimeout) {
       return;
     }
+    final age = last == null
+        ? 'the whole link'
+        : '${now.difference(last).inSeconds}s';
     if (switching) {
       final capped = unwatchedWireFor(current.mode, _region);
       if (capped != null && capped != _assertedWire) {
-        _writeWire(capped, previous: _assertedWire ?? capped);
+        _writeWire(
+          capped,
+          previous: _assertedWire ?? capped,
+          reason: 'no speed sample for $age (standstill or loss)',
+        );
       }
     }
     final lastRequest = _lastRideDataRequestAt;
     if (lastRequest == null || now.difference(lastRequest) >= speedTimeout) {
       _lastRideDataRequestAt = now;
-      unawaited(session.requestRideData().catchError((Object _) {}));
+      // At a standstill the bike sends no samples. Log the first request after
+      // the last sample, then one line each 5 minutes.
+      final lastLog = _lastStallLogAt;
+      if (last != _stallLoggedFor ||
+          lastLog == null ||
+          now.difference(lastLog) >= _stallLogInterval) {
+        _stallLoggedFor = last;
+        _lastStallLogAt = now;
+        _log(
+          'speed',
+          'no speed sample for $age (standstill or loss): ride data request',
+        );
+      }
+      unawaited(
+        session.requestRideData().catchError((Object error) {
+          _log('speed', 'ride data request failed: $error');
+        }),
+      );
     }
   }
 
-  void _writeWire(int wire, {required int previous}) {
+  void _writeWire(int wire, {required int previous, required String reason}) {
+    _log('speed', '$reason wire $previous -> $wire');
     _assertedWire = wire;
     unawaited(
-      session.setMode(wire).catchError((Object _) {
+      session.setMode(wire).catchError((Object error) {
+        _log('speed', 'write of wire $wire failed: $error');
         if (_assertedWire == wire) {
           _assertedWire = previous;
         }
@@ -358,16 +516,39 @@ final class RideModeController {
     if (_disposed) {
       return;
     }
-    if (!_parkedApplies) {
+    final applies = _parkedApplies;
+    if (applies != _lastParkedApplies) {
+      _lastParkedApplies = applies;
+      _log(
+        'parked',
+        'applies=$applies (streetLegal=${_bike.streetLegalOnQuickRestart} '
+            'protocol=${_bike.bike.protocol.name} '
+            'locked=${session.streetLegalLocked.peek()} '
+            'selection=${_describe(_selection.peek())})',
+      );
+    }
+    if (!applies) {
+      if (_parkedSince != null || _parkedPaused != null) {
+        _log('parked', 'timer stopped');
+      }
       _parkedSince = null;
       _parkedPaused = null;
     } else if (_linkSettled) {
+      if (_parkedSince == null) {
+        _log(
+          'parked',
+          _parkedPaused == null
+              ? 'timer started'
+              : 'timer resumed with ${_parkedPaused!.inSeconds}s elapsed',
+        );
+      }
       _parkedSince ??= _clock().subtract(_parkedPaused ?? Duration.zero);
       _parkedPaused = null;
     } else if (_parkedSince case final since?) {
       // A dropout pauses the timer.
       _parkedPaused = _clock().difference(since);
       _parkedSince = null;
+      _log('parked', 'timer paused at ${_parkedPaused!.inSeconds}s');
     }
     _publishParked();
   }
@@ -382,6 +563,13 @@ final class RideModeController {
     _parkedPaused = session.lastSessionMarker == BikeGatt.sessionAppliedMarker
         ? paused + (session.dropoutOnTime ?? Duration.zero)
         : null;
+    _log(
+      'parked',
+      'continue: marker=${session.lastSessionMarker} paused='
+          '${paused.inSeconds}s dropoutOnTime='
+          '${session.dropoutOnTime?.inSeconds}s -> '
+          '${_parkedPaused == null ? 'timer starts again' : '${_parkedPaused!.inSeconds}s elapsed'}',
+    );
   }
 
   void _checkParked() {
@@ -397,6 +585,11 @@ final class RideModeController {
 
   Future<void> _onParkedExpired() {
     // The speed check stops first, so no custom wire follows the stock mode.
+    _log(
+      'parked',
+      'expired after ${parkedTimeout.inMinutes} min without speed: write the '
+          'stock mode',
+    );
     _parkedWriteInFlight = true;
     final write = _writeParkedLock();
     _parkedWrite = write;
@@ -406,9 +599,11 @@ final class RideModeController {
   Future<void> _writeParkedLock() async {
     try {
       await session.startStreetLegalLock();
-    } on Object {
+      _log('parked', 'stock mode written, lock started');
+    } on Object catch (error) {
       // The lock starts only when the bike accepted the stock mode. The timer
       // stays expired, so the next tick on a settled link tries again.
+      _log('parked', 'stock mode write failed: $error');
     } finally {
       _parkedWriteInFlight = false;
       _parkedWrite = null;
@@ -422,12 +617,16 @@ final class RideModeController {
     final since = _parkedSince;
     if (since == null) {
       _parkedMinutesLeft.value = null;
+      _lastParkedMinutes = null;
       return;
     }
     final left = parkedTimeout - _clock().difference(since);
-    _parkedMinutesLeft.value = left <= Duration.zero
-        ? 0
-        : (left.inSeconds + 59) ~/ 60;
+    final minutes = left <= Duration.zero ? 0 : (left.inSeconds + 59) ~/ 60;
+    _parkedMinutesLeft.value = minutes;
+    if (minutes != _lastParkedMinutes) {
+      _lastParkedMinutes = minutes;
+      _log('parked', 'minutes left: $minutes');
+    }
   }
 
   void _publishHold() {
@@ -446,8 +645,20 @@ final class RideModeController {
     };
     // The street-legal preference needs the link to see the next restart,
     // in any ride mode.
-    _needsBackgroundHold.value =
-        (dynamic || _bike.streetLegalOnQuickRestart) && linkWanted;
-    _holdsSpeedLimit.value = dynamic && linkWanted;
+    final hold = (dynamic || _bike.streetLegalOnQuickRestart) && linkWanted;
+    final holdsLimit = dynamic && linkWanted;
+    if (hold != _lastHold || holdsLimit != _lastHoldsLimit) {
+      _lastHold = hold;
+      _lastHoldsLimit = holdsLimit;
+      _log(
+        'hold',
+        'hold=$hold holdsSpeedLimit=$holdsLimit (selection='
+            '${_describe(current)} dynamic=$dynamic streetLegal='
+            '${_bike.streetLegalOnQuickRestart} linkWanted=$linkWanted '
+            'selectInFlight=$_selectInFlight)',
+      );
+    }
+    _needsBackgroundHold.value = hold;
+    _holdsSpeedLimit.value = holdsLimit;
   }
 }

@@ -95,4 +95,18 @@ class BackgroundControlSyncTest {
     fun rejectsUnknownControlPackets() {
         BackgroundControlSync(command(0xaa))
     }
+
+    @Test
+    fun logsTheRecordByteAndTheDecision() {
+        val lines = mutableListOf<String>()
+        val sync = BackgroundControlSync(command()) { lines.add(it) }
+        val clear = command().also { it[5] = 0 }
+        assertTrue(inspect(sync, clear) is BackgroundControlSync.Action.Write)
+        assertEquals(listOf("record byte5=0 -> write wire 3 marker 1"), lines)
+
+        lines.clear()
+        val marked = command().also { it[5] = 2 }
+        inspect(BackgroundControlSync(command()) { lines.add(it) }, marked)
+        assertTrue(lines.single().startsWith("record byte5=2 -> skip"))
+    }
 }

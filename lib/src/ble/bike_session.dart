@@ -5,6 +5,7 @@ import 'package:signals/signals.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/ble/off_time_meter.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 
 sealed class BikeSessionFailure implements Exception {
@@ -17,7 +18,9 @@ sealed class BikeSessionFailure implements Exception {
 }
 
 final class BikeSessionTransportFailure extends BikeSessionFailure {
-  const new(Object cause) : super('Bike communication failed: $cause');
+  const new(this.cause) : super('Bike communication failed: $cause');
+
+  final Object cause;
 }
 
 final class BikeBluetoothUnavailable extends BikeSessionFailure {
@@ -138,8 +141,12 @@ final class BikeSession {
     this._streetLegalStockMode = 0,
     this._counterSampleTimeout = const Duration(seconds: 3),
     DateTime Function()? clock,
+    DebugLog debugLog = const NoopDebugLog(),
   }) : _protocolVersion = protocol,
        _clock = clock ?? DateTime.now,
+       // The public named parameter keeps the log private.
+       // ignore: prefer_initializing_formals
+       _debugLog = debugLog,
        _authenticationKey = List<int>.unmodifiable(authenticationKey),
        _nextConnectionIntent = setOnConnect,
        _connectionIntent = setOnConnect,
@@ -179,6 +186,7 @@ final class BikeSession {
       key: _authenticationKey,
     );
     _connectionSubscription = connection.states.listen(_onConnectionState);
+    _logStateChanges();
   }
 
   final BikeConnection connection;
@@ -212,9 +220,14 @@ final class BikeSession {
   bool _streetLegalOnQuickRestart;
   int _streetLegalStockMode;
   final Duration _counterSampleTimeout;
-  late final OffTimeMeter _offTimeMeter = OffTimeMeter(clock: _clock);
+  late final OffTimeMeter _offTimeMeter = OffTimeMeter(
+    clock: _clock,
+    log: (message) => _log('meter', message),
+  );
+  final DebugLog _debugLog;
   StreamSubscription<List<int>>? _auxiliarySubscription;
   Completer<void>? _counterSampleWaiter;
+  var _counterSampleLogged = false;
   int? _lastSessionMarker;
   // Counts the mode choices that ended the lock.
   var _lockEpoch = 0;
@@ -270,6 +283,9 @@ final class BikeSession {
   BikeControlPatch? _pendingControls;
 
   String get deviceId => connection.deviceId;
+
+  /// The connection generation. The debug log lines carry it.
+  int get generation => _generation;
   ReadonlySignal<BikeSessionState> get state => _state.readonly();
   ReadonlySignal<BikeConfiguration?> get observed => _observed.readonly();
   ReadonlySignal<BikeConfiguration?> get pending => _pending.readonly();
@@ -293,10 +309,12 @@ final class BikeSession {
     _ensureNotDisposed();
     final request = _connectRequestFuture;
     if (request != null) {
+      _log('link', 'connect skipped: a connect request runs');
       return request;
     }
     final pending = _connectFuture;
     if (_connectFutureGeneration == _generation && pending != null) {
+      _log('link', 'connect skipped: a connect of this generation runs');
       return pending;
     }
     final currentState = _state.peek();
@@ -304,8 +322,10 @@ final class BikeSession {
         _hasObservedConnection &&
         (currentState is SessionReady ||
             currentState is SessionSynchronizing)) {
+      _log('link', 'connect skipped: the link is up');
       return Future.value();
     }
+    _log('link', 'connect requested');
     late final Future<void> next;
     next = _connectAfterManualPause().whenComplete(() {
       if (identical(_connectRequestFuture, next)) {
@@ -321,6 +341,7 @@ final class BikeSession {
     _ensureNotDisposed();
     final pending = _connectFuture;
     if (_connectFutureGeneration == _generation && pending != null) {
+      _log('link', 'connect joins a running connect');
       await pending;
       return;
     }
@@ -329,13 +350,14 @@ final class BikeSession {
         _hasObservedConnection &&
         (currentState is SessionReady ||
             currentState is SessionSynchronizing)) {
+      _log('link', 'connect dropped: the link came up while waiting');
       return;
     }
     _invalidateConfigurationState();
     _manualReconnectPaused = false;
     _foregroundPaused = false;
     _disconnectRequested = false;
-    _generation++;
+    _nextGeneration('connect');
     _reconnectAttempt = 0;
     _reconnectTimer?.cancel();
     await _startConnect();
@@ -353,6 +375,7 @@ final class BikeSession {
         if (failure is BikeSessionDisposedFailure) {
           throw failure;
         }
+        _log('config', 'synchronize failed: ${_describeFailure(failure)}');
         if (_isConnectionFailure(failure)) {
           _clearPendingConfiguration();
           _scheduleReconnect(failure);
@@ -406,9 +429,14 @@ final class BikeSession {
     final wasEnabled = _streetLegalOnQuickRestart;
     _streetLegalOnQuickRestart = enabled;
     _streetLegalStockMode = stockMode;
+    _log(
+      'lock',
+      'preference updated: enabled=$wasEnabled -> $enabled stockWire='
+          '$stockMode',
+    );
     if (!enabled) {
       _streetLegalLocked.value = false;
-      _offTimeMeter.clear();
+      _offTimeMeter.clear('preference turned off');
       unawaited(_disableAuxiliaryCounter());
       if (wasEnabled && _hasObservedConnection) {
         // The bike stops its notifications, one each second.
@@ -420,7 +448,9 @@ final class BikeSession {
                   await _stopAuxiliaryCounterOnBike();
                 }
               })
-              .catchError((Object _) {}),
+              .catchError((Object error) {
+                _log('meter', 'stopping the counter failed: $error');
+              }),
         );
       }
       return;
@@ -428,7 +458,7 @@ final class BikeSession {
     if (!wasEnabled) {
       // Samples and losses from the time of the off preference are no basis
       // for an off time.
-      _offTimeMeter.clear();
+      _offTimeMeter.clear('preference turned on');
     }
     if (!wasEnabled && _hasObservedConnection) {
       // The counter starts at once, so the next restart has a sample.
@@ -440,7 +470,9 @@ final class BikeSession {
                 await _enableAuxiliaryCounter();
               }
             })
-            .catchError((Object _) {}),
+            .catchError((Object error) {
+              _log('meter', 'starting the counter failed: $error');
+            }),
       );
     }
   }
@@ -450,6 +482,11 @@ final class BikeSession {
   void endStreetLegalLock() {
     if (!_disposed) {
       _lockEpoch++;
+      _log(
+        'lock',
+        'rider chose a mode: epoch=$_lockEpoch locked='
+            '${_streetLegalLocked.peek()} -> false',
+      );
       _streetLegalLocked.value = false;
     }
   }
@@ -457,6 +494,11 @@ final class BikeSession {
   /// Puts back a lock that a failed mode choice ended too early.
   void restoreStreetLegalLock(bool locked) {
     if (!_disposed) {
+      _log(
+        'lock',
+        'restore lock after a failed mode choice: '
+            '${_streetLegalLocked.peek()} -> $locked',
+      );
       _streetLegalLocked.value = locked;
     }
   }
@@ -466,10 +508,12 @@ final class BikeSession {
   Future<void> startStreetLegalLock() {
     _ensureNotDisposed();
     if (!canChangeConfiguration) {
+      _log('lock', 'start lock refused: the session cannot change controls');
       throw const BikeSessionNotReady();
     }
     final generation = _generation;
     final epoch = _lockEpoch;
+    _log('lock', 'start lock requested, epoch=$epoch');
     return _commands.add(() async {
       if (!_isCurrent(generation) || !_hasObservedConnection) {
         throw const BikeSessionDisposedFailure();
@@ -481,6 +525,12 @@ final class BikeSession {
       final target = current.copyWith(mode: _streetLegalStockMode);
       _pollTimer?.cancel();
       _state.value = const SessionSynchronizing(attempt: 1);
+      _log(
+        'lock',
+        'write stock wire $_streetLegalStockMode marker '
+            '${BikeGatt.sessionLockedMarker} (observed '
+            '${_describeConfig(current)})',
+      );
       try {
         await _protocol.writeConfiguration(
           target,
@@ -491,6 +541,7 @@ final class BikeSession {
         }
       } on Object catch (error) {
         final failure = _asFailure(error);
+        _log('lock', 'stock write failed: ${_describeFailure(failure)}');
         if (_isConnectionFailure(failure)) {
           _scheduleReconnect(failure);
         } else if (failure is! BikeSessionDisposedFailure) {
@@ -501,7 +552,14 @@ final class BikeSession {
       _publishObserved(target);
       // A mode choice after this call ended the lock: it stays off.
       if (epoch == _lockEpoch) {
+        _log('lock', 'stock write accepted -> lock ON');
         _streetLegalLocked.value = true;
+      } else {
+        _log(
+          'lock',
+          'stock write accepted, but a mode choice moved the epoch '
+              '($epoch -> $_lockEpoch) -> lock stays OFF',
+        );
       }
       _markReady(target);
     });
@@ -510,6 +568,7 @@ final class BikeSession {
   Future<void> disconnect() async {
     _ensureNotDisposed();
     final wasManuallyPaused = _manualReconnectPaused;
+    _log('link', 'disconnect requested, wasPaused=$wasManuallyPaused');
     _manualReconnectPaused = true;
     _foregroundPaused = false;
     final disconnect = _enqueueDisconnect(
@@ -527,19 +586,31 @@ final class BikeSession {
 
   Future<void> pauseForBackground() async {
     if (_disposed || _manualReconnectPaused || _foregroundPaused) {
+      _log(
+        'link',
+        'pause skipped: disposed=$_disposed manual=$_manualReconnectPaused '
+            'paused=$_foregroundPaused',
+      );
       return;
     }
+    _log('link', 'pause for background');
     _foregroundPaused = true;
     await _enqueueDisconnect(manuallyPaused: false, abortPendingConnect: true);
   }
 
   Future<void> resumeFromBackground() async {
     if (_disposed || _manualReconnectPaused || !_foregroundPaused) {
+      _log(
+        'link',
+        'resume skipped: disposed=$_disposed manual=$_manualReconnectPaused '
+            'paused=$_foregroundPaused',
+      );
       return;
     }
+    _log('link', 'resume from background');
     _foregroundPaused = false;
     _disconnectRequested = false;
-    _generation++;
+    _nextGeneration('resume from background');
     _reconnectTimer?.cancel();
     await _startConnect();
   }
@@ -550,7 +621,7 @@ final class BikeSession {
     }
     _disposed = true;
     _disconnectRequested = true;
-    _generation++;
+    _nextGeneration('dispose');
     _expectedDisconnect = true;
     _pollTimer?.cancel();
     _reconnectTimer?.cancel();
@@ -558,28 +629,33 @@ final class BikeSession {
     _invalidateConfigurationState();
     try {
       await connection.disconnect();
-    } on Object {
+    } on Object catch (error) {
       // Disconnect is best-effort during teardown.
+      _log('link', 'dispose: disconnect failed: $error');
     }
     try {
       await _commands.done;
-    } on Object {
+    } on Object catch (error) {
       // Pending callers receive their own command error.
+      _log('link', 'dispose: pending command ended with $error');
     }
     try {
       await _disableNotifications(updatePeripheral: false);
-    } on Object {
+    } on Object catch (error) {
       // A torn-down stream may already be closed.
+      _log('link', 'dispose: disabling notifications failed: $error');
     }
     try {
       await _connectionSubscription.cancel();
-    } on Object {
+    } on Object catch (error) {
       // Subscription cancellation must not prevent the remaining cleanup.
+      _log('link', 'dispose: cancelling the link listener failed: $error');
     }
     try {
       await connection.dispose();
-    } on Object {
+    } on Object catch (error) {
       // The session is locally disposed even if platform teardown fails.
+      _log('link', 'dispose: platform dispose failed: $error');
     }
     _state.value = const SessionDisposed();
     _state.dispose();
@@ -623,6 +699,7 @@ final class BikeSession {
     final generation = _generation;
     return _commands.add(() async {
       if (!_isCurrent(generation)) {
+        _log('link', 'connect dropped: generation $generation is stale');
         return;
       }
       _expectedDisconnect = false;
@@ -643,24 +720,29 @@ final class BikeSession {
           }
         }
         if (!_isCurrent(generation)) {
+          _log('link', 'connect stopped after the platform connect: stale');
           return;
         }
         _state.value = const SessionDiscovering();
         await _timed(connection.discoverRequiredGatt(), 'Service discovery');
         if (!_isCurrent(generation)) {
+          _log('link', 'connect stopped after discovery: stale');
           return;
         }
         _state.value = const SessionAuthenticating();
         await _authenticate();
         if (!_isCurrent(generation)) {
+          _log('link', 'connect stopped after authentication: stale');
           return;
         }
         await _enableNotifications();
         if (!_isCurrent(generation)) {
+          _log('link', 'connect stopped after notifications: stale');
           return;
         }
         await _enableAuxiliaryCounter();
         if (!_isCurrent(generation)) {
+          _log('link', 'connect stopped after the counter: stale');
           return;
         }
         _state.value = const SessionConnected();
@@ -675,16 +757,19 @@ final class BikeSession {
         if (_isCurrent(generation) && _hasObservedConnection) {
           try {
             await _protocol.requestRideData();
-          } on Object {
+          } on Object catch (error) {
             // Ride data is optional. A bike that refuses the request still
             // connects, without speed.
+            _log('speed', 'ride data request failed: $error');
           }
         }
       } on Object catch (error) {
         if (!_isCurrent(generation)) {
+          _log('link', 'connect failed in a stale generation: $error');
           return;
         }
         final failure = _asFailure(error);
+        _log('link', 'connect failed: ${_describeFailure(failure)}');
         if (failure case BikeBluetoothUnavailable(canRetry: false)) {
           _clearPendingConfiguration();
           _state.value = SessionFailed(failure: failure, canRetry: false);
@@ -758,11 +843,13 @@ final class BikeSession {
       _versions.value = info;
       try {
         await _onVersionsRead?.call(info);
-      } on Object {
+      } on Object catch (error) {
         // A cached version write must not prevent the bike becoming ride-ready.
+        _log('config', 'saving versions failed: $error');
       }
-    } on Object {
+    } on Object catch (error) {
       // Some bikes omit version data. Keep the last cache and continue setup.
+      _log('config', 'reading versions failed: $error');
     }
   }
 
@@ -774,11 +861,13 @@ final class BikeSession {
       _odometerMeters.value = meters;
       try {
         await _onOdometerRead?.call(meters);
-      } on Object {
+      } on Object catch (error) {
         // A cached odometer write must not prevent the bike becoming ride-ready.
+        _log('config', 'saving odometer failed: $error');
       }
-    } on Object {
+    } on Object catch (error) {
       // Missing odometer history is optional metadata, not a connection failure.
+      _log('config', 'reading odometer failed: $error');
     }
   }
 
@@ -813,6 +902,7 @@ final class BikeSession {
       ),
       'Verifying authentication',
     );
+    _log('auth', 'state bytes=$state');
     if (state.length != 1 || state.single != 1) {
       throw const BikeAuthenticationFailed(
         'The bike rejected the challenge response.',
@@ -861,9 +951,10 @@ final class BikeSession {
           ),
           'Disabling bike updates',
         );
-      } on Object {
+      } on Object catch (error) {
         // A disconnected peripheral no longer has an active notification
         // subscription to disable.
+        _log('link', 'disabling telemetry failed: $error');
       }
     }
     await subscription.cancel();
@@ -877,6 +968,12 @@ final class BikeSession {
     try {
       final speed = _protocol.decodeSpeedKmh(packet);
       if (speed != null) {
+        if (_lastSpeedAt == null) {
+          _log(
+            'speed',
+            'first speed sample since the link state reset: $speed km/h',
+          );
+        }
         _lastSpeedAt = _clock();
         _speedKmh.value = speed;
         return;
@@ -889,10 +986,18 @@ final class BikeSession {
       if (updated == null) {
         return;
       }
+      if (updated != current) {
+        _log(
+          'config',
+          'bike changed its configuration: ${_describeConfig(current)} -> '
+              '${_describeConfig(updated)}',
+        );
+      }
       _publishObserved(updated);
-    } on BikeProtocolFailure {
+    } on BikeProtocolFailure catch (error) {
       // Ignore malformed or unsupported telemetry; the next valid notification
       // remains authoritative.
+      _log('config', 'telemetry ignored: $error');
     }
   }
 
@@ -900,9 +1005,10 @@ final class BikeSession {
     if (_disposed) {
       return;
     }
+    _log('link', 'telemetry stream error: $error');
     _offTimeMeter.linkLost();
     _reconnectTimer?.cancel();
-    _generation++;
+    _nextGeneration('telemetry stream error');
     _hasObservedConnection = false;
     _pollTimer?.cancel();
     _invalidateConfigurationState();
@@ -912,6 +1018,7 @@ final class BikeSession {
 
   Future<void> _enableAuxiliaryCounter() async {
     await _disableAuxiliaryCounter();
+    _counterSampleLogged = false;
     if (!_streetLegalOnQuickRestart ||
         !connection.hasCharacteristic(
           serviceUuid: BikeGatt.auxiliaryService,
@@ -924,7 +1031,12 @@ final class BikeSession {
           serviceUuid: BikeGatt.auxiliaryService,
           characteristicUuid: BikeGatt.auxiliaryCounter,
         )
-        .listen(_onAuxiliaryCounter, onError: (Object _) {});
+        .listen(
+          _onAuxiliaryCounter,
+          onError: (Object error) {
+            _log('meter', 'counter stream error: $error');
+          },
+        );
     try {
       await _timed(
         connection.setCharacteristicNotifications(
@@ -934,7 +1046,8 @@ final class BikeSession {
         ),
         'Enabling the bike counter',
       );
-    } on Object {
+    } on Object catch (error) {
+      _log('meter', 'enabling the counter failed: $error');
       await _disableAuxiliaryCounter();
     }
   }
@@ -955,9 +1068,10 @@ final class BikeSession {
         ),
         'Disabling the bike counter',
       );
-    } on Object {
+    } on Object catch (error) {
       // The link is down or the bike refuses: its notifications end with the
       // link.
+      _log('meter', 'disabling the counter on the bike failed: $error');
     }
   }
 
@@ -975,6 +1089,10 @@ final class BikeSession {
     if (counter == null) {
       return;
     }
+    if (_offTimeMeter.awaitsCounterSample || !_counterSampleLogged) {
+      _counterSampleLogged = true;
+      _log('meter', 'first counter sample: $counter');
+    }
     _offTimeMeter.recordCounter(counter);
     final waiter = _counterSampleWaiter;
     if (waiter != null && !waiter.isCompleted) {
@@ -990,8 +1108,19 @@ final class BikeSession {
     }
     final waiter = Completer<void>();
     _counterSampleWaiter = waiter;
+    var timedOut = false;
     try {
-      await waiter.future.timeout(_counterSampleTimeout, onTimeout: () {});
+      await waiter.future.timeout(
+        _counterSampleTimeout,
+        onTimeout: () => timedOut = true,
+      );
+      _log(
+        'meter',
+        timedOut
+            ? 'no counter sample within ${_counterSampleTimeout.inMilliseconds}'
+                  'ms'
+            : 'counter sample received',
+      );
     } finally {
       _counterSampleWaiter = null;
     }
@@ -1007,10 +1136,21 @@ final class BikeSession {
           invalidateRetained: true,
         );
         if (record.length > 5) {
+          _log(
+            'lock',
+            'marker read attempt=${attempt + 1} length=${record.length} '
+                'byte5=${record[5]}',
+          );
           return record[5];
         }
-      } on BikeProtocolFailure {
+        _log(
+          'lock',
+          'marker read attempt=${attempt + 1} too short: '
+              'length=${record.length}',
+        );
+      } on BikeProtocolFailure catch (error) {
         // The next attempt reads the record again.
+        _log('lock', 'marker read attempt=${attempt + 1} failed: $error');
       }
     }
     return null;
@@ -1037,7 +1177,19 @@ final class BikeSession {
     }
     final gap = _offTimeMeter.takeGap(readAt);
     _lastSessionMarker = marker;
+    final gapText = gap == null
+        ? 'offTime=unknown'
+        : 'offTime=${gap.offTime.inSeconds}s '
+              'onTime=${gap.onTime?.inSeconds}s '
+              'source=${gap.fromCounter ? 'counter' : 'phone'} '
+              'quick=${gap.quickRestart}';
+    final wasLocked = _streetLegalLocked.peek();
     if (marker == null) {
+      _log(
+        'lock',
+        'marker=unknown $gapText -> lock keeps its state '
+            '(${wasLocked ? 'ON' : 'OFF'}), no mode written',
+      );
       // Without a record the off time is unknown, and an unknown off time is
       // not quick. The lock keeps its state from memory: a running lock stays
       // on, and no lock starts.
@@ -1049,15 +1201,22 @@ final class BikeSession {
         : null;
     switch (marker) {
       case BikeGatt.sessionLockedMarker:
+        _log('lock', 'marker=2 $gapText -> lock stays ON');
         _streetLegalLocked.value = true;
         return observed;
       case BikeGatt.sessionAppliedMarker:
+        _log('lock', 'marker=1 $gapText -> dropout, lock OFF');
         _streetLegalLocked.value = false;
         return observed;
       default:
         // The bike restarted. Only a quick restart starts the lock. An
         // unknown off time is not quick.
         final quick = gap?.quickRestart ?? false;
+        _log(
+          'lock',
+          'marker=$marker $gapText -> '
+              '${quick ? (observed.mode == _streetLegalStockMode ? 'lock ON, bike reports stock wire $_streetLegalStockMode' : 'lock ON, write stock wire $_streetLegalStockMode') : 'slow restart, lock OFF'}',
+        );
         _streetLegalLocked.value = quick;
         return quick
             ? observed.copyWith(mode: _streetLegalStockMode)
@@ -1076,9 +1235,15 @@ final class BikeSession {
     final observed = await _readConfiguration();
     final readAt = _clock();
     if (!_isCurrent(generation) || !_hasObservedConnection) {
+      _log('config', 'synchronize dropped: the link or generation changed');
       throw const BikeSessionDisposedFailure();
     }
     _publishObserved(observed);
+    _log(
+      'config',
+      'synchronize initial=$initialConnection observed '
+          '${_describeConfig(observed)}',
+    );
 
     var base = observed;
     if (initialConnection) {
@@ -1088,8 +1253,14 @@ final class BikeSession {
         _lastSessionMarker = null;
         _dropoutOnTime = null;
       }
+      _log(
+        'config',
+        'first write ${_describeConfig(base)} marker=$_writeMarker '
+            'locked=${_streetLegalLocked.peek()}',
+      );
       await _protocol.writeConfiguration(base, marker: _writeMarker);
       if (!_isCurrent(generation) || !_hasObservedConnection) {
+        _log('config', 'first write done, but the link or generation changed');
         throw const BikeSessionDisposedFailure();
       }
       if (base != observed) {
@@ -1103,17 +1274,29 @@ final class BikeSession {
         ? _connectionIntent.copyWith(mode: null)
         : _connectionIntent;
     if (intent.isEmpty) {
+      _log(
+        'config',
+        'set-on-connect has nothing to write (locked='
+            '${_streetLegalLocked.peek()})',
+      );
       _markReady(base);
       return;
     }
     final target = intent.applyTo(base);
     if (!initialConnection && intent.matches(base)) {
+      _log('config', 'set-on-connect already matches the bike');
       _markReady(base);
       return;
     }
     _state.value = const SessionSynchronizing(attempt: 1);
+    _log(
+      'config',
+      'set-on-connect write ${_describeConfig(target)} '
+          'marker=$_writeMarker locked=${_streetLegalLocked.peek()}',
+    );
     await _protocol.writeConfiguration(target, marker: _writeMarker);
     if (!_isCurrent(generation) || !_hasObservedConnection) {
+      _log('config', 'set-on-connect write done, but the link changed');
       throw const BikeSessionDisposedFailure();
     }
     _publishObserved(target);
@@ -1161,14 +1344,21 @@ final class BikeSession {
         // the cached state already matches; the controller can lag that cache.
         _pollTimer?.cancel();
         late BikeConfiguration written;
+        _log(
+          'config',
+          'write ${_describeConfig(current)} -> ${_describeConfig(target)} '
+              'marker=$_writeMarker',
+        );
         try {
           await _protocol.writeConfiguration(target, marker: _writeMarker);
           if (!_isCurrent(generation) || !_hasObservedConnection) {
             throw const BikeSessionDisposedFailure();
           }
           written = _publishObserved(target);
+          _log('config', 'write accepted');
         } on Object catch (error) {
           final failure = _asFailure(error);
+          _log('config', 'write failed: ${_describeFailure(failure)}');
           _clearPendingConfiguration();
           if (_isConnectionFailure(failure)) {
             _scheduleReconnect(failure);
@@ -1220,7 +1410,11 @@ final class BikeSession {
     if (_pollInterval case final interval?) {
       _pollTimer = Timer.periodic(interval, (_) {
         if (!_commands.isBusy && _state.peek() is SessionReady) {
-          unawaited(_pollConfiguration().catchError((Object _) {}));
+          unawaited(
+            _pollConfiguration().catchError((Object error) {
+              _log('config', 'poll ended with $error');
+            }),
+          );
         }
       });
     }
@@ -1246,6 +1440,7 @@ final class BikeSession {
           return;
         }
         final failure = _asFailure(error);
+        _log('config', 'poll failed: ${_describeFailure(failure)}');
         if (_isConnectionFailure(failure)) {
           _scheduleReconnect(failure);
         } else if (failure is! BikeSessionDisposedFailure) {
@@ -1274,20 +1469,26 @@ final class BikeSession {
     final hadPendingConnect =
         abortPendingConnect && _platformConnectGeneration == previousGeneration;
     _disconnectRequested = true;
-    final disconnectGeneration = ++_generation;
+    _nextGeneration(
+      manuallyPaused ? 'manual disconnect' : 'pause for background',
+    );
+    final disconnectGeneration = _generation;
     _expectedDisconnect = true;
     // A deliberate disconnect is no bike restart: the next connect has an
     // unknown off time.
-    _offTimeMeter.clear();
+    _offTimeMeter.clear(
+      manuallyPaused ? 'manual disconnect' : 'background pause',
+    );
     _pollTimer?.cancel();
     _reconnectTimer?.cancel();
     _invalidateConfigurationState();
     if (hadPendingConnect) {
       try {
         await connection.disconnect();
-      } on Object {
+      } on Object catch (error) {
         // Disconnecting is also the cancellation mechanism for a platform
         // connection attempt, so this is best-effort.
+        _log('link', 'abort of the pending connect failed: $error');
       }
     }
     return await _commands.add(() async {
@@ -1308,9 +1509,10 @@ final class BikeSession {
     if (disconnectPeripheral) {
       try {
         await _timed(connection.disconnect(), 'Disconnecting');
-      } on Object {
+      } on Object catch (error) {
         // The local session is still paused even if the platform already lost
         // the link before it could acknowledge the disconnect.
+        _log('link', 'platform disconnect failed: $error');
       }
     }
     if (!_disposed) {
@@ -1322,11 +1524,13 @@ final class BikeSession {
     if (_disposed) {
       return;
     }
+    _log('link', 'platform link state: ${connectionState.name}');
     if (connectionState == BikeConnectionState.connected) {
       _hasObservedConnection = true;
       return;
     }
     if (!_hasObservedConnection) {
+      _log('link', 'platform state ignored: no observed connection');
       return;
     }
     _hasObservedConnection = false;
@@ -1335,12 +1539,19 @@ final class BikeSession {
         _manualReconnectPaused ||
         _foregroundPaused ||
         _state.peek() is SessionIdle) {
+      _log(
+        'link',
+        'link loss ignored: expected=$_expectedDisconnect '
+            'manual=$_manualReconnectPaused paused=$_foregroundPaused '
+            'idle=${_state.peek() is SessionIdle}',
+      );
       return;
     }
+    _log('link', 'unexpected loss');
     // Only an unexpected loss can be a bike restart.
     _offTimeMeter.linkLost();
     _reconnectTimer?.cancel();
-    _generation++;
+    _nextGeneration('link loss');
     _pollTimer?.cancel();
     unawaited(_disableNotifications(updatePeripheral: false));
     _scheduleReconnect(
@@ -1350,13 +1561,20 @@ final class BikeSession {
 
   void _scheduleReconnect(BikeSessionFailure failure) {
     if (_disposed || _manualReconnectPaused || _foregroundPaused) {
+      _log(
+        'link',
+        'reconnect skipped: disposed=$_disposed manual=$_manualReconnectPaused '
+            'paused=$_foregroundPaused',
+      );
       return;
     }
     if (_reconnectTimer?.isActive ?? false) {
+      _log('link', 'reconnect skipped: a timer runs');
       return;
     }
     _invalidateConfigurationState();
     if (_reconnectDelays.isEmpty) {
+      _log('link', 'reconnect skipped: no delays, session fails');
       _state.value = SessionFailed(failure: failure, canRetry: true);
       return;
     }
@@ -1371,11 +1589,22 @@ final class BikeSession {
       failure: failure,
     );
     final generation = _generation;
+    _log(
+      'link',
+      'reconnect attempt=$_reconnectAttempt delay=${delay.inMilliseconds}ms',
+    );
     _reconnectTimer = Timer(delay, () {
       if (_isCurrent(generation) &&
           !_manualReconnectPaused &&
           !_foregroundPaused) {
+        _log('link', 'reconnect timer fired');
         unawaited(_startConnect());
+      } else {
+        _log(
+          'link',
+          'reconnect timer dropped: current=${_isCurrent(generation)} '
+              'manual=$_manualReconnectPaused paused=$_foregroundPaused',
+        );
       }
     });
   }
@@ -1410,6 +1639,66 @@ final class BikeSession {
   }
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
+
+  void _log(String area, String message) {
+    _debugLog.log(area, message, generation: _generation);
+  }
+
+  /// Starts a new generation. Every lines of the log carry the generation.
+  void _nextGeneration(String reason) {
+    _generation++;
+    _log('link', 'generation $_generation: $reason');
+  }
+
+  /// Logs each state change once: `old -> new`.
+  void _logStateChanges() {
+    String? previous;
+    _state.subscribe((value) {
+      final text = describeState(value);
+      if (previous != null && previous != text) {
+        _log('link', '$previous -> $text');
+      }
+      previous = text;
+    });
+  }
+
+  static String describeState(BikeSessionState state) {
+    return switch (state) {
+      SessionIdle() => 'Idle',
+      SessionConnecting() => 'Connecting',
+      SessionDiscovering() => 'Discovering',
+      SessionConnected() => 'Connected',
+      SessionAuthenticating() => 'Authenticating',
+      SessionSynchronizing(:final attempt) => 'Synchronizing($attempt)',
+      SessionReady(:final configuration) =>
+        'Ready(mode=${configuration.mode} light=${configuration.light} '
+            'assist=${configuration.assist})',
+      SessionReconnecting(:final attempt, :final retryAfter, :final failure) =>
+        'Reconnecting(attempt=$attempt retryAfter=${retryAfter.inMilliseconds}'
+            'ms failure=${_describeFailure(failure)})',
+      SessionDisconnected(:final manuallyPaused) =>
+        'Disconnected(manuallyPaused=$manuallyPaused)',
+      SessionFailed(:final failure, :final canRetry) =>
+        'Failed(canRetry=$canRetry failure=${_describeFailure(failure)})',
+      SessionDisposed() => 'Disposed',
+    };
+  }
+
+  static String _describeConfig(BikeConfiguration configuration) {
+    return 'mode=${configuration.mode} light=${configuration.light} '
+        'assist=${configuration.assist}';
+  }
+
+  static String _describeFailure(Object failure) {
+    final platform = switch (failure) {
+      BikeSessionTransportFailure(cause: BikeConnectionFailure(:final cause)) =>
+        cause,
+      _ => null,
+    };
+    final detail = platform == null ? '' : ' platform=$platform';
+    return '${failure.runtimeType}: '
+        '${failure is BikeSessionFailure ? failure.message : failure}$detail';
+  }
 
   void _invalidateConfigurationState() {
     _clearPendingConfiguration();

@@ -19,6 +19,7 @@ class BackgroundSyncCompanionService : CompanionDeviceService() {
     override fun onDeviceDisappeared(address: String) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             Log.d(logTag, "CDM BLE disappeared via address callback")
+            DebugFileLog.log(this, address, "native", "CDM BLE disappeared (address callback)")
         }
     }
 
@@ -40,6 +41,9 @@ class BackgroundSyncCompanionService : CompanionDeviceService() {
     override fun onDeviceDisappeared(associationInfo: AssociationInfo) {
         if (Build.VERSION.SDK_INT < 36) {
             Log.d(logTag, "CDM BLE disappeared via association callback")
+            associationInfo.deviceMacAddress?.toString()?.let {
+                DebugFileLog.log(this, it, "native", "CDM BLE disappeared (association callback)")
+            }
         }
     }
 
@@ -60,13 +64,16 @@ class BackgroundSyncCompanionService : CompanionDeviceService() {
         }
         when (event.event) {
             DevicePresenceEvent.EVENT_BLE_APPEARED -> synchronize(address, "presence event")
-            DevicePresenceEvent.EVENT_BLE_DISAPPEARED ->
+            DevicePresenceEvent.EVENT_BLE_DISAPPEARED -> {
                 Log.d(logTag, "CDM BLE disappeared via presence event")
+                DebugFileLog.log(this, address, "native", "CDM BLE disappeared (presence event)")
+            }
         }
     }
 
     private fun synchronize(address: String, callback: String) {
         Log.d(logTag, "CDM BLE appeared via $callback; requesting native sync")
+        DebugFileLog.log(this, address, "native", "CDM BLE appeared ($callback): request native sync")
         NativeBackgroundSync.synchronize(this, address, "bleAppeared")
     }
 

@@ -680,6 +680,19 @@ void main() {
     });
   });
 
+  group('debug log', () {
+    test('the preference round-trips and is off by default', () async {
+      await repository.addBike(deviceId: 'b');
+      expect((await repository.getBikes()).single.debugLogEnabled, isFalse);
+
+      await repository.setDebugLog('b', enabled: true);
+      expect((await repository.getBikes()).single.debugLogEnabled, isTrue);
+
+      await repository.setDebugLog('b', enabled: false);
+      expect((await repository.getBikes()).single.debugLogEnabled, isFalse);
+    });
+  });
+
   group('background sync', () {
     Future<void> addSyncedBike(SetOnConnect setOnConnect) async {
       await settingsRepository.initialize();

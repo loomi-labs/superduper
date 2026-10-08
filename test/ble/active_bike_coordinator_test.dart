@@ -7,6 +7,7 @@ import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/persistence/app_database.dart';
@@ -16,6 +17,7 @@ import 'package:superduper/src/repositories/bike_repository.dart';
 import 'package:superduper/src/repositories/settings_repository.dart';
 
 import '../support/fake_bike_transport.dart';
+import '../support/recording_debug_log.dart';
 
 void main() {
   late AppDatabase database;
@@ -78,6 +80,40 @@ void main() {
     if (!databaseClosed) {
       await database.close();
     }
+  });
+
+  test('the debug log records session, foreground and hold events', () async {
+    final logs = <String, RecordingDebugLog>{};
+    final hold = RecordingHold();
+    coordinator = ActiveBikeCoordinator(
+      bikeRepository: bikes,
+      settingsRepository: settings,
+      permissions: permissions,
+      buildSession: buildTestSession,
+      backgroundHold: hold,
+      debugLogFor: (id) => logs.putIfAbsent(id, RecordingDebugLog.new),
+    );
+    await coordinator.start();
+    await _waitFor(
+      coordinator.state,
+      (state) =>
+          state is ActiveBikeSessionStatus &&
+          state.sessionState is SessionReady,
+    );
+
+    await coordinator.setForeground(false);
+    await coordinator.setForeground(true);
+    await coordinator.selectTemporarily('second');
+
+    final first = logs['first']!;
+    expect(first.has('app', 'session built'), isTrue);
+    expect(first.has('hold', 'gateway: setHeld'), isFalse);
+    expect(first.has('app', 'setForeground(false)'), isTrue);
+    expect(first.has('app', 'setForeground(true)'), isTrue);
+    expect(first.has('app', 'session cleared'), isTrue);
+    expect(logs['second']!.has('app', 'session built'), isTrue);
+    // The release at the bike switch logs to the bike that ends.
+    expect(hold.logs, contains(same(logs['first'])));
   });
 
   test('automatically connects the persisted active bike at startup', () async {
@@ -770,9 +806,14 @@ final class RecordingHold implements BackgroundHoldGateway {
   bool speedLimit = true;
   bool failNext = false;
   final List<bool> calls = [];
+  final List<DebugLog> logs = [];
 
   @override
-  Future<void> setHeld(bool value, {bool speedLimit = true}) async {
+  Future<void> setHeld(
+    bool value, {
+    bool speedLimit = true,
+    DebugLog log = const NoopDebugLog(),
+  }) async {
     if (value && failNext) {
       failNext = false;
       throw StateError('service did not start');
@@ -782,5 +823,6 @@ final class RecordingHold implements BackgroundHoldGateway {
       this.speedLimit = speedLimit;
     }
     calls.add(value);
+    logs.add(log);
   }
 }

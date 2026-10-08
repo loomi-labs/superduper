@@ -321,6 +321,9 @@ final class NativeRideMode extends RideModeSelection {
 
   @override
   int get hashCode => Object.hash(NativeRideMode, wire);
+
+  @override
+  String toString() => 'native($wire)';
 }
 
 final class CustomRideMode extends RideModeSelection {
@@ -340,6 +343,11 @@ final class CustomRideMode extends RideModeSelection {
 
   @override
   int get hashCode => Object.hash(CustomRideMode, mode);
+
+  @override
+  String toString() =>
+      'custom(${mode.name} limit=${mode.effectiveLimitKmh}'
+      '${mode.throttle ? ' throttle' : ''})';
 }
 
 int initialWireFor(RideModeSelection selection, BikeRegion? region) =>

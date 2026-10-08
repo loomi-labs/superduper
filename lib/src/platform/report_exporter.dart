@@ -73,6 +73,26 @@ abstract final class ReportExporter {
     );
   }
 
+  /// Shares a file from disk. A debug log can be MBs, so it is not read into
+  /// memory.
+  static Future<ShareResult> shareFile(
+    File file, {
+    required String filename,
+    required String subject,
+    required String message,
+    Rect? sharePositionOrigin,
+  }) {
+    return SharePlus.instance.share(
+      ShareParams(
+        subject: subject,
+        text: message,
+        files: [XFile(file.path, mimeType: 'text/plain')],
+        fileNameOverrides: [filename],
+        sharePositionOrigin: sharePositionOrigin,
+      ),
+    );
+  }
+
   static Future<void> copy(ShareableReport report) {
     return Clipboard.setData(ClipboardData(text: report.content));
   }

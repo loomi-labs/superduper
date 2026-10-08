@@ -27,7 +27,7 @@ final class LinkGap {
 /// difference is the off time. Without a counter sample on both sides, the
 /// meter uses the phone clock from the last notification before the loss.
 final class OffTimeMeter {
-  new({DateTime Function()? clock}) : _clock = clock ?? DateTime.now;
+  new({DateTime Function()? clock, this._log}) : _clock = clock ?? DateTime.now;
 
   /// The counter off time includes 3.5 to 7.5 s of shutdown and boot. A
   /// true off time of 10 s gives 18 s or less (probe of 2026-10-03).
@@ -40,6 +40,7 @@ final class OffTimeMeter {
   static const _resetTolerance = Duration(seconds: 2);
 
   final DateTime Function() _clock;
+  final void Function(String message)? _log;
   DateTime? _lastSeenAt;
   _CounterSample? _lastCounter;
   DateTime? _lostSeenAt;
@@ -70,11 +71,18 @@ final class OffTimeMeter {
   /// A loss without a new sample since the last loss changes nothing.
   void linkLost() {
     if (_lastSeenAt == null) {
+      _log?.call('linkLost ignored: no sample since the last loss');
       return;
     }
     if (_lostSeenAt == null) {
       _lostSeenAt = _lastSeenAt;
       _lostCounter = _lastCounter;
+      _log?.call(
+        'linkLost captured: lastSeen=${_lostSeenAt!.toIso8601String()} '
+        'counter=${_lostCounter?.value}',
+      );
+    } else {
+      _log?.call('linkLost: an earlier loss stays the reference');
     }
     _firstCounterAfterLoss = null;
     _lastSeenAt = null;
@@ -82,7 +90,8 @@ final class OffTimeMeter {
   }
 
   /// A deliberate disconnect: the next connect has an unknown off time.
-  void clear() {
+  void clear([String reason = 'deliberate disconnect']) {
+    _log?.call('clear: $reason');
     _lastSeenAt = null;
     _lastCounter = null;
     _lostSeenAt = null;
@@ -101,23 +110,35 @@ final class OffTimeMeter {
     _lostCounter = null;
     _firstCounterAfterLoss = null;
     if (lostSeenAt == null) {
+      _log?.call('takeGap: no loss recorded');
       return null;
     }
     if (before != null && after != null) {
       final phoneGap = after.at.difference(before.at);
       var onSeconds = (after.value - before.value) % _counterModulo;
+      var reset = false;
       if (Duration(seconds: onSeconds) > phoneGap + _resetTolerance) {
         // The bike cannot be on for longer than the phone gap: the counter
         // started again at the bike start.
         onSeconds = after.value;
+        reset = true;
       }
       final onTime = Duration(seconds: onSeconds);
+      _log?.call(
+        'takeGap counter before=${before.value} after=${after.value} '
+        'phoneGap=${phoneGap.inMilliseconds}ms onSeconds=$onSeconds '
+        'resetRule=$reset',
+      );
       return LinkGap(
         offTime: _notNegative(phoneGap - onTime),
         onTime: onTime,
         fromCounter: true,
       );
     }
+    _log?.call(
+      'takeGap phone clock only: before=${before?.value} after=${after?.value} '
+      'phoneGap=${readAt.difference(lostSeenAt).inMilliseconds}ms',
+    );
     return LinkGap(
       offTime: _notNegative(readAt.difference(lostSeenAt)),
       onTime: null,

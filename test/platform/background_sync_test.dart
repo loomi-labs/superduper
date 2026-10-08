@@ -15,6 +15,7 @@ import 'package:superduper/src/repositories/bike_repository.dart';
 import 'package:superduper/src/repositories/settings_repository.dart';
 
 import '../support/fake_bike_transport.dart';
+import '../support/recording_debug_log.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -92,6 +93,40 @@ void main() {
       await platform.cancelled.future;
 
       expect(platform.cancelCount, 1);
+    },
+  );
+
+  test(
+    'the debug log records the refresh decision and the native call',
+    () async {
+      final log = RecordingDebugLog();
+      await coordinator.dispose();
+      coordinator = BackgroundSyncCoordinator(
+        bikeRepository: bikes,
+        settingsRepository: settings,
+        activeBikeCoordinator: activeBike,
+        transport: transport,
+        permissions: permissions,
+        identityResolver: BikeIdentityResolver(
+          bikeRepository: bikes,
+          transport: transport,
+        ),
+        platform: platform,
+        debugLogFor: (_) => log,
+      );
+      await bikes.addBike(
+        deviceId: 'bike',
+        moduleSerial: '00112233aabbccdd',
+        backgroundPreference: const BackgroundPreference(
+          requested: true,
+          consentVersion: backgroundSyncConsentVersion,
+        ),
+      );
+
+      await coordinator.start();
+
+      expect(log.has('sync', 'refresh: shouldEnable=true'), isTrue);
+      expect(log.has('sync', 'native sync: configure -> configured'), isTrue);
     },
   );
 

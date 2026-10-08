@@ -94,6 +94,7 @@ internal object BackgroundCompanionManager {
         }
         if (!isAssociated(context, address)) {
             Log.w(logTag, "Cannot observe bike presence: companion association is missing")
+            DebugFileLog.log(context, address, "native", "cannot observe presence: companion association is missing")
             return false
         }
 
@@ -212,6 +213,7 @@ internal object BackgroundCompanionManager {
             manager.startObservingDevicePresence(address)
         }
         Log.d(logTag, "CDM BLE presence observation registered")
+        DebugFileLog.log(context, address, "native", "CDM presence observation registered")
     }
 
     private fun startAdvertisementScan(context: Context, plan: BackgroundSyncPlan) {
@@ -250,6 +252,7 @@ internal object BackgroundCompanionManager {
             )
         }
         Log.d(logTag, "Background BLE advertisement scan registered")
+        DebugFileLog.log(context, plan.deviceId, "native", "advertisement scan registered")
     }
 
     private fun stopObserving(context: Context, address: String) {
@@ -316,6 +319,9 @@ internal object BackgroundCompanionManager {
 
     private fun recordFailure(context: Context, detail: String) {
         Log.w(logTag, "CDM presence registration failed: $detail")
+        preferences(context).getString(deviceIdKey, null)?.let {
+            DebugFileLog.log(context, it, "native", "registration failed: $detail")
+        }
         preferences(context)
             .edit()
             .putString(registrationErrorDetailKey, detail)

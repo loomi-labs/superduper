@@ -110,9 +110,39 @@ void main() {
         .getSingle();
     expect(preferences.streetLegalOnQuickRestart, isFalse);
     expect(preferences.streetLegalStockMode, isNull);
+    expect(preferences.debugLogEnabled, isFalse);
     expect(
       preferences.setOnConnect,
       const SetOnConnect(mode: NativeModeRef(4)),
     );
+  });
+
+  test('schema v7 bike preferences get the debug log default', () async {
+    final verifier = SchemaVerifier(GeneratedHelper());
+    final schema = await verifier.schemaAt(7);
+    addTearDown(schema.close);
+
+    final oldDatabase = GeneratedHelper().databaseForVersion(
+      schema.newConnection(),
+      7,
+    );
+    final advertisedName = BikeProtocolVersion.v1.advertisedName;
+    await oldDatabase.customStatement(
+      "INSERT INTO bikes (device_id, display_name, advertised_name, protocol, region, color_key, sort_order, created_at_ms, updated_at_ms) VALUES ('bike', 'Commuter', '$advertisedName', 'v1', 'ch', 'deep_space', 0, 1, 2)",
+    );
+    await oldDatabase.customStatement(
+      "INSERT INTO bike_preferences (device_id, set_on_connect, background_requested, background_consent_version, street_legal_on_quick_restart) VALUES ('bike', '{\"mode\":4}', 0, 0, 1)",
+    );
+    await oldDatabase.close();
+
+    final database = AppDatabase(schema.newConnection());
+    addTearDown(database.close);
+    await verifier.migrateAndValidate(database, database.schemaVersion);
+
+    final preferences = await database
+        .select(database.bikePreferences)
+        .getSingle();
+    expect(preferences.debugLogEnabled, isFalse);
+    expect(preferences.streetLegalOnQuickRestart, isTrue);
   });
 }

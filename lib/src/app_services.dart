@@ -5,6 +5,7 @@ import 'package:superduper/src/ble/bike_identity_resolver.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/ble/flutter_blue_bike_transport.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/features/startup/startup_controller.dart';
 import 'package:superduper/src/persistence/app_database.dart';
@@ -29,7 +30,9 @@ final class AppServices {
     BackgroundSyncPlatformGateway? backgroundSyncPlatform,
     BackgroundSyncCoordinator? backgroundSyncCoordinator,
     BackgroundHoldGateway? backgroundHold,
+    DebugLogStore? debugLogStore,
   }) {
+    final resolvedDebugLogStore = debugLogStore ?? DebugLogStore();
     final resolvedImporter =
         importer ?? InstalledDataImporter(database: database);
     final resolvedBikeRepository =
@@ -57,7 +60,11 @@ final class AppServices {
           permissions: resolvedPermissions,
           identityResolver: resolvedIdentityResolver,
           backgroundHold: resolvedBackgroundHold,
+          debugLogFor: resolvedDebugLogStore.forBike,
+          onBikesChanged: resolvedDebugLogStore.updateBikes,
+          onBikeForgotten: resolvedDebugLogStore.forget,
           buildSession: (bike) => BikeSession(
+            debugLog: resolvedDebugLogStore.forBike(bike.bike.deviceId),
             connection: resolvedTransport.openConnection(bike.bike.deviceId),
             setOnConnect: resolveSetOnConnect(bike).patch,
             protocol: bike.bike.protocol,
@@ -75,8 +82,18 @@ final class AppServices {
                 meters,
               );
             },
-            onManualConnectionPauseChanged:
-                resolvedBackgroundSyncPlatform.setConnectionPaused,
+            onManualConnectionPauseChanged: (paused) async {
+              final log = resolvedDebugLogStore.forBike(bike.bike.deviceId);
+              try {
+                await resolvedBackgroundSyncPlatform.setConnectionPaused(
+                  paused,
+                );
+                log.log('sync', 'setConnectionPaused($paused) done');
+              } on Object catch (error) {
+                log.log('sync', 'setConnectionPaused($paused) failed: $error');
+                rethrow;
+              }
+            },
           ),
         );
     final resolvedBackgroundSyncCoordinator =
@@ -89,6 +106,7 @@ final class AppServices {
           permissions: resolvedPermissions,
           identityResolver: resolvedIdentityResolver,
           platform: resolvedBackgroundSyncPlatform,
+          debugLogFor: resolvedDebugLogStore.forBike,
         );
     return AppServices._(
       database: database,
@@ -100,11 +118,13 @@ final class AppServices {
       externalLinks: resolvedExternalLinks,
       activeBikeCoordinator: resolvedActiveBikeCoordinator,
       backgroundSyncCoordinator: resolvedBackgroundSyncCoordinator,
+      debugLogStore: resolvedDebugLogStore,
       startup: StartupController(
         database: database,
         importer: resolvedImporter,
         settingsRepository: resolvedSettingsRepository,
         onReady: () async {
+          await resolvedDebugLogStore.initialize();
           await resolvedActiveBikeCoordinator.start();
           await resolvedBackgroundSyncCoordinator.start();
         },
@@ -122,13 +142,16 @@ final class AppServices {
     required this.externalLinks,
     required this.activeBikeCoordinator,
     required this.backgroundSyncCoordinator,
+    required this.debugLogStore,
     required this.startup,
   });
 
   factory standard() {
+    final debugLogStore = DebugLogStore.app();
     return AppServices(
       database: AppDatabase.open(),
       backgroundSyncPlatform: SystemBackgroundSyncPlatformGateway(),
+      debugLogStore: debugLogStore,
       backgroundHold: defaultTargetPlatform == TargetPlatform.android
           ? AndroidForegroundServiceHold()
           : const NoopBackgroundHoldGateway(),
@@ -144,6 +167,7 @@ final class AppServices {
   final ExternalLinkLauncher externalLinks;
   final ActiveBikeCoordinator activeBikeCoordinator;
   final BackgroundSyncCoordinator backgroundSyncCoordinator;
+  final DebugLogStore debugLogStore;
   final StartupController startup;
   Future<void>? _disposeFuture;
 
@@ -174,6 +198,7 @@ final class AppServices {
     for (final cleanup in <Future<void> Function()>[
       backgroundSyncCoordinator.dispose,
       activeBikeCoordinator.dispose,
+      () async => debugLogStore.dispose(),
       transport.dispose,
       database.close,
     ]) {

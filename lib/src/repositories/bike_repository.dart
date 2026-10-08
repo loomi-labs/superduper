@@ -316,6 +316,13 @@ final class BikeRepository {
     );
   }
 
+  Future<void> setDebugLog(String deviceId, {required bool enabled}) {
+    return _updatePreferences(
+      deviceId,
+      BikePreferencesCompanion(debugLogEnabled: Value(enabled)),
+    );
+  }
+
   /// Stores the stock mode of the street-legal lock. Null means the default
   /// of the region and the protocol.
   Future<void> setStreetLegalStockMode(String deviceId, int? wire) {
@@ -619,6 +626,7 @@ final class BikeRepository {
       customModes: List.unmodifiable(customModes.map(_mapCustomMode)),
       streetLegalOnQuickRestart: preferences.streetLegalOnQuickRestart,
       streetLegalStockMode: preferences.streetLegalStockMode,
+      debugLogEnabled: preferences.debugLogEnabled,
       backgroundPreference: BackgroundPreference(
         requested: preferences.backgroundRequested,
         consentVersion: preferences.backgroundConsentVersion,

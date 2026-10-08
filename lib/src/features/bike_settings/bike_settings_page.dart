@@ -11,6 +11,8 @@ import 'package:superduper/src/domain/distance.dart';
 import 'package:superduper/src/domain/ride_modes.dart';
 import 'package:superduper/src/features/bike_settings/bike_version_report.dart';
 import 'package:superduper/src/features/bike_settings/custom_mode_editor.dart';
+import 'package:superduper/src/features/bike_settings/debug_log_section.dart';
+import 'package:superduper/src/features/bike_settings/debug_log_share.dart';
 import 'package:superduper/src/features/help/help_page.dart';
 import 'package:superduper/src/platform/background_sync.dart';
 import 'package:superduper/src/platform/report_exporter.dart';
@@ -344,6 +346,14 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
           ),
         ),
         const SizedBox(height: 34),
+        DebugLogSection(
+          saved: saved,
+          store: _services.debugLogStore,
+          onToggle: (enabled) =>
+              _services.bikeRepository.setDebugLog(deviceId, enabled: enabled),
+          shareLog: (origin) => _shareDebugLog(saved, origin),
+        ),
+        const SizedBox(height: 34),
         const SectionHeader(eyebrow: 'Danger zone', title: 'Forget this bike'),
         const SizedBox(height: 10),
         const Text(
@@ -370,6 +380,19 @@ final class _BikeSettingsPageState extends State<BikeSettingsPage> {
       },
       child: page,
     );
+  }
+
+  Future<void> _shareDebugLog(SavedBike saved, Rect? origin) async {
+    final shared = await shareDebugLog(
+      services: _services,
+      saved: saved,
+      origin: origin,
+    );
+    if (!shared && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sharing is unavailable here.')),
+      );
+    }
   }
 
   /// All native wires of the protocol, not only the wires of the region:

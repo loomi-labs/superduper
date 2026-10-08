@@ -57,10 +57,11 @@ final class FlutterBlueBikeTransport implements BikeTransport {
         continuousUpdates: true,
         continuousDivisor: 2,
       );
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Bluetooth scan',
         'The scan could not be started.',
+        cause: error,
       );
     }
   }
@@ -72,10 +73,11 @@ final class FlutterBlueBikeTransport implements BikeTransport {
     }
     try {
       await fbp.FlutterBluePlus.stopScan();
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Bluetooth scan',
         'The scan could not be stopped.',
+        cause: error,
       );
     }
   }
@@ -187,10 +189,11 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
       );
     } on BikeAdapterUnavailable {
       rethrow;
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Connection',
         'The bike could not be reached.',
+        cause: error,
       );
     }
   }
@@ -273,10 +276,11 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
       }
     } on BikeGattNotSupported {
       rethrow;
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Service discovery',
         'The bike services could not be inspected.',
+        cause: error,
       );
     }
   }
@@ -304,10 +308,11 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
       return List.unmodifiable(
         await characteristic.read(timeout: _operationTimeoutSeconds),
       );
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Read',
         'The bike did not return the requested value.',
+        cause: error,
       );
     }
   }
@@ -331,10 +336,11 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
             characteristic.properties.writeWithoutResponse,
         timeout: _operationTimeoutSeconds,
       );
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Write',
         'The bike did not accept the requested value.',
+        cause: error,
       );
     }
   }
@@ -374,10 +380,11 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
         enabled,
         timeout: _operationTimeoutSeconds,
       );
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Notifications',
         'The bike notification stream could not be configured.',
+        cause: error,
       );
     }
   }
@@ -389,10 +396,11 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
     }
     try {
       await _device.disconnect(timeout: _operationTimeoutSeconds, queue: false);
-    } on Object {
-      throw const BikeConnectionFailure(
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
         'Disconnect',
         'The bike connection could not be closed cleanly.',
+        cause: error,
       );
     } finally {
       _characteristics.clear();

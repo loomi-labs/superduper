@@ -4,6 +4,7 @@ import 'package:signals/signals.dart';
 import 'package:superduper/src/ble/bike_identity_resolver.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/ble/ride_mode_controller.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/platform/background_hold.dart';
 import 'package:superduper/src/platform/bluetooth_permissions.dart';
@@ -97,10 +98,16 @@ final class ActiveBikeCoordinator {
     this.identityResolver,
     RideModeBuilder? rideModeBuilder,
     this.backgroundHold = const NoopBackgroundHoldGateway(),
+    this.debugLogFor = noDebugLogFor,
+    this.onBikesChanged,
+    this.onBikeForgotten,
   }) : _rideModeBuilder =
            rideModeBuilder ??
-           ((session, bike) =>
-               RideModeController(session: session, bike: bike));
+           ((session, bike) => RideModeController(
+             session: session,
+             bike: bike,
+             debugLog: debugLogFor(bike.bike.deviceId),
+           ));
 
   final BikeRepository bikeRepository;
   final SettingsRepository settingsRepository;
@@ -108,6 +115,14 @@ final class ActiveBikeCoordinator {
   final BikeSessionBuilder buildSession;
   final BikeIdentityResolver? identityResolver;
   final BackgroundHoldGateway backgroundHold;
+  final DebugLogFor debugLogFor;
+
+  /// Called with the saved bikes at each change. The debug log store reads
+  /// the debug log preference from it.
+  final void Function(List<SavedBike> bikes)? onBikesChanged;
+
+  /// Called when the rider forgets a bike. The debug log deletes its files.
+  final void Function(String deviceId)? onBikeForgotten;
   final RideModeBuilder _rideModeBuilder;
   final Signal<ActiveBikeState> _state = signal(
     const ActiveBikeLoading(),
@@ -171,6 +186,7 @@ final class ActiveBikeCoordinator {
           return;
         }
         _acceptBikes(bikes);
+        onBikesChanged?.call(bikes);
         if (!bikesReady.isCompleted) {
           bikesReady.complete();
         }
@@ -278,6 +294,7 @@ final class ActiveBikeCoordinator {
         await _clearSession();
       }
       await bikeRepository.forgetBike(deviceId);
+      onBikeForgotten?.call(deviceId);
       if (_disposed) {
         return;
       }
@@ -360,43 +377,88 @@ final class ActiveBikeCoordinator {
   }
 
   Future<void> setForeground(bool foreground) async {
+    final changed = _foreground != foreground;
     _foreground = foreground;
+    // The app reports hidden, paused and detached one after the other. Only a
+    // change gets log lines.
+    await _applyForeground(foreground, log: changed);
+  }
+
+  Future<void> _applyForeground(bool foreground, {required bool log}) async {
+    void note(String message, [String area = 'app']) {
+      if (log) {
+        _log(message, area);
+      }
+    }
+
     if (_discoveryPaused) {
+      note('setForeground($foreground): ignored, discovery pause is active');
       return;
     }
     if (foreground) {
       final current = _session;
       if (current == null) {
+        note('setForeground(true): no session, reconcile');
         await _reconcile(force: true, requestPermission: false);
       } else {
+        note('setForeground(true): resume the session');
         await current.resumeFromBackground();
       }
     } else {
       if (_rideMode?.needsBackgroundHold.peek() ?? false) {
+        note(
+          'setForeground(false): hold wanted, speedLimit='
+          '${_rideMode?.holdsSpeedLimit.peek()}, session stays connected',
+        );
         // A service that did not start keeps the process at risk.
         await backgroundHold
             .setHeld(
               true,
               speedLimit: _rideMode?.holdsSpeedLimit.peek() ?? true,
+              log: _holdLog,
             )
-            .catchError((Object _) {});
+            .catchError((Object error) {
+              note('setForeground(false): hold start failed: $error', 'hold');
+            });
         return;
       }
+      note('setForeground(false): no hold, pause the session');
       await _session?.pauseForBackground();
     }
   }
 
   void _onHoldChanged(bool held, {required bool speedLimit}) {
+    _log('hold changed: held=$held speedLimit=$speedLimit', 'hold');
     unawaited(
       backgroundHold
-          .setHeld(held, speedLimit: speedLimit)
-          .catchError((Object _) {}),
+          .setHeld(held, speedLimit: speedLimit, log: _holdLog)
+          .catchError((Object error) {
+            _log('hold gateway failed: $error', 'hold');
+          }),
     );
     // Without the hold Android stops the process at an unknown time. An
     // orderly pause matches the behaviour without a dynamic mode.
     if (!held && !_foreground && !_discoveryPaused) {
+      _log('hold ended in the background: pause the session', 'hold');
       unawaited(_session?.pauseForBackground());
     }
+  }
+
+  /// The hold gateway logs to the bike of the session only.
+  DebugLog get _holdLog {
+    final id = _session?.deviceId ?? _currentBike?.bike.deviceId;
+    return id == null ? const NoopDebugLog() : debugLogFor(id);
+  }
+
+  void _log(String message, [String area = 'app']) {
+    final id =
+        _session?.deviceId ??
+        _currentBike?.bike.deviceId ??
+        _inputs.settings?.activeBikeId;
+    if (id == null) {
+      return;
+    }
+    debugLogFor(id).log(area, message, generation: _session?.generation);
   }
 
   Future<bool> openPermissionSettings() => permissions.openSettings();
@@ -489,6 +551,10 @@ final class ActiveBikeCoordinator {
       if (!force &&
           current?.deviceId == targetId &&
           current?.protocolVersion == bike.bike.protocol) {
+        _log(
+          'in-place update of the session: streetLegal='
+          '${bike.streetLegalOnQuickRestart} setOnConnect=${bike.setOnConnect}',
+        );
         _currentBike = bike;
         current!
           ..updateSetOnConnect(resolveSetOnConnect(bike).patch)
@@ -531,9 +597,10 @@ final class ActiveBikeCoordinator {
       if (bike.bike.moduleSerial == null && identityResolver != null) {
         try {
           preparedBike = await identityResolver!.resolve(bike);
-        } on Object {
+        } on Object catch (error) {
           // Advertisement metadata improves background behavior but must not
           // prevent the normal foreground connection.
+          _log('identity resolve failed: $error');
         }
       }
       if (_disposed ||
@@ -547,6 +614,12 @@ final class ActiveBikeCoordinator {
           _discoveryPaused ||
           !_foreground ||
           generation != _switchGeneration) {
+        debugLogFor(preparedBike.bike.deviceId).log(
+          'app',
+          'session built but stale: disposed=$_disposed '
+              'discoveryPaused=$_discoveryPaused foreground=$_foreground '
+              'switch=$generation/$_switchGeneration',
+        );
         await next.dispose();
         return;
       }
@@ -555,6 +628,12 @@ final class ActiveBikeCoordinator {
       _session = next;
       final rideMode = _rideModeBuilder(next, preparedBike);
       _rideMode = rideMode;
+      _log(
+        'session built for ${preparedBike.bike.deviceId} '
+        'protocol=${preparedBike.bike.protocol.name} '
+        'region=${preparedBike.bike.region?.name} '
+        'temporary=${_temporaryBikeId != null}',
+      );
       final hold = computed(
         () => (
           held: rideMode.needsBackgroundHold.value,
@@ -575,12 +654,14 @@ final class ActiveBikeCoordinator {
       });
       unawaited(
         next.connect().catchError((Object error) {
+          _log('connect failed: $error');
           if (!_disposed && _session == next) {
             _state.value = ActiveBikeCoordinatorFailure(error);
           }
         }),
       );
     } on Object catch (error) {
+      _log('reconcile failed: $error');
       if (!_disposed && !_discoveryPaused && _foreground) {
         _state.value = ActiveBikeCoordinatorFailure(error);
       }
@@ -607,13 +688,20 @@ final class ActiveBikeCoordinator {
   }
 
   Future<void> _clearSession() async {
+    if (_session != null) {
+      _log('session cleared');
+    }
     _sessionStateCleanup?.call();
     _sessionStateCleanup = null;
     _holdCleanup?.call();
     _holdCleanup = null;
     _rideMode?.dispose();
     _rideMode = null;
-    await backgroundHold.setHeld(false).catchError((Object _) {});
+    await backgroundHold.setHeld(false, log: _holdLog).catchError((
+      Object error,
+    ) {
+      _log('hold release failed: $error', 'hold');
+    });
     final old = _session;
     _session = null;
     _currentBike = null;
@@ -643,9 +731,11 @@ final class ActiveBikeCoordinator {
     if (sessionState is SessionReady && !_readyRecorded) {
       _readyRecorded = true;
       unawaited(
-        bikeRepository
-            .markConnected(bike.bike.deviceId)
-            .catchError((Object _) {}),
+        bikeRepository.markConnected(bike.bike.deviceId).catchError((
+          Object error,
+        ) {
+          _log('markConnected failed: $error');
+        }),
       );
     }
   }

@@ -5,9 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 
 import '../support/fake_bike_transport.dart';
+import '../support/recording_debug_log.dart';
 
 void main() {
   late FakeBikeConnection connection;
@@ -28,6 +30,7 @@ void main() {
     int streetLegalStockMode = 0,
     Duration counterSampleTimeout = const Duration(seconds: 3),
     DateTime Function()? clock,
+    DebugLog debugLog = const NoopDebugLog(),
   }) {
     return BikeSession(
       connection: connection,
@@ -45,6 +48,7 @@ void main() {
       streetLegalStockMode: streetLegalStockMode,
       counterSampleTimeout: counterSampleTimeout,
       clock: clock,
+      debugLog: debugLog,
     );
   }
 
@@ -54,6 +58,29 @@ void main() {
 
   tearDown(() async {
     await session.dispose();
+  });
+
+  test('the log never holds the authentication key or the response', () async {
+    final log = RecordingDebugLog();
+    connection.readFrames.add([0, 0, 2, 0, 1, 3]);
+    session = createSession(debugLog: log);
+
+    await session.connect();
+
+    final text = log.entries.map((e) => e.message).join('\n');
+    final response = connection.writes
+        .firstWhere(
+          (w) => w.characteristicUuid == BikeGatt.authenticationResponse,
+        )
+        .value;
+    for (final bytes in [BikeProtocol.defaultAuthenticationKey, response]) {
+      final hex = [for (final b in bytes) b.toRadixString(16).padLeft(2, '0')];
+      expect(text, isNot(contains(bytes.toString())));
+      expect(text, isNot(contains(hex.join())));
+      expect(text, isNot(contains(hex.join(' '))));
+      expect(text, isNot(contains(hex.join(':'))));
+    }
+    expect(log.has('auth', 'state bytes=[1]'), isTrue);
   });
 
   test(
@@ -1546,6 +1573,85 @@ void main() {
       expect(session.state.value, isA<SessionReady>());
       return _configurationWrites(connection).sublist(before);
     }
+
+    group('debug log', () {
+      late RecordingDebugLog log;
+
+      Future<void> connectLogged() async {
+        log = RecordingDebugLog();
+        now = DateTime(2026, 10, 3, 12);
+        connection
+          ..auxiliaryCounter = 1000
+          ..readFrames.addAll([v1StateFrame(mode: 7), v1HistoryFrame()]);
+        session = createSession(
+          setOnConnect: const BikeControlPatch(mode: 1, assist: 3),
+          readDiagnosticsOnConnect: false,
+          reconnectDelays: const [Duration(milliseconds: 10)],
+          streetLegalOnQuickRestart: true,
+          streetLegalStockMode: 4,
+          counterSampleTimeout: const Duration(milliseconds: 20),
+          clock: () => now,
+          debugLog: log,
+        );
+        await session.connect();
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      test('state changes carry the generation', () async {
+        await connectLogged();
+
+        expect(log.has('link', 'Idle -> Connecting'), isTrue);
+        expect(log.has('link', 'Authenticating -> '), isTrue);
+        expect(
+          log.entries
+              .firstWhere((e) => e.message.contains('Idle -> Connecting'))
+              .generation,
+          1,
+        );
+      });
+
+      test('a quick restart logs marker, gap and the decision', () async {
+        await connectLogged();
+        connection
+          ..auxiliaryCounter = 1008
+          ..readFrames.addAll([
+            v1StateFrame(mode: 7),
+            v1HistoryFrame(marker: 0, mode: 7),
+          ])
+          ..emitState(BikeConnectionState.disconnected);
+        await Future<void>.delayed(Duration.zero);
+        now = now.add(const Duration(seconds: 20));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(
+          log.has(
+            'lock',
+            'marker=0 offTime=12s onTime=8s source=counter quick=true -> '
+                'lock ON, write stock wire 4',
+          ),
+          isTrue,
+          reason: log.messages('lock').join('\n'),
+        );
+        expect(log.has('meter', 'takeGap'), isTrue);
+      });
+
+      test('a dropout logs the link loss and the reconnect', () async {
+        await connectLogged();
+        connection
+          ..auxiliaryCounter = 1003
+          ..readFrames.addAll([v1StateFrame(mode: 7), v1HistoryFrame()])
+          ..emitState(BikeConnectionState.disconnected);
+        await Future<void>.delayed(Duration.zero);
+        now = now.add(const Duration(seconds: 3));
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(log.has('link', 'unexpected loss'), isTrue);
+        expect(log.has('link', 'reconnect attempt=1 delay=10ms'), isTrue);
+        expect(log.has('link', 'reconnect timer fired'), isTrue);
+        expect(log.has('lock', 'marker=1'), isTrue);
+        expect(log.has('lock', 'lock OFF'), isTrue);
+      });
+    });
 
     test('the preference off reads no marker and starts no counter', () async {
       connection.readFrames.add(v1StateFrame(mode: 7));

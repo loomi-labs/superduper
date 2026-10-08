@@ -119,6 +119,9 @@ final class BikeConfiguration {
 
   @override
   int get hashCode => Object.hash(light, mode, assist);
+
+  @override
+  String toString() => 'light=$light mode=$mode assist=$assist';
 }
 
 final class BikeControlPatch {
@@ -187,6 +190,9 @@ final class NativeModeRef extends SetOnConnectMode {
 
   @override
   int get hashCode => Object.hash(NativeModeRef, wire);
+
+  @override
+  String toString() => 'native($wire)';
 }
 
 final class CustomModeRef extends SetOnConnectMode {
@@ -199,6 +205,9 @@ final class CustomModeRef extends SetOnConnectMode {
 
   @override
   int get hashCode => Object.hash(CustomModeRef, id);
+
+  @override
+  String toString() => 'custom($id)';
 }
 
 /// The persisted set-on-connect choice. The mode may point at a native wire
@@ -473,6 +482,7 @@ final class SavedBike {
     this.customModes = const [],
     this.streetLegalOnQuickRestart = false,
     this.streetLegalStockMode,
+    this.debugLogEnabled = false,
     this.backgroundPreference = const BackgroundPreference.defaults(),
     this.versions,
     this.odometer,
@@ -489,6 +499,9 @@ final class SavedBike {
   /// The stock mode of the lock. Null means the default of the region and
   /// the protocol ([defaultStockMode]).
   final int? streetLegalStockMode;
+
+  /// The debug log of this bike is on.
+  final bool debugLogEnabled;
   final BackgroundPreference backgroundPreference;
   final CachedBikeVersions? versions;
   final CachedBikeOdometer? odometer;

@@ -5,15 +5,18 @@ import 'package:superduper/src/ble/bike_protocol.dart';
 import 'package:superduper/src/ble/bike_session.dart';
 import 'package:superduper/src/ble/bike_transport.dart';
 import 'package:superduper/src/ble/ride_mode_controller.dart';
+import 'package:superduper/src/diagnostics/debug_log.dart';
 import 'package:superduper/src/domain/bike.dart';
 import 'package:superduper/src/domain/ride_modes.dart';
 
 import '../support/fake_bike_transport.dart';
+import '../support/recording_debug_log.dart';
 
 void main() {
   late FakeBikeConnection connection;
   late BikeSession session;
   late RideModeController controller;
+  var log = RecordingDebugLog();
 
   SavedBike chBike({
     SetOnConnect setOnConnect = const SetOnConnect(),
@@ -48,6 +51,7 @@ void main() {
     Duration speedTimeout = const Duration(seconds: 5),
     DateTime Function()? clock,
     int historyMarker = BikeGatt.sessionAppliedMarker,
+    DebugLog? debugLog,
   }) async {
     connection.readFrames.add(v1StateFrame(mode: bootWire));
     if (bike.streetLegalOnQuickRestart) {
@@ -65,10 +69,12 @@ void main() {
       streetLegalStockMode: resolveStockMode(bike),
       counterSampleTimeout: const Duration(milliseconds: 20),
       clock: clock,
+      debugLog: debugLog ?? log,
     );
     controller = RideModeController(
       session: session,
       bike: bike,
+      debugLog: debugLog ?? log,
       speedTimeout: speedTimeout,
       clock: clock,
       watchdogInterval: const Duration(milliseconds: 20),
@@ -104,6 +110,7 @@ void main() {
 
   setUp(() {
     connection = FakeBikeConnection(deviceId: 'bike');
+    log = RecordingDebugLog();
   });
 
   tearDown(() async {
@@ -409,6 +416,88 @@ void main() {
     },
   );
 
+  group('debug log', () {
+    test('a crossing of the limit logs the crossing and the write', () async {
+      await start(
+        chBike(
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        ),
+        bootWire: 7,
+      );
+      speed(24);
+      speed(26.1);
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+
+      expect(log.has('speed', 'crossed limit 25 upward'), isTrue);
+      expect(log.has('speed', 'speed=26.1 limit=25 wire 1 -> 4'), isTrue);
+      expect(log.has('mode', 'selection'), isTrue);
+    });
+
+    test('moving and standing still log once', () async {
+      await start(chBike(), bootWire: 7);
+      speed(3);
+      speed(4);
+      speed(0);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        log.messages('speed').where((m) => m.contains('moving')),
+        hasLength(1),
+      );
+      expect(
+        log.messages('speed').where((m) => m.contains('stopped')),
+        hasLength(1),
+      );
+    });
+
+    test('the heartbeat logs every 5 seconds while moving', () async {
+      var now = DateTime(2026, 10, 8, 12);
+      await start(chBike(), bootWire: 7, clock: () => now);
+      int beats() =>
+          log.messages('speed').where((m) => m.contains('heartbeat')).length;
+
+      speed(10);
+      speed(11);
+      speed(12);
+      await Future<void>.delayed(Duration.zero);
+      expect(beats(), 1);
+
+      now = now.add(const Duration(seconds: 4));
+      speed(12);
+      await Future<void>.delayed(Duration.zero);
+      expect(beats(), 1);
+
+      now = now.add(const Duration(seconds: 1));
+      speed(13);
+      await Future<void>.delayed(Duration.zero);
+      expect(beats(), 2);
+    });
+
+    test('a standstill logs the missing samples once', () async {
+      await start(
+        chBike(
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        ),
+        bootWire: 7,
+        speedTimeout: const Duration(milliseconds: 30),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+
+      final lines = log
+          .messages('speed')
+          .where((m) => m.contains('no speed sample for'));
+      expect(lines, hasLength(1));
+    });
+
+    test('a select logs the previous and the next mode', () async {
+      await start(chBike(), bootWire: 7);
+      await controller.select(const CustomRideMode(seededChMode));
+
+      expect(log.has('mode', 'select'), isTrue);
+      expect(log.has('mode', 'accepted'), isTrue);
+    });
+  });
+
   group('street-legal lock', () {
     late DateTime now;
 
@@ -558,6 +647,34 @@ void main() {
       now = now.add(const Duration(minutes: 1));
       await waitForLock();
       expect(session.streetLegalLocked.value, isTrue);
+    });
+
+    test(
+      'a ride with the parked timer writes no line for each sample',
+      () async {
+        await startLocking();
+        for (var i = 0; i < 20; i++) {
+          speed(5 + i.toDouble());
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+
+        final parked = log.messages('parked');
+        expect(parked.where((m) => m.contains('restarted')), isEmpty);
+        expect(
+          parked.where((m) => m.contains('reset by movement')),
+          hasLength(1),
+        );
+      },
+    );
+
+    test('the parked expiry logs the timer and the write', () async {
+      await startLocking();
+      expect(log.has('parked', 'timer started'), isTrue);
+      now = now.add(const Duration(minutes: 10));
+      await waitForLock();
+
+      expect(log.has('parked', 'expired after 10 min'), isTrue);
+      expect(log.has('lock', 'start lock requested'), isTrue);
     });
 
     test('assist, light and zero speed do not restart the timer', () async {

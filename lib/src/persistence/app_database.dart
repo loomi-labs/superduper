@@ -108,6 +108,8 @@ class BikePreferences extends Table {
   BoolColumn get streetLegalOnQuickRestart =>
       boolean().withDefault(const Constant(false))();
   IntColumn get streetLegalStockMode => integer().nullable()();
+  BoolColumn get debugLogEnabled =>
+      boolean().withDefault(const Constant(false))();
 
   @override
   List<String> get customConstraints => [
@@ -341,11 +343,13 @@ final class AppDatabase extends _$AppDatabase {
           TableMigration(
             bikePreferences,
             // A table migration builds the current table. The columns that
-            // schema v7 adds do not exist yet, so they take their defaults.
+            // schema v7 and v8 add do not exist yet, so they take their
+            // defaults.
             newColumns: [
               bikePreferences.setOnConnect,
               bikePreferences.streetLegalOnQuickRestart,
               bikePreferences.streetLegalStockMode,
+              bikePreferences.debugLogEnabled,
             ],
             columnTransformer: {
               bikePreferences.setOnConnect: const CustomExpression<String>(
@@ -373,7 +377,7 @@ final class AppDatabase extends _$AppDatabase {
           await migrator.createTable(bikeCustomModes);
         });
       }
-      // Before v3 the table migration above already created the columns.
+      // Before v3 the table migration above already created these columns.
       if (from < 7 && from >= 3) {
         await transaction(() async {
           await migrator.addColumn(
@@ -386,6 +390,12 @@ final class AppDatabase extends _$AppDatabase {
           );
         });
       }
+      if (from < 8 && from >= 3) {
+        await migrator.addColumn(
+          bikePreferences,
+          bikePreferences.debugLogEnabled,
+        );
+      }
     },
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
@@ -393,7 +403,7 @@ final class AppDatabase extends _$AppDatabase {
   );
 
   @override
-  int get schemaVersion => 7;
+  int get schemaVersion => 8;
 
   Future<void> refreshBackgroundSyncPlan() {
     return transaction(() async {

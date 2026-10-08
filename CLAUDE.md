@@ -43,9 +43,10 @@ The source is in `lib/src`. State is in `signals`. Code uses Dart primary constr
 - `ble/off_time_meter.dart`: measures the off time of the bike across a link loss, from the auxiliary counter (`0x1581`) and the phone clock.
 - `ble/ride_mode_controller.dart`: the selected ride mode of a session. It writes the base or cap wire of a custom mode as the speed crosses the limit, runs the parked fallback timer, and publishes `needsBackgroundHold`.
 - `ble/active_bike_coordinator.dart`: owns the active session and its ride mode controller, and forwards `needsBackgroundHold` to the hold gateway.
+- `diagnostics/debug_log.dart`: the debug log per bike (`DebugLog`, `DebugLogStore`). See "Debug log".
 - `domain/ride_modes.dart`: the firmware profile table, custom modes, the base/cap engine, `BikeRegion`, and the seeded CH mode ("25 km/h", throttle on).
 - `domain/bike.dart`: bikes, configurations, control patches, set-on-connect values (`NativeModeRef` or `CustomModeRef`), and the stock mode of the street-legal lock (`defaultStockMode`, `resolveStockMode`).
-- `persistence/app_database.dart`: drift schema v7. The table `bike_custom_modes` holds the custom modes. `bike_preferences` holds the street-legal preference and the stock mode. `installed_data_importer.dart` imports the old `bikes.json` and `settings.json` once.
+- `persistence/app_database.dart`: drift schema v8. The table `bike_custom_modes` holds the custom modes. `bike_preferences` holds the street-legal preference, the stock mode and the debug log preference (`debug_log_enabled`). `installed_data_importer.dart` imports the old `bikes.json` and `settings.json` once.
 - `repositories/`: all database access. A region change in `updateBikeDetails` adapts the modes in the same transaction: a CH bike gets the seeded mode, and a set-on-connect wire that the new region does not offer is cleared (on CH it points at the seeded mode).
 - `platform/background_hold.dart`: the Android foreground service (flutter_foreground_task). Other platforms have no hold.
 - `platform/background_sync.dart` and the Kotlin code in `android/app/src/main/kotlin/com/loomilabs/superduperch`: upstream's native background sync. Byte 5 of each app control write is a marker, and the bike sets it to 0 at power-up; the native sync writes only when byte 5 is 0. A bike with the street-legal preference gets no native plan. The MethodChannel name `io.kbl.superduper/background_sync` is a fixed string and does not follow the application ID.
@@ -108,6 +109,22 @@ Limit: only a connected app can measure the off time. On iOS the lock works only
 - When the foreground service does not start, the app tries again when it goes to the background. An error in the start of the service also allows a new start.
 - The notification has two texts. While a switching custom mode runs it says "Superduper CH is holding your speed limit". When the hold comes only from the street-legal preference it says "Superduper CH keeps the link to your bike". The text changes while the service runs when the reason changes.
 - iOS has no hold. A switching mode and the street-legal lock stop when the app leaves the foreground. The control page says so for a switching mode. The settings page says so for the street-legal lock.
+
+## Debug log
+
+The debug log is per bike and off by default. The rider turns it on in the bike settings. It records the BLE link, the ride mode controller, the street-legal lock, the background hold and the background sync, in Dart and in the native Kotlin code.
+
+- A line looks like `2026-10-08 14:03:12.345+02:00 D g12 lock    marker=0 offTime=6s ... -> lock ON`. The fields are the local time with offset, the source (`D` Dart, `N` native), the session generation (`g<n>`, or `--`), the area, and the facts with the decision after `->`.
+- The areas are `app`, `link`, `auth`, `config`, `speed`, `mode`, `lock`, `meter`, `parked`, `hold`, `sync` and `native`.
+- The log never holds the authentication key or the challenge response.
+- Speed gets no line per sample. It gets a line at start and stop, at a crossing of the limit, and a heartbeat each 5 seconds while the bike moves. The parked timer reset gets one line for each ride. A missing speed stream gets one line, then one line each 5 minutes.
+- A message is one line: line breaks in an error text become ` | `.
+- `DebugLogStore` (one in `AppServices`) owns the folder `<documents>/debug_logs/`. The coordinator gives it the saved bikes, and it follows the preference. A forgotten bike loses its files. `store.forBike(deviceId)` returns a `DebugLog` that checks the preference at each call, so a session does not need a rebuild when the rider changes the preference. Every `debugLog` parameter defaults to `NoopDebugLog`. While the app is in the background the store writes each line at once, and on an uncaught error it writes one `app` line (`uncaught error: <type>: <message>`, no stack) to each enabled bike and flushes.
+- The Dart files are `<id>.log` and `<id>.1.log`. The native files are `<id>.native.log` and `<id>.native.1.log`. A file rotates at 2 MB. `<id>` is the device id in upper case, with each character outside `A-Z0-9` replaced by `_`. Kotlin (`DebugFileLog.kt`) uses the same rule. It reads the preference from the database (schema v8 or newer) and caches it for 30 seconds. A failed read is not cached. Before it creates a new native file, it reads the preference again, so a forgotten bike gets no file.
+- The hold gateway logs its results (permissions, start, stop, text update) to the log of the bike of the active session, and the coordinator logs the hold decisions there.
+- Share merges the four files by time into the export file `debug_logs/export/<id>.txt`, with a header (app version, BLE identifier, module serial, live session state). Clear deletes the four files and the export file.
+- The settings page reads the size and the time span from the first and last 4 KB of each file, not from the full log. It refreshes them when the store reports a write.
+- The log holds the BLE identifier and the module serial of the bike.
 
 ## Repository rules
 
