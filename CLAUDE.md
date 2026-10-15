@@ -39,7 +39,7 @@ After a change to a drift table, increase `schemaVersion`, add the migration ste
 The source is in `lib/src`. State is in `signals`. Code uses Dart primary constructors (`const new(...)`) and private named parameters (`required this._bike`).
 
 - `ble/bike_protocol.dart`: the V1 and V2 wire formats. It encodes and decodes the control packet, reads history records, decodes speed telemetry (`[2, 1, lo, hi]`, km/h x 100), and sends the ride-data request.
-- `ble/bike_session.dart`: one connection to one bike. It connects, authenticates, reads and writes the configuration, applies set-on-connect values, reconnects, publishes `speedKmh`, and decides the street-legal lock at each connect.
+- `ble/bike_session.dart`: one connection to one bike. It connects, authenticates, reads and writes the configuration, applies set-on-connect values, reconnects (see "Reconnect"), publishes `speedKmh`, and decides the street-legal lock at each connect.
 - `ble/off_time_meter.dart`: measures the off time of the bike across a link loss, from the auxiliary counter (`0x1581`) and the phone clock.
 - `ble/ride_mode_controller.dart`: the selected ride mode of a session. It writes the base or cap wire of a custom mode as the speed crosses the limit, runs the parked fallback timer, and publishes `needsBackgroundHold`.
 - `ble/active_bike_coordinator.dart`: owns the active session and its ride mode controller, and forwards `needsBackgroundHold` to the hold gateway.
@@ -110,11 +110,20 @@ Limit: only a connected app can measure the off time. On iOS the lock works only
 - The notification has two texts. While a switching custom mode runs it says "Superduper CH is holding your speed limit". When the hold comes only from the street-legal preference it says "Superduper CH keeps the link to your bike". The text changes while the service runs when the reason changes.
 - iOS has no hold. A switching mode and the street-legal lock stop when the app leaves the foreground. The control page says so for a switching mode. The settings page says so for the street-legal lock.
 
+## Reconnect
+
+- After a link loss or a failed connect, the session waits 2, 5, 10, 20 and 30 seconds before the next attempt. After that, the delay stays at 30 seconds. The connect timeout is 10 seconds.
+- On Android, the companion device manager (CDM) event "BLE appeared" also goes to Dart. `BackgroundSyncCompanionService` calls `BackgroundSyncRuntime.notifyBikeAppeared`. `MainActivity` sets the sink while a Flutter engine runs and sends `bikeAppeared` (argument `deviceId`) on the channel `io.kbl.superduper/background_sync`. With no engine, nothing is sent. The native sync works in both cases.
+- `SystemBackgroundSyncPlatformGateway.onBikeAppeared` receives the event. `AppServices` connects it to `ActiveBikeCoordinator.onBikeAppeared`. When the device id matches the active session (compare in upper case) and the session is `SessionReconnecting`, the coordinator calls `BikeSession.reconnectNow`.
+- `reconnectNow` cancels the reconnect timer and connects at once. The attempt counter does not reset. In every other state it does nothing. A manually paused or background-paused session does not connect. The event does not change the hold.
+- iOS and the desktop have no CDM event. Only the delays apply.
+
 ## Debug log
 
 The debug log is per bike and off by default. The rider turns it on in the bike settings. It records the BLE link, the ride mode controller, the street-legal lock, the background hold and the background sync, in Dart and in the native Kotlin code.
 
 - A line looks like `2026-10-08 14:03:12.345+02:00 D g12 lock    marker=0 offTime=6s ... -> lock ON`. The fields are the local time with offset, the source (`D` Dart, `N` native), the session generation (`g<n>`, or `--`), the area, and the facts with the decision after `->`.
+- From attempt 11 of a reconnect, the log has no line for each attempt (`reconnect attempt=`, `reconnect timer fired`, the state changes `Reconnecting -> Connecting` and `Connecting -> Reconnecting`, `connect failed`). It has one line each 5 minutes: `reconnect continues: attempt=<n> delay=<ms>ms last failure=<failure>`. A connect after attempt 10 logs `reconnected after <n> attempts`.
 - The areas are `app`, `link`, `auth`, `config`, `speed`, `mode`, `lock`, `meter`, `parked`, `hold`, `sync` and `native`.
 - The log never holds the authentication key or the challenge response.
 - Speed gets no line per sample. It gets a line at start and stop, at a crossing of the limit, and a heartbeat each 5 seconds while the bike moves. The parked timer reset gets one line for each ride. A missing speed stream gets one line, then one line each 5 minutes.

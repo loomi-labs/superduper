@@ -108,6 +108,10 @@ final class AppServices {
           platform: resolvedBackgroundSyncPlatform,
           debugLogFor: resolvedDebugLogStore.forBike,
         );
+    if (resolvedBackgroundSyncPlatform
+        case final SystemBackgroundSyncPlatformGateway system) {
+      system.onBikeAppeared = resolvedActiveBikeCoordinator.onBikeAppeared;
+    }
     return AppServices._(
       database: database,
       importer: resolvedImporter,

@@ -39,10 +39,16 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         BackgroundCompanionManager.setConnectionPaused(applicationContext, false)
-        MethodChannel(
+        val channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             backgroundSyncChannel,
-        ).setMethodCallHandler { call, result ->
+        )
+        BackgroundSyncRuntime.bikeAppearedSink = { deviceId ->
+            mainHandler.post {
+                channel.invokeMethod("bikeAppeared", mapOf("deviceId" to deviceId))
+            }
+        }
+        channel.setMethodCallHandler { call, result ->
             try {
                 when (call.method) {
                     "configure" -> {
@@ -79,6 +85,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        BackgroundSyncRuntime.bikeAppearedSink = null
         cancelPendingAssociation("Bike association was interrupted")
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,

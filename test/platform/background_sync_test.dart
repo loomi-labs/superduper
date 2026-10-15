@@ -424,6 +424,25 @@ void main() {
     },
   );
 
+  test('forwards the bikeAppeared event to the callback', () async {
+    const channel = MethodChannel(backgroundSyncChannelName);
+    final received = <String>[];
+    final gateway = SystemBackgroundSyncPlatformGateway()
+      ..onBikeAppeared = received.add;
+    addTearDown(() => gateway.onBikeAppeared = null);
+
+    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+          backgroundSyncChannelName,
+          channel.codec.encodeMethodCall(
+            const MethodCall('bikeAppeared', {'deviceId': 'AA:BB'}),
+          ),
+          (_) {},
+        );
+
+    expect(received, ['AA:BB']);
+  });
+
   test(
     'does not time out the interactive Android association chooser',
     () async {

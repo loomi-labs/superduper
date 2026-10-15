@@ -60,6 +60,26 @@ final class SystemBackgroundSyncPlatformGateway
 
   final MethodChannel channel;
   final Duration configurationTimeout;
+  void Function(String deviceId)? _onBikeAppeared;
+
+  /// Called when Android reports that the bike is in range (the CDM "BLE
+  /// appeared" event). The Kotlin side sends it only while the engine runs.
+  void Function(String deviceId)? get onBikeAppeared => _onBikeAppeared;
+
+  set onBikeAppeared(void Function(String deviceId)? callback) {
+    _onBikeAppeared = callback;
+    channel.setMethodCallHandler(callback == null ? null : _handleCall);
+  }
+
+  Future<void> _handleCall(MethodCall call) async {
+    if (call.method != 'bikeAppeared') {
+      throw MissingPluginException(call.method);
+    }
+    final deviceId = (call.arguments as Map<Object?, Object?>?)?['deviceId'];
+    if (deviceId is String) {
+      _onBikeAppeared?.call(deviceId);
+    }
+  }
 
   bool get _isSupported => defaultTargetPlatform == TargetPlatform.android;
 

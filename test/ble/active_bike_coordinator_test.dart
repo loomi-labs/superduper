@@ -116,6 +116,54 @@ void main() {
     expect(hold.logs, contains(same(logs['first'])));
   });
 
+  group('bike appeared', () {
+    Future<FakeBikeConnection> reconnecting() async {
+      reconnectDelays = const [Duration(seconds: 30)];
+      await coordinator.start();
+      await _waitFor(
+        coordinator.state,
+        (state) =>
+            state is ActiveBikeSessionStatus &&
+            state.sessionState is SessionReady,
+      );
+      final connection = connections['first']!.single
+        ..readFrames.add([0, 0, 0, 0, 0, 0])
+        ..emitState(BikeConnectionState.disconnected);
+      await _waitFor(
+        coordinator.state,
+        (state) =>
+            state is ActiveBikeSessionStatus &&
+            state.sessionState is SessionReconnecting,
+      );
+      return connection;
+    }
+
+    test('a matching id connects at once, in upper case too', () async {
+      final connection = await reconnecting();
+
+      coordinator.onBikeAppeared('FIRST');
+
+      await _waitFor(
+        coordinator.state,
+        (state) =>
+            state is ActiveBikeSessionStatus &&
+            state.sessionState is SessionReady,
+      );
+      expect(connection.connectCalls, 2);
+    });
+
+    test('another id does nothing', () async {
+      final connection = await reconnecting();
+
+      coordinator.onBikeAppeared('second');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.connectCalls, 1);
+      final state = coordinator.state.value as ActiveBikeSessionStatus;
+      expect(state.sessionState, isA<SessionReconnecting>());
+    });
+  });
+
   test('automatically connects the persisted active bike at startup', () async {
     await coordinator.start();
 

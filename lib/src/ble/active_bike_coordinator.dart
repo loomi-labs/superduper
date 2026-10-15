@@ -461,6 +461,19 @@ final class ActiveBikeCoordinator {
     debugLogFor(id).log(area, message, generation: _session?.generation);
   }
 
+  /// The CDM event says the bike is in range. A session that waits for its
+  /// reconnect timer connects at once. The event changes nothing else: a
+  /// paused or manually disconnected session stays as it is.
+  void onBikeAppeared(String deviceId) {
+    final session = _session;
+    if (session == null ||
+        session.deviceId.toUpperCase() != deviceId.toUpperCase() ||
+        session.state.peek() is! SessionReconnecting) {
+      return;
+    }
+    session.reconnectNow('the bike appeared (CDM)');
+  }
+
   Future<bool> openPermissionSettings() => permissions.openSettings();
 
   Future<void> dispose() async {
