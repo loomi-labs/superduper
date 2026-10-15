@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'dart:ui' show PlatformDispatcher;
 
-import 'package:flutter/foundation.dart' show FlutterError;
+import 'package:flutter/foundation.dart' show FlutterError, visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'package:superduper/src/domain/bike.dart';
 
@@ -81,27 +81,47 @@ List<DebugLogFile> debugLogFilesOf(Directory directory, String id) {
   if (!directory.existsSync()) {
     return const [];
   }
+  try {
+    return _classifyFiles(directory.listSync(followLinks: false), id);
+  } on FileSystemException {
+    return const [];
+  }
+}
+
+/// The same list as [debugLogFilesOf], with async I/O.
+Future<List<DebugLogFile>> debugLogFilesOfAsync(
+  Directory directory,
+  String id,
+) async {
+  try {
+    final entities = await directory.list(followLinks: false).toList();
+    return _classifyFiles(entities, id);
+  } on FileSystemException {
+    return const [];
+  }
+}
+
+List<DebugLogFile> _classifyFiles(
+  Iterable<FileSystemEntity> entities,
+  String id,
+) {
   final pattern = RegExp(
     '^${RegExp.escape(id)}(\\.native)?(?:\\.(\\d+))?\\.log\$',
   );
   final files = <DebugLogFile>[];
-  try {
-    for (final entity in directory.listSync(followLinks: false)) {
-      if (entity is! File) {
-        continue;
-      }
-      final match = pattern.firstMatch(entity.uri.pathSegments.last);
-      if (match == null) {
-        continue;
-      }
-      files.add((
-        file: entity,
-        native: match.group(1) != null,
-        rotation: int.tryParse(match.group(2) ?? '') ?? 0,
-      ));
+  for (final entity in entities) {
+    if (entity is! File) {
+      continue;
     }
-  } on FileSystemException {
-    return const [];
+    final match = pattern.firstMatch(entity.uri.pathSegments.last);
+    if (match == null) {
+      continue;
+    }
+    files.add((
+      file: entity,
+      native: match.group(1) != null,
+      rotation: int.tryParse(match.group(2) ?? '') ?? 0,
+    ));
   }
   // Rotated files by number, then the current file; Dart before native.
   int order(DebugLogFile f) => f.rotation == 0 ? 1 << 30 : f.rotation;
@@ -129,6 +149,8 @@ int nextDebugLogRotation(
   return highest + 1;
 }
 
+void _deleteFile(File file) => file.deleteSync();
+
 /// Deletes the rotated files that are older than [maxAge]. Then, while the
 /// files of the bike are above [maxBytes], it deletes the rotated file with
 /// the oldest modification time. A current file stays. A failed delete is
@@ -139,6 +161,7 @@ void pruneDebugLogFiles(
   required DateTime now,
   Duration maxAge = debugLogMaxAge,
   int maxBytes = debugLogMaxBytesPerBike,
+  void Function(File file) delete = _deleteFile,
 }) {
   try {
     final sizes = <String, int>{};
@@ -155,12 +178,17 @@ void pruneDebugLogFiles(
       }
     }
     void remove(DebugLogFile f) {
+      var done = false;
       try {
-        f.file.deleteSync();
+        delete(f.file);
+        done = true;
+      } on FileSystemException {
+        // Another process may have deleted the file: that counts as done.
+        done = !f.file.existsSync();
+      }
+      if (done) {
         total -= sizes[f.file.path]!;
         rotated.remove(f);
-      } on FileSystemException {
-        // The log must never break the app.
       }
     }
 
@@ -473,101 +501,135 @@ final class DebugLogStore {
     unawaited(_changes.close());
   }
 
-  /// The lines of all files of a device, sorted by time (stable). It reads
-  /// each file line by line and holds one line of each file in memory.
+  /// Called with `open <name>` and `close <name>` for each file the merge
+  /// reads. Tests use it.
+  @visibleForTesting
+  void Function(String event)? fileTrace;
+
+  /// The lines of all files of a device, sorted by time (stable). The files
+  /// of one kind (Dart, native) do not overlap in time, so each kind is one
+  /// chain, oldest file first. At most one file of each kind is open.
   Stream<String> mergedLines(String deviceId) async* {
     flush();
     final directory = _directory;
     if (directory == null) {
       return;
     }
-    // Oldest first: each file holds its lines in time order, so a merge of the
-    // file streams gives the order. On a tie, the earlier file wins.
-    final files = debugLogFilesOf(directory, debugLogFileId(deviceId));
-    final readers = <_LineReader>[];
+    final files = await debugLogFilesOfAsync(
+      directory,
+      debugLogFileId(deviceId),
+    );
+    final chains = <_ChainReader>[
+      for (final native in [false, true])
+        if (files.where((f) => f.native == native).toList() case final kind
+            when kind.isNotEmpty)
+          _ChainReader([for (final f in kind) f.file], trace: fileTrace),
+    ];
+    final live = <_ChainReader>[];
     try {
-      for (final f in files) {
-        final reader = _LineReader(f.file);
-        if (await reader.advance()) {
-          readers.add(reader);
+      for (final chain in chains) {
+        if (await chain.advance()) {
+          live.add(chain);
         }
       }
-      while (readers.isNotEmpty) {
-        var best = readers.first;
-        for (final reader in readers.skip(1)) {
-          if (reader.time.isBefore(best.time)) {
-            best = reader;
+      while (live.isNotEmpty) {
+        var best = live.first;
+        for (final chain in live.skip(1)) {
+          // On a tie the Dart chain (earlier in the list) wins.
+          if (chain.time.isBefore(best.time)) {
+            best = chain;
           }
         }
         yield best.line;
         if (!await best.advance()) {
-          readers.remove(best);
+          live.remove(best);
         }
       }
     } finally {
-      for (final reader in readers) {
-        await reader.close();
+      for (final chain in chains) {
+        await chain.close();
       }
     }
   }
 
-  /// Size and time span of the files of a device. Null when none exist. It
-  /// reads only the first and the last 4 KB of each file.
+  /// Size and time span of the files of a device. Null when none exist. For
+  /// each kind it reads the first 4 KB of the oldest file and the last 4 KB
+  /// of the newest file: at most 4 reads. The sizes come from one stat pass.
   Future<DebugLogSummary?> summary(String deviceId) async {
     flush();
     final directory = _directory;
     if (directory == null) {
       return null;
     }
-    final id = debugLogFileId(deviceId);
+    final files = await debugLogFilesOfAsync(
+      directory,
+      debugLogFileId(deviceId),
+    );
     var bytes = 0;
-    var any = false;
-    DateTime? first;
-    DateTime? last;
-    for (final entry in debugLogFilesOf(directory, id)) {
-      final file = entry.file;
+    final present = <DebugLogFile>[];
+    for (final entry in files) {
       try {
-        if (!file.existsSync()) {
-          continue;
-        }
-        final length = file.lengthSync();
-        any = true;
-        bytes += length;
-        final head = _edgeTime(file, length, fromEnd: false);
-        final tail = _edgeTime(file, length, fromEnd: true);
-        if (head != null && (first == null || head.isBefore(first))) {
-          first = head;
-        }
-        if (tail != null && (last == null || tail.isAfter(last))) {
-          last = tail;
-        }
+        // The settings page must not block on the disk.
+        // ignore: avoid_slow_async_io
+        bytes += (await entry.file.stat()).size;
+        present.add(entry);
       } on FileSystemException {
         // A file that a rotation or a clear removed is not part of the size.
       }
     }
-    return any ? DebugLogSummary(bytes: bytes, first: first, last: last) : null;
+    if (present.isEmpty) {
+      return null;
+    }
+    DateTime? first;
+    DateTime? last;
+    for (final native in [false, true]) {
+      final kind = present.where((f) => f.native == native).toList();
+      if (kind.isEmpty) {
+        continue;
+      }
+      // The list is sorted: rotated files by number, the current file last.
+      final head = await _edgeTime(kind.first.file, fromEnd: false);
+      final tail = await _edgeTime(kind.last.file, fromEnd: true);
+      if (head != null && (first == null || head.isBefore(first))) {
+        first = head;
+      }
+      if (tail != null && (last == null || tail.isAfter(last))) {
+        last = tail;
+      }
+    }
+    return DebugLogSummary(bytes: bytes, first: first, last: last);
   }
 
   static const _edgeBytes = 4096;
 
   /// The time of the first or the last line with a time stamp.
-  static DateTime? _edgeTime(File file, int length, {required bool fromEnd}) {
-    final handle = file.openSync();
+  static Future<DateTime?> _edgeTime(File file, {required bool fromEnd}) async {
     try {
-      final count = length < _edgeBytes ? length : _edgeBytes;
-      handle.setPositionSync(fromEnd ? length - count : 0);
-      final text = utf8.decode(handle.readSync(count), allowMalformed: true);
-      final lines = text.split('\n');
-      for (final line in fromEnd ? lines.reversed : lines) {
-        if (_parseLineTime(line) case final time?) {
-          return time;
+      final handle = await file.open();
+      try {
+        final length = await handle.length();
+        final count = length < _edgeBytes ? length : _edgeBytes;
+        await handle.setPosition(fromEnd ? length - count : 0);
+        final text = utf8.decode(
+          await handle.read(count),
+          allowMalformed: true,
+        );
+        final lines = text.split('\n');
+        for (final line in fromEnd ? lines.reversed : lines) {
+          if (_parseLineTime(line) case final time?) {
+            return time;
+          }
         }
+        return null;
+      } finally {
+        await handle.close();
       }
+    } on FileSystemException {
       return null;
-    } finally {
-      handle.closeSync();
     }
   }
+
+  static const int _exportBatchChars = 64 * 1024;
 
   /// Writes the merged log with a header to a file and returns it.
   Future<File> exportFor(
@@ -590,11 +652,18 @@ final class DebugLogStore {
     }
     sink.writeln('---');
     try {
-      await sink.addStream(
-        mergedLines(bike.bike.deviceId)
-            .map((line) => '$line\n')
-            .transform(utf8.encoder),
-      );
+      // Batches of about 64 KB: one write for each line is slow.
+      var batch = StringBuffer();
+      await for (final line in mergedLines(bike.bike.deviceId)) {
+        batch.writeln(line);
+        if (batch.length >= _exportBatchChars) {
+          sink.add(utf8.encode(batch.toString()));
+          batch = StringBuffer();
+        }
+      }
+      if (batch.isNotEmpty) {
+        sink.add(utf8.encode(batch.toString()));
+      }
     } finally {
       await sink.close();
     }
@@ -630,44 +699,72 @@ final class DebugLogStore {
   }
 }
 
-/// Reads a log file line by line. [time] is the time of the current [line]; a
-/// line without a time stamp takes the time of the line before it.
-final class _LineReader {
-  new(File file)
-    : _iterator = StreamIterator(
-        file
-            .openRead()
-            .transform(const Utf8Decoder(allowMalformed: true))
-            .transform(const LineSplitter()),
-      );
+/// Reads the files of one kind as one chain, line by line. It opens the next
+/// file after it closed the one before. [time] is the time of the current
+/// [line]; a line without a time stamp takes the time of the line before it.
+final class _ChainReader {
+  new(this._files, {this.trace});
 
-  final StreamIterator<String> _iterator;
+  final List<File> _files;
+  final void Function(String event)? trace;
+  StreamIterator<String>? _iterator;
+  File? _open;
+  var _next = 0;
   String line = '';
   DateTime time = DateTime.fromMillisecondsSinceEpoch(0);
 
   Future<bool> advance() async {
-    try {
-      while (await _iterator.moveNext()) {
-        final next = _iterator.current;
-        if (next.isEmpty) {
-          continue;
+    while (true) {
+      final iterator = _iterator;
+      if (iterator == null) {
+        if (_next >= _files.length) {
+          return false;
         }
-        time = _parseLineTime(next) ?? time;
-        line = next;
-        return true;
+        _openFile(_files[_next++]);
+        continue;
       }
-    } on FileSystemException {
-      // A file that a clear removed ends here.
+      try {
+        while (await iterator.moveNext()) {
+          final text = iterator.current;
+          if (text.isEmpty) {
+            continue;
+          }
+          time = _parseLineTime(text) ?? time;
+          line = text;
+          return true;
+        }
+      } on FileSystemException {
+        // A file that a clear or a prune removed ends here.
+      }
+      await close();
     }
-    return false;
+  }
+
+  void _openFile(File file) {
+    _open = file;
+    trace?.call('open ${file.uri.pathSegments.last}');
+    _iterator = StreamIterator(
+      file
+          .openRead()
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter()),
+    );
   }
 
   Future<void> close() async {
+    final iterator = _iterator;
+    final file = _open;
+    _iterator = null;
+    _open = null;
+    if (iterator == null) {
+      return;
+    }
     try {
-      await _iterator.cancel();
+      await iterator.cancel();
     } on Object {
       // The log must never break the app.
     }
+    trace?.call('close ${file!.uri.pathSegments.last}');
   }
 }
 

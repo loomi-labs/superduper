@@ -73,6 +73,9 @@ final class RideModeController {
   var _parkedWriteInFlight = false;
   Future<void>? _parkedWrite;
   var _linkSettled = false;
+  // The last skip line. A skip logs once for each wire and reason, not for
+  // each speed sample.
+  String? _lastSkipLogged;
   var _disposed = false;
   // Debug log state: what the last log lines said.
   bool? _moving;
@@ -241,8 +244,9 @@ final class RideModeController {
           _assertedWire = wire;
         } else if (_writeBlockReason case final reason?) {
           // The asserted wire stays: the bike does not run the new wire.
-          _log('mode', 'write of wire $wire skipped: $reason');
+          _logSkip('mode', wire, reason);
         } else {
+          _lastSkipLogged = null;
           _assertedWire = wire;
           unawaited(
             session.setMode(wire).catchError((Object error) {
@@ -515,11 +519,21 @@ final class RideModeController {
     }
   }
 
-  void _writeWire(int wire, {required int previous, required String reason}) {
-    if (_writeBlockReason case final blocked?) {
-      _log('speed', 'write of wire $wire skipped: $blocked');
+  void _logSkip(String area, int wire, String reason) {
+    final key = '$area $wire $reason';
+    if (key == _lastSkipLogged) {
       return;
     }
+    _lastSkipLogged = key;
+    _log(area, 'write of wire $wire skipped: $reason');
+  }
+
+  void _writeWire(int wire, {required int previous, required String reason}) {
+    if (_writeBlockReason case final blocked?) {
+      _logSkip('speed', wire, blocked);
+      return;
+    }
+    _lastSkipLogged = null;
     _log('speed', '$reason wire $previous -> $wire');
     _assertedWire = wire;
     unawaited(

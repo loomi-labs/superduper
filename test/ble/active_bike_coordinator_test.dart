@@ -117,8 +117,19 @@ void main() {
   });
 
   group('bike appeared', () {
+    final logs = <String, RecordingDebugLog>{};
+
     Future<FakeBikeConnection> reconnecting() async {
       reconnectDelays = const [Duration(seconds: 30)];
+      logs.clear();
+      await coordinator.dispose();
+      coordinator = ActiveBikeCoordinator(
+        bikeRepository: bikes,
+        settingsRepository: settings,
+        permissions: permissions,
+        buildSession: buildTestSession,
+        debugLogFor: (id) => logs.putIfAbsent(id, RecordingDebugLog.new),
+      );
       await coordinator.start();
       await _waitFor(
         coordinator.state,
@@ -161,6 +172,29 @@ void main() {
       expect(connection.connectCalls, 1);
       final state = coordinator.state.value as ActiveBikeSessionStatus;
       expect(state.sessionState, isA<SessionReconnecting>());
+      expect(
+        logs['first']!.has('link', 'bike appeared ignored: other device'),
+        isTrue,
+      );
+    });
+
+    test('a matching id in another state changes nothing', () async {
+      final connection = await reconnecting();
+      coordinator.onBikeAppeared('first');
+      await _waitFor(
+        coordinator.state,
+        (state) =>
+            state is ActiveBikeSessionStatus &&
+            state.sessionState is SessionReady,
+      );
+      expect(connection.connectCalls, 2);
+
+      coordinator.onBikeAppeared('first');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.connectCalls, 2);
+      final state = coordinator.state.value as ActiveBikeSessionStatus;
+      expect(state.sessionState, isA<SessionReady>());
     });
   });
 
@@ -582,6 +616,7 @@ void main() {
     Future<ActiveBikeSessionStatus> startActive(
       String deviceId, {
       required int bootWire,
+      void Function({required bool held})? onLinkHeldChanged,
     }) async {
       connectionFrames[deviceId] = [v1StateFrame(mode: bootWire)];
       await settings.makeBikeActive(deviceId);
@@ -592,6 +627,7 @@ void main() {
         permissions: permissions,
         buildSession: buildTestSession,
         backgroundHold: hold,
+        onLinkHeldChanged: onLinkHeldChanged,
       );
       await coordinator.start();
       return await _waitFor(
@@ -630,6 +666,23 @@ void main() {
         expect(state.sessionState, isA<SessionReady>());
       },
     );
+
+    test('the coordinator reports each change of the hold once', () async {
+      final sent = <bool>[];
+      await addChBike();
+      await startActive(
+        'ch',
+        bootWire: 7,
+        onLinkHeldChanged: ({required held}) => sent.add(held),
+      );
+      await Future<void>.delayed(Duration.zero);
+      // The first value is the hold at the start of the session: off.
+      expect(sent, [false, true]);
+
+      await coordinator.dispose();
+
+      expect(sent, [false, true, false]);
+    });
 
     test(
       'native mode pauses the session in the background and holds nothing',

@@ -114,6 +114,21 @@ class DebugFileLogTest {
     }
 
     @Test
+    fun pruneCountsAFileThatIsGoneBeforeTheDelete() {
+        make("AA.log", 100, day)
+        make("AA.1.log", 100, 9 * day)
+        make("AA.2.log", 100, 7 * day)
+        // Another process deletes the oldest file first, so the delete fails.
+        DebugLogFiles.prune(directory, "AA", now, maxBytes = 250) { file ->
+            file.delete()
+            file.name != "AA.1.log"
+        }
+        assertFalse(File(directory, "AA.1.log").exists())
+        // 300 - 100 = 200 is below the limit: the next file stays.
+        assertTrue(File(directory, "AA.2.log").exists())
+    }
+
+    @Test
     fun pruneNeverDeletesACurrentFile() {
         make("AA.log", 300, day)
         make("AA.native.log", 300, day)

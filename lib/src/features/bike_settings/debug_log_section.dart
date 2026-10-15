@@ -15,6 +15,7 @@ final class DebugLogSection extends StatefulWidget {
     required this.store,
     required this.onToggle,
     required this.shareLog,
+    this.loadSummary,
     super.key,
   });
 
@@ -26,6 +27,9 @@ final class DebugLogSection extends StatefulWidget {
   /// of the share button.
   final Future<void> Function(Rect? origin) shareLog;
 
+  /// Reads the summary. Tests replace it. The default asks the store.
+  final Future<DebugLogSummary?> Function()? loadSummary;
+
   @override
   State<DebugLogSection> createState() => _DebugLogSectionState();
 }
@@ -35,6 +39,7 @@ final class _DebugLogSectionState extends State<DebugLogSection> {
   DebugLogSummary? _summary;
   StreamSubscription<String>? _changes;
   var _refreshing = false;
+  var _refreshAgain = false;
 
   String get _deviceId => widget.saved.bike.deviceId;
 
@@ -57,14 +62,21 @@ final class _DebugLogSectionState extends State<DebugLogSection> {
   /// Reads the size and the time span without blocking the page.
   Future<void> _refresh() async {
     if (_refreshing) {
+      // An event during a refresh starts one more refresh after it.
+      _refreshAgain = true;
       return;
     }
     _refreshing = true;
     try {
-      final summary = await widget.store.summary(_deviceId);
-      if (mounted) {
-        setState(() => _summary = summary);
-      }
+      do {
+        _refreshAgain = false;
+        final summary =
+            await (widget.loadSummary?.call() ??
+                widget.store.summary(_deviceId));
+        if (mounted) {
+          setState(() => _summary = summary);
+        }
+      } while (_refreshAgain && mounted);
     } finally {
       _refreshing = false;
     }

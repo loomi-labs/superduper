@@ -424,6 +424,27 @@ void main() {
     },
   );
 
+  test('setLinkHeld sends the flag on the channel', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    const channel = MethodChannel(backgroundSyncChannelName);
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return null;
+        });
+    addTearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    await SystemBackgroundSyncPlatformGateway().setLinkHeld(true);
+
+    expect(calls.single.method, 'setLinkHeld');
+    expect(calls.single.arguments, {'held': true});
+  });
+
   test('forwards the bikeAppeared event to the callback', () async {
     const channel = MethodChannel(backgroundSyncChannelName);
     final received = <String>[];
@@ -493,6 +514,11 @@ final class _FakeBackgroundSyncPlatform
   BackgroundSyncRegistration configureResult =
       BackgroundSyncRegistration.configured;
   FutureOr<void> Function()? onConfigure;
+
+  final List<bool> linkHeld = [];
+
+  @override
+  Future<void> setLinkHeld(bool held) async => linkHeld.add(held);
 
   @override
   Future<void> cancel() async {

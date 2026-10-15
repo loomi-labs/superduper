@@ -3,6 +3,7 @@ package com.loomilabs.superduperch
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -10,6 +11,33 @@ class BackgroundSyncRuntimeTest {
     @After
     fun tearDown() {
         BackgroundSyncRuntime.bikeAppearedSink = null
+        BackgroundSyncRuntime.dartHoldsLink = false
+    }
+
+    @Test
+    fun nativeSyncSkipsWhileDartHoldsTheLink() {
+        assertEquals(
+            "skippedDartHoldsLink",
+            BackgroundSyncRuntime.standDownOutcome(foreground = false, dartHoldsLink = true),
+        )
+    }
+
+    @Test
+    fun nativeSyncRunsWhenDartDoesNotHoldTheLink() {
+        assertNull(BackgroundSyncRuntime.standDownOutcome(foreground = false, dartHoldsLink = false))
+    }
+
+    @Test
+    fun nativeSyncSkipsInTheForeground() {
+        assertEquals(
+            "skippedForeground",
+            BackgroundSyncRuntime.standDownOutcome(foreground = true, dartHoldsLink = true),
+        )
+    }
+
+    @Test
+    fun theLinkHeldFlagIsFalseAtStart() {
+        assertFalse(BackgroundSyncRuntime.dartHoldsLink)
     }
 
     @Test

@@ -29,6 +29,9 @@ abstract interface class BackgroundSyncPlatformGateway {
     required bool requestAssociation,
   });
   Future<void> setConnectionPaused(bool paused);
+
+  /// Tells the native sync whether Dart holds the link to the bike.
+  Future<void> setLinkHeld(bool held);
   Future<void> cancel();
 }
 
@@ -43,6 +46,9 @@ final class NoopBackgroundSyncPlatformGateway
 
   @override
   Future<void> setConnectionPaused(bool paused) async {}
+
+  @override
+  Future<void> setLinkHeld(bool held) async {}
 
   @override
   Future<BackgroundSyncRegistration> configure({
@@ -121,6 +127,17 @@ final class SystemBackgroundSyncPlatformGateway
     if (_isSupported) {
       try {
         await channel.invokeMethod<void>('cancel');
+      } on MissingPluginException {
+        // Unit tests and non-Android embedders do not install the Android host.
+      }
+    }
+  }
+
+  @override
+  Future<void> setLinkHeld(bool held) async {
+    if (_isSupported) {
+      try {
+        await channel.invokeMethod<void>('setLinkHeld', {'held': held});
       } on MissingPluginException {
         // Unit tests and non-Android embedders do not install the Android host.
       }

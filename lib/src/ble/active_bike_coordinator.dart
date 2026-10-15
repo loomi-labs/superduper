@@ -101,6 +101,7 @@ final class ActiveBikeCoordinator {
     this.debugLogFor = noDebugLogFor,
     this.onBikesChanged,
     this.onBikeForgotten,
+    this.onLinkHeldChanged,
   }) : _rideModeBuilder =
            rideModeBuilder ??
            ((session, bike) => RideModeController(
@@ -123,6 +124,11 @@ final class ActiveBikeCoordinator {
 
   /// Called when the rider forgets a bike. The debug log deletes its files.
   final void Function(String deviceId)? onBikeForgotten;
+
+  /// Called when the hold changes. The native background sync stands down
+  /// while the hold is on.
+  final void Function({required bool held})? onLinkHeldChanged;
+  bool? _linkHeldSent;
   final RideModeBuilder _rideModeBuilder;
   final Signal<ActiveBikeState> _state = signal(
     const ActiveBikeLoading(),
@@ -429,6 +435,7 @@ final class ActiveBikeCoordinator {
 
   void _onHoldChanged(bool held, {required bool speedLimit}) {
     _log('hold changed: held=$held speedLimit=$speedLimit', 'hold');
+    _sendLinkHeld(held);
     unawaited(
       backgroundHold
           .setHeld(held, speedLimit: speedLimit, log: _holdLog)
@@ -442,6 +449,14 @@ final class ActiveBikeCoordinator {
       _log('hold ended in the background: pause the session', 'hold');
       unawaited(_session?.pauseForBackground());
     }
+  }
+
+  void _sendLinkHeld(bool held) {
+    if (_linkHeldSent == held) {
+      return;
+    }
+    _linkHeldSent = held;
+    onLinkHeldChanged?.call(held: held);
   }
 
   /// The hold gateway logs to the bike of the session only.
@@ -467,10 +482,11 @@ final class ActiveBikeCoordinator {
   void onBikeAppeared(String deviceId) {
     final session = _session;
     if (session == null ||
-        session.deviceId.toUpperCase() != deviceId.toUpperCase() ||
-        session.state.peek() is! SessionReconnecting) {
+        session.deviceId.toUpperCase() != deviceId.toUpperCase()) {
+      _log('bike appeared ignored: other device', 'link');
       return;
     }
+    // The session logs the event or the reason it ignores it.
     session.reconnectNow('the bike appeared (CDM)');
   }
 
@@ -710,6 +726,7 @@ final class ActiveBikeCoordinator {
     _holdCleanup = null;
     _rideMode?.dispose();
     _rideMode = null;
+    _sendLinkHeld(false);
     await backgroundHold.setHeld(false, log: _holdLog).catchError((
       Object error,
     ) {

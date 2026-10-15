@@ -146,14 +146,17 @@ internal object DebugLogFiles {
         now: Long,
         maxAgeMs: Long = DebugLogFiles.maxAgeMs,
         maxBytes: Long = maxBytesPerBike,
+        delete: (File) -> Boolean = File::delete,
     ) {
         try {
             val entries = list(directory, id)
-            var total = entries.sumOf { it.file.length() }
+            val sizes = entries.associate { it.file to it.file.length() }
+            var total = sizes.values.sum()
             val rotated = entries.filter { it.rotation > 0 }.toMutableList()
             fun remove(entry: Entry) {
-                val size = entry.file.length()
-                if (entry.file.delete()) {
+                val size = sizes.getValue(entry.file)
+                // A file that another process deleted counts as done.
+                if (delete(entry.file) || !entry.file.exists()) {
                     total -= size
                     rotated.remove(entry)
                 }

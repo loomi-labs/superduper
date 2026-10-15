@@ -812,6 +812,41 @@ void main() {
       );
     });
 
+    test('does nothing after the foreground pause', () async {
+      final log = await dropped();
+
+      await session.pauseForBackground();
+      session.reconnectNow('paused');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(connection.connectCalls, 1);
+      expect(log.has('link', 'reconnect now ignored'), isTrue);
+    });
+
+    test('does nothing after the manual pause', () async {
+      final log = await dropped();
+
+      await session.disconnect();
+      session.reconnectNow('manual');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(connection.connectCalls, 1);
+      expect(log.has('link', 'reconnect now ignored'), isTrue);
+    });
+
+    test('does not start a second connect while one is in flight', () async {
+      final log = await dropped(delay: const Duration(milliseconds: 10));
+      connection.connectGate = Completer<void>();
+      await _waitUntil(() => connection.connectCalls == 2);
+
+      session.reconnectNow('in flight');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(connection.connectCalls, 2);
+      expect(log.has('link', 'reconnect now ignored'), isTrue);
+      connection.connectGate!.complete();
+    });
+
     test('does nothing in the other states', () async {
       final log = RecordingDebugLog();
       connection.readFrames.add([0, 0, 0, 0, 0, 0]);

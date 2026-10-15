@@ -80,6 +80,32 @@ void main() {
     expect(find.byKey(const ValueKey('ride-mode-native-1')), findsNothing);
   });
 
+  testWidgets('without a selection the extra chip shows and cannot be tapped', (
+    tester,
+  ) async {
+    var calls = 0;
+    await tester.pumpWidget(
+      host(
+        RideModeSelector(
+          options: selectableRideModes(
+            region: BikeRegion.ch,
+            customModes: const [seededChMode],
+          ),
+          selected: null,
+          region: BikeRegion.ch,
+          enabled: true,
+          observedWire: 1,
+          onSelected: (_) => calls++,
+        ),
+      ),
+    );
+    final finder = find.byKey(const ValueKey('ride-mode-native-1'));
+    expect(finder, findsOneWidget);
+    expect(tester.widget<ChoiceChip>(finder).selected, isFalse);
+    await tester.tap(finder);
+    expect(calls, 0);
+  });
+
   testWidgets('the extra chip is selected and cannot be tapped', (
     tester,
   ) async {
