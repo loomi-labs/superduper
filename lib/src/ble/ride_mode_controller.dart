@@ -76,6 +76,9 @@ final class RideModeController {
   // The last skip line. A skip logs once for each wire and reason, not for
   // each speed sample.
   String? _lastSkipLogged;
+  // A custom mode that the rider edited while the link was not settled. The
+  // controller writes its entry wire at ready.
+  CustomMode? _pendingEdit;
   var _disposed = false;
   // Debug log state: what the last log lines said.
   bool? _moving;
@@ -112,6 +115,7 @@ final class RideModeController {
     final previous = _selection.peek();
     _selection.value = next;
     if (previous != next) {
+      _pendingEdit = null;
       _log(
         'mode',
         'selection ${_describe(previous)} -> ${_describe(next)}: $reason',
@@ -186,6 +190,7 @@ final class RideModeController {
     session.endStreetLegalLock();
     _selectInFlight = true;
     _holdSelection = previousSelection;
+    _pendingEdit = null;
     _selection.value = next;
     _assertedWire = wire;
     try {
@@ -245,7 +250,13 @@ final class RideModeController {
         } else if (_writeBlockReason case final reason?) {
           // The asserted wire stays: the bike does not run the new wire.
           _logSkip('mode', wire, reason);
+          // Only an unsettled link keeps the edit. The lock selects the
+          // native wire at ready.
+          if (!session.streetLegalLocked.peek()) {
+            _pendingEdit = stillThere;
+          }
         } else {
+          _pendingEdit = null;
           _lastSkipLogged = null;
           _assertedWire = wire;
           unawaited(
@@ -306,6 +317,9 @@ final class RideModeController {
       return;
     }
     _log('lock', 'session lock changed: locked=$locked ready=$_ready');
+    if (locked) {
+      _pendingEdit = null;
+    }
     if (locked && _ready) {
       final observed = session.observed.peek()?.mode;
       if (observed != null) {
@@ -326,12 +340,37 @@ final class RideModeController {
       _log('mode', 'became ready without an observed mode');
       return;
     }
+    final edited = _pendingEdit;
+    _pendingEdit = null;
     if (session.streetLegalLocked.peek()) {
       _setSelection(NativeRideMode(observed), 'ready (1): the lock is on');
       _assertedWire = observed;
       return;
     }
     final current = _selection.peek();
+    if (edited != null &&
+        current == CustomRideMode(edited) &&
+        !assertsWire(current!, observed, _region)) {
+      // The rider edited the mode while the link was not settled. Keep it and
+      // write its entry wire now.
+      final wire = entryWireFor(edited, _region);
+      _log(
+        'mode',
+        'ready (5): keeps the edited ${_describe(current)}, writes wire '
+            '$wire, bike wire $observed',
+      );
+      _assertedWire = wire;
+      unawaited(
+        session.setMode(wire).catchError((Object error) {
+          _log('mode', 'write of the edited custom mode failed: $error');
+          if (_assertedWire == wire) {
+            _assertedWire = observed;
+          }
+          return session.observed.peek()!;
+        }),
+      );
+      return;
+    }
     if (current is CustomRideMode && assertsWire(current, observed, _region)) {
       _log(
         'mode',

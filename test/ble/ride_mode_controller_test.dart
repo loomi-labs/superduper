@@ -716,6 +716,77 @@ void main() {
     );
 
     test(
+      'an edit during the sync keeps the custom mode and writes its wire',
+      () async {
+        await start(
+          chBike(
+            setOnConnect: const SetOnConnect(
+              mode: CustomModeRef(seededChModeId),
+            ),
+          ),
+          bootWire: 7,
+        );
+        connection
+          ..readFrames.add(v1StateFrame(mode: 7))
+          ..configurationWriteGate = Completer<void>()
+          ..configurationWriteGateAfterStarts =
+              connection.configurationWriteStarts + 1
+          ..emitState(BikeConnectionState.disconnected);
+        await tick();
+        expect(session.state.value, isA<SessionSynchronizing>());
+
+        const edited = CustomMode(
+          id: seededChModeId,
+          name: '35 km/h',
+          limitKmh: 35,
+          throttle: true,
+        );
+        controller.updateBike(chBike(customModes: const [edited]));
+        connection.configurationWriteGate!.complete();
+        await tick();
+
+        expect(session.state.value, isA<SessionReady>());
+        expect(controller.selection.value, const CustomRideMode(edited));
+        expect(modeWrites().last, 5);
+        expect(controller.assertedWire, 5);
+        expect(log.has('mode', 'ready (5)'), isTrue);
+      },
+    );
+
+    test(
+      'an edit with the lock on writes no wire and follows the lock',
+      () async {
+        await startLocking(counter: 1000, assist: 2);
+        await quickRestartGated(bootWire: 4);
+        expect(session.state.value, isA<SessionSynchronizing>());
+        final before = modeWrites().length;
+
+        const edited = CustomMode(
+          id: seededChModeId,
+          name: '35 km/h',
+          limitKmh: 35,
+          throttle: true,
+        );
+        controller.updateBike(
+          chBike(
+            setOnConnect: const SetOnConnect(
+              mode: CustomModeRef(seededChModeId),
+            ),
+            customModes: const [edited],
+            streetLegal: true,
+          ),
+        );
+        connection.configurationWriteGate!.complete();
+        await tick();
+
+        expect(session.state.value, isA<SessionReady>());
+        expect(controller.selection.value, const NativeRideMode(4));
+        expect(modeWrites().sublist(before), everyElement(4));
+        expect(log.has('mode', 'ready (5)'), isFalse);
+      },
+    );
+
+    test(
       'the missing speed stream writes no cap wire before the link settles',
       () async {
         const fast = CustomMode(

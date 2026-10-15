@@ -104,7 +104,7 @@ Limit: only a connected app can measure the off time. On iOS the lock works only
 - While the hold is on, the app stays connected when it goes to the background. Otherwise the session pauses in the background.
 - When the hold ends while the app is in the background, the session pauses.
 - The app follows a mode change on the bike only while the link is ready. The wire that the app reads before the set-on-connect write does not change the selection.
-- The controller decides the selection from the set-on-connect mode once for each new connection. A confirmed write on a settled link does not decide it again.
+- The controller decides the selection from the set-on-connect mode once for each new connection. A confirmed write on a settled link does not decide it again. When the rider edits the selected custom mode while the link is not settled and the lock is off, the controller keeps the edited mode and writes its entry wire at ready (rule "ready (5)"), unless the bike wire already belongs to the edited mode. An edit during the lock is not kept: the lock selects the wire the bike reports.
 - During the write of a mode choice, the hold follows the previous selection. It changes only when the bike accepted the new mode.
 - When the foreground service does not start, the app tries again when it goes to the background. An error in the start of the service also allows a new start.
 - The notification has two texts. While a switching custom mode runs it says "Superduper CH is holding your speed limit". When the hold comes only from the street-legal preference it says "Superduper CH keeps the link to your bike". The text changes while the service runs when the reason changes.
