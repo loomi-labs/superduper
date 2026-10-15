@@ -503,8 +503,11 @@ void main() {
 
     setUp(() => now = DateTime(2026, 10, 3, 12));
 
-    SavedBike lockingBike({int? stockMode}) => chBike(
-      setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+    SavedBike lockingBike({int? stockMode, int? assist}) => chBike(
+      setOnConnect: SetOnConnect(
+        mode: const CustomModeRef(seededChModeId),
+        assist: assist,
+      ),
       streetLegal: true,
       stockMode: stockMode,
     );
@@ -513,10 +516,11 @@ void main() {
       int? stockMode,
       int historyMarker = BikeGatt.sessionAppliedMarker,
       int? counter,
+      int? assist,
     }) async {
       connection.auxiliaryCounter = counter;
       await start(
-        lockingBike(stockMode: stockMode),
+        lockingBike(stockMode: stockMode, assist: assist),
         bootWire: 7,
         clock: () => now,
         historyMarker: historyMarker,
@@ -560,6 +564,109 @@ void main() {
       now = now.add(const Duration(minutes: 20));
       await tick();
       expect(modeWrites(), everyElement(7));
+    });
+
+    /// The link drops and the bike comes back after a quick restart on
+    /// [bootWire]. The write of the lock waits on the gate, so the session
+    /// stays in `Synchronizing`.
+    Future<void> quickRestartGated({required int bootWire}) async {
+      connection
+        ..auxiliaryCounter = 1008
+        ..readFrames.addAll([
+          v1StateFrame(mode: bootWire),
+          v1HistoryFrame(marker: 0, mode: bootWire),
+        ])
+        ..configurationWriteGate = Completer<void>()
+        ..configurationWriteGateAfterStarts =
+            connection.configurationWriteStarts + 1
+        ..emitState(BikeConnectionState.disconnected);
+      await Future<void>.delayed(Duration.zero);
+      now = now.add(const Duration(seconds: 20));
+      await tick();
+    }
+
+    test('a quick restart writes no speed wire before ready', () async {
+      await startLocking(counter: 1000, assist: 2);
+      speed(26);
+      await tick();
+      expect(modeWrites().last, 4);
+      expect(controller.assertedWire, 4);
+
+      await quickRestartGated(bootWire: 4);
+      expect(session.state.value, isA<SessionSynchronizing>());
+      expect(session.streetLegalLocked.value, isTrue);
+      final before = modeWrites().length;
+
+      speed(12);
+      await tick();
+      expect(modeWrites().length, before);
+      expect(controller.assertedWire, 4);
+      expect(
+        log.has('speed', 'write of wire 1 skipped: the lock is on'),
+        isTrue,
+      );
+
+      connection.configurationWriteGate!.complete();
+      await tick();
+      expect(session.state.value, isA<SessionReady>());
+      expect(session.observed.value?.mode, 4);
+      expect(controller.selection.value, const NativeRideMode(4));
+      expect(modeWrites().sublist(before), everyElement(4));
+    });
+
+    test('speed during the reconnect writes no wire without the lock', () async {
+      await start(
+        chBike(
+          setOnConnect: const SetOnConnect(mode: CustomModeRef(seededChModeId)),
+        ),
+        bootWire: 7,
+      );
+      speed(26);
+      await tick();
+      expect(modeWrites().last, 4);
+
+      // The set-on-connect write waits, so the first ready is not reached.
+      connection
+        ..readFrames.add(v1StateFrame(mode: 7))
+        ..configurationWriteGate = Completer<void>()
+        ..configurationWriteGateAfterStarts =
+            connection.configurationWriteStarts + 1
+        ..emitState(BikeConnectionState.disconnected);
+      await tick();
+      expect(session.state.value, isNot(isA<SessionReady>()));
+      final before = modeWrites().length;
+
+      speed(12);
+      await tick();
+      expect(modeWrites().length, before);
+      expect(controller.assertedWire, 4);
+      expect(
+        log.has('speed', 'write of wire 1 skipped: the link is not settled'),
+        isTrue,
+      );
+
+      connection.configurationWriteGate!.complete();
+      await tick();
+      expect(session.state.value, isA<SessionReady>());
+      speed(30);
+      await tick();
+      speed(12);
+      await tick();
+      expect(modeWrites().last, 1);
+    });
+
+    test('a speed crossing during the lock writes no wire', () async {
+      await startLocking(historyMarker: BikeGatt.sessionLockedMarker);
+      expect(session.streetLegalLocked.value, isTrue);
+      final before = modeWrites().length;
+
+      speed(40);
+      await tick();
+      speed(10);
+      await tick();
+
+      expect(modeWrites().length, before);
+      expect(controller.assertedWire, 7);
     });
 
     test('a mode choice ends the lock and starts the timer', () async {

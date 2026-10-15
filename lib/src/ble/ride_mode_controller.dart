@@ -143,6 +143,18 @@ final class RideModeController {
     _ => false,
   };
 
+  /// Why the controller must not start a write now, or null. The controller
+  /// writes only on a settled link and while the lock is off.
+  String? get _writeBlockReason {
+    if (session.streetLegalLocked.peek()) {
+      return 'the lock is on';
+    }
+    if (!_linkSettled) {
+      return 'the link is not settled';
+    }
+    return null;
+  }
+
   /// Selects a mode. The state changes only when the bike accepts the write;
   /// on an error the previous selection comes back.
   Future<void> select(RideModeSelection next) async {
@@ -224,10 +236,16 @@ final class RideModeController {
         _assertedWire = observed;
       } else if (stillThere != mode) {
         _setSelection(CustomRideMode(stillThere), 'the custom mode changed');
-        _assertedWire = entryWireFor(stillThere, _region);
-        if (_ready) {
+        final wire = entryWireFor(stillThere, _region);
+        if (!_ready) {
+          _assertedWire = wire;
+        } else if (_writeBlockReason case final reason?) {
+          // The asserted wire stays: the bike does not run the new wire.
+          _log('mode', 'write of wire $wire skipped: $reason');
+        } else {
+          _assertedWire = wire;
           unawaited(
-            session.setMode(_assertedWire!).catchError((Object error) {
+            session.setMode(wire).catchError((Object error) {
               _log('mode', 'write of the changed custom mode failed: $error');
               return session.observed.peek()!;
             }),
@@ -498,6 +516,10 @@ final class RideModeController {
   }
 
   void _writeWire(int wire, {required int previous, required String reason}) {
+    if (_writeBlockReason case final blocked?) {
+      _log('speed', 'write of wire $wire skipped: $blocked');
+      return;
+    }
     _log('speed', '$reason wire $previous -> $wire');
     _assertedWire = wire;
     unawaited(
