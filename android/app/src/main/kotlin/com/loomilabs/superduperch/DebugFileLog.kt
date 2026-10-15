@@ -106,7 +106,72 @@ internal class EnabledCache(
     }
 }
 
-/** Appends lines to `<id>.native.log` and rotates to `<id>.native.1.log`. */
+/**
+ * The files of one bike in the debug log folder: `<id>.log`, `<id>.<k>.log`,
+ * `<id>.native.log` and `<id>.native.<k>.log`. A higher k is a newer file.
+ */
+internal object DebugLogFiles {
+    const val maxAgeMs = 30L * 24 * 60 * 60 * 1000
+    const val maxBytesPerBike = 300L * 1024 * 1024
+
+    data class Entry(val file: File, val native: Boolean, val rotation: Int)
+
+    fun list(directory: File, id: String): List<Entry> {
+        val pattern = Regex("^" + Regex.escape(id) + """(\.native)?(?:\.(\d+))?\.log$""")
+        val names = directory.list() ?: return emptyList()
+        return names.mapNotNull { name ->
+            val match = pattern.matchEntire(name) ?: return@mapNotNull null
+            val file = File(directory, name)
+            if (!file.isFile) return@mapNotNull null
+            Entry(
+                file,
+                native = match.groupValues[1].isNotEmpty(),
+                rotation = match.groupValues[2].toIntOrNull() ?: 0,
+            )
+        }
+    }
+
+    /** The highest rotation number of one kind plus 1 (1 when none exists). */
+    fun nextRotation(directory: File, id: String, native: Boolean): Int =
+        (list(directory, id).filter { it.native == native }.maxOfOrNull { it.rotation } ?: 0) + 1
+
+    /**
+     * Deletes the rotated files older than [maxAgeMs]. Then, while the files of
+     * the bike are above [maxBytes], it deletes the rotated file with the oldest
+     * modification time. A current file stays. A failed delete is ignored.
+     */
+    fun prune(
+        directory: File,
+        id: String,
+        now: Long,
+        maxAgeMs: Long = DebugLogFiles.maxAgeMs,
+        maxBytes: Long = maxBytesPerBike,
+    ) {
+        try {
+            val entries = list(directory, id)
+            var total = entries.sumOf { it.file.length() }
+            val rotated = entries.filter { it.rotation > 0 }.toMutableList()
+            fun remove(entry: Entry) {
+                val size = entry.file.length()
+                if (entry.file.delete()) {
+                    total -= size
+                    rotated.remove(entry)
+                }
+            }
+            for (entry in rotated.toList()) {
+                if (now - entry.file.lastModified() > maxAgeMs) remove(entry)
+            }
+            for (entry in rotated.sortedBy { it.file.lastModified() }) {
+                if (total <= maxBytes) break
+                remove(entry)
+            }
+        } catch (_: Exception) {
+            // A log failure must never break the sync.
+        }
+    }
+}
+
+/** Appends lines to `<id>.native.log` and rotates to `<id>.native.<k>.log`. */
 internal class DebugFileSink(
     private val directory: File,
     private val isEnabled: (String) -> Boolean,
@@ -114,6 +179,8 @@ internal class DebugFileSink(
     private val maxBytes: Long = 2L * 1024 * 1024,
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: ZoneId = ZoneId.systemDefault(),
+    private val maxAgeMs: Long = DebugLogFiles.maxAgeMs,
+    private val maxTotalBytes: Long = DebugLogFiles.maxBytesPerBike,
 ) {
     private val lock = Any()
 
@@ -129,9 +196,12 @@ internal class DebugFileSink(
                 directory.mkdirs()
                 val file = File(directory, "$id.native.log")
                 if (file.isFile && file.length() + line.length > maxBytes) {
-                    val rotated = File(directory, "$id.native.1.log")
-                    rotated.delete()
-                    file.renameTo(rotated)
+                    val next = DebugLogFiles.nextRotation(directory, id, native = true)
+                    if (file.renameTo(File(directory, "$id.native.$next.log"))) {
+                        file.appendText(line)
+                        DebugLogFiles.prune(directory, id, clock(), maxAgeMs, maxTotalBytes)
+                        return@synchronized
+                    }
                 }
                 file.appendText(line)
             } catch (_: Exception) {
