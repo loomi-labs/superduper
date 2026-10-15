@@ -3,7 +3,9 @@ import 'package:superduper/src/domain/ride_modes.dart';
 
 /// Chips for the modes a V1 bike offers. Custom modes first, then the
 /// region's native wires. A wire the bike reports that is not on offer is
-/// shown as one more chip, so the rider always sees what the bike rides.
+/// shown as one more chip, so the rider always sees what the bike rides. The
+/// chip stays hidden while the selected custom mode runs that wire. The chip
+/// cannot be tapped: the region does not offer the wire.
 final class RideModeSelector extends StatelessWidget {
   const new({
     required this.options,
@@ -25,12 +27,21 @@ final class RideModeSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final shown = [
-      ...options,
-      if (observedWire case final wire?
-          when !options.contains(NativeRideMode(wire)))
+    final extra = switch (observedWire) {
+      final wire?
+          when !options.contains(NativeRideMode(wire)) &&
+              !switch (selected) {
+                final CustomRideMode custom => assertsWire(
+                  custom,
+                  wire,
+                  region,
+                ),
+                _ => false,
+              } =>
         NativeRideMode(wire),
-    ];
+      _ => null,
+    };
+    final shown = [...options, ?extra];
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -50,7 +61,9 @@ final class RideModeSelector extends StatelessWidget {
               }),
               label: Text(option.label(region)),
               selected: option == selected,
-              onSelected: enabled ? (_) => onSelected(option) : null,
+              onSelected: enabled && option != extra
+                  ? (_) => onSelected(option)
+                  : null,
               selectedColor: scheme.primary,
               labelStyle: TextStyle(
                 fontWeight: FontWeight.w800,
