@@ -117,13 +117,137 @@ void main() {
       store.flush();
     }
     expect(File('${directory.path}/AA.1.log').existsSync(), isTrue);
+    expect(File('${directory.path}/AA.2.log').existsSync(), isTrue);
     final current = File('${directory.path}/AA.log');
     expect(current.lengthSync(), lessThan(600));
-    expect(directory.listSync().whereType<File>(), hasLength(2));
+    // Each rotation keeps the old file: the files number upward.
+    expect(directory.listSync().whereType<File>().length, greaterThan(2));
     store.dispose();
   });
 
-  test('merge orders the four files by time, stable', () {
+  test('an old .1.log stays and the next rotation makes .2.log', () {
+    File('${directory.path}/AA.1.log').writeAsStringSync('old\n');
+    File('${directory.path}/AA.log').writeAsStringSync('${'x' * 300}\n');
+    final store = build(maxBytes: 400)..setEnabled('AA', enabled: true);
+    store.forBike('AA').log('app', 'y' * 200);
+    store.flush();
+
+    expect(File('${directory.path}/AA.1.log').readAsStringSync(), 'old\n');
+    expect(
+      File('${directory.path}/AA.2.log').readAsStringSync(),
+      startsWith('xxx'),
+    );
+    store.dispose();
+  });
+
+  group('pruning', () {
+    final now = DateTime.utc(2026, 10, 8, 14);
+
+    File make(String name, {required int bytes, required Duration age}) {
+      final file = File('${directory.path}/$name')
+        ..writeAsStringSync('x' * bytes)
+        ..setLastModifiedSync(now.subtract(age));
+      return file;
+    }
+
+    bool exists(String name) => File('${directory.path}/$name').existsSync();
+
+    test('a rotated file older than 30 days is deleted', () {
+      make('AA.1.log', bytes: 10, age: const Duration(days: 31));
+      make('AA.native.1.log', bytes: 10, age: const Duration(days: 31));
+      make('AA.2.log', bytes: 10, age: const Duration(days: 29));
+      make('AA.log', bytes: 10, age: const Duration(days: 60));
+
+      pruneDebugLogFiles(directory, 'AA', now: now);
+
+      expect(exists('AA.1.log'), isFalse);
+      expect(exists('AA.native.1.log'), isFalse);
+      expect(exists('AA.2.log'), isTrue);
+      // A current file is never deleted by pruning.
+      expect(exists('AA.log'), isTrue);
+    });
+
+    test('above the size limit the oldest rotated file goes first', () {
+      make('AA.log', bytes: 100, age: const Duration(days: 1));
+      make('AA.3.log', bytes: 100, age: const Duration(days: 2));
+      make('AA.native.1.log', bytes: 100, age: const Duration(days: 5));
+      make('AA.1.log', bytes: 100, age: const Duration(days: 9));
+      make('AA.2.log', bytes: 100, age: const Duration(days: 7));
+      make('BB.1.log', bytes: 100, age: const Duration(days: 20));
+
+      pruneDebugLogFiles(directory, 'AA', now: now, maxBytes: 250);
+
+      expect(exists('AA.1.log'), isFalse);
+      expect(exists('AA.2.log'), isFalse);
+      expect(exists('AA.native.1.log'), isFalse);
+      expect(exists('AA.3.log'), isTrue);
+      expect(exists('AA.log'), isTrue);
+      expect(exists('BB.1.log'), isTrue);
+    });
+
+    test('a file that is gone before the delete counts as done', () {
+      make('AA.log', bytes: 100, age: const Duration(days: 1));
+      make('AA.1.log', bytes: 100, age: const Duration(days: 9));
+      make('AA.2.log', bytes: 100, age: const Duration(days: 7));
+
+      // Another process deletes the oldest file first: the delete throws.
+      pruneDebugLogFiles(
+        directory,
+        'AA',
+        now: now,
+        maxBytes: 250,
+        delete: (file) {
+          file.deleteSync();
+          if (file.path.endsWith('AA.1.log')) {
+            throw const FileSystemException('gone');
+          }
+        },
+      );
+
+      expect(exists('AA.1.log'), isFalse);
+      // 300 - 100 = 200 is below the limit: the next file stays.
+      expect(exists('AA.2.log'), isTrue);
+    });
+
+    test('the current files stay even above the limit', () {
+      make('AA.log', bytes: 300, age: const Duration(days: 1));
+      make('AA.native.log', bytes: 300, age: const Duration(days: 1));
+
+      pruneDebugLogFiles(directory, 'AA', now: now, maxBytes: 100);
+
+      expect(exists('AA.log'), isTrue);
+      expect(exists('AA.native.log'), isTrue);
+    });
+
+    test('initialize prunes the files of each bike', () async {
+      make('AA.1.log', bytes: 10, age: const Duration(days: 40));
+      make('BB.native.1.log', bytes: 10, age: const Duration(days: 40));
+      make('BB.1.log', bytes: 10, age: const Duration(days: 1));
+      final store = build(now: () => now);
+
+      await store.initialize();
+
+      expect(exists('AA.1.log'), isFalse);
+      expect(exists('BB.native.1.log'), isFalse);
+      expect(exists('BB.1.log'), isTrue);
+      store.dispose();
+    });
+
+    test('a rotation prunes the rotated files', () {
+      make('AA.1.log', bytes: 10, age: const Duration(days: 40));
+      File('${directory.path}/AA.log').writeAsStringSync('${'x' * 300}\n');
+      final store = build(maxBytes: 400, now: () => now)
+        ..setEnabled('AA', enabled: true);
+      store.forBike('AA').log('app', 'y' * 200);
+      store.flush();
+
+      expect(exists('AA.1.log'), isFalse);
+      expect(exists('AA.2.log'), isTrue);
+      store.dispose();
+    });
+  });
+
+  test('merge orders more than two files by time, stable', () async {
     final store = build();
     File('${directory.path}/AA.1.log')
         .writeAsStringSync('2026-10-08 10:00:00.000+00:00 D g1 app     a\n');
@@ -133,9 +257,15 @@ void main() {
     );
     File('${directory.path}/AA.native.log')
         .writeAsStringSync('2026-10-08 10:00:02.000+00:00 N --  native  b\n');
-    final merged = store.mergedLines('AA');
+    File('${directory.path}/AA.2.log')
+        .writeAsStringSync('2026-10-08 10:00:01.000+00:00 D g1 app     a2\n');
+    File('${directory.path}/AA.native.1.log')
+        .writeAsStringSync('2026-10-08 09:59:00.000+00:00 N --  native  z\n');
+    final merged = await store.mergedLines('AA').toList();
     expect(merged.map((l) => l.substring(l.length - 1)).toList(), [
+      'z',
       'a',
+      '2',
       'b',
       'c',
       'd',
@@ -143,13 +273,15 @@ void main() {
     store.dispose();
   });
 
-  test('clear deletes the four files', () {
+  test('clear deletes all files', () {
     final store = build();
     for (final name in [
       'AA.log',
       'AA.1.log',
+      'AA.2.log',
       'AA.native.log',
       'AA.native.1.log',
+      'AA.native.2.log',
     ]) {
       File('${directory.path}/$name').writeAsStringSync('x\n');
     }
@@ -172,6 +304,95 @@ void main() {
     expect(summary.first, DateTime.parse('2026-10-08 10:00:00.000+00:00'));
     expect(summary.last, DateTime.parse('2026-10-08 10:30:00.000+00:00'));
     expect(await store.summary('ZZ'), isNull);
+    store.dispose();
+  });
+
+  test('summary reads only the edge files of each kind', () async {
+    final store = build();
+    void write(String name, String time) =>
+        File('${directory.path}/$name')
+            .writeAsStringSync('2026-10-08 $time.000+00:00 D g1 app     x\n');
+    write('AA.1.log', '08:00:00');
+    // A middle file with odd times must not change the span.
+    write('AA.2.log', '03:00:00');
+    write('AA.3.log', '09:00:00');
+    write('AA.log', '10:00:00');
+    write('AA.native.1.log', '07:00:00');
+    write('AA.native.2.log', '23:00:00');
+    write('AA.native.log', '11:00:00');
+
+    final summary = (await store.summary('AA'))!;
+
+    expect(summary.first, DateTime.parse('2026-10-08 07:00:00.000+00:00'));
+    expect(summary.last, DateTime.parse('2026-10-08 11:00:00.000+00:00'));
+    store.dispose();
+  });
+
+  test(
+    'export merges two kinds with many files and one open file per kind',
+    () async {
+      final store = build();
+      final events = <String>[];
+      store.fileTrace = events.add;
+      String line(String source, int minute) =>
+          '2026-10-08 10:${minute.toString().padLeft(2, '0')}:00.000+00:00 '
+          '$source g1 app     m$minute\n';
+      // Dart lines at even minutes, native lines at odd minutes.
+      for (var k = 1; k <= 4; k++) {
+        File('${directory.path}/AA.$k.log')
+            .writeAsStringSync(line('D', k * 10) + line('D', k * 10 + 2));
+        File('${directory.path}/AA.native.$k.log')
+            .writeAsStringSync(line('N', k * 10 + 1) + line('N', k * 10 + 3));
+      }
+      File('${directory.path}/AA.log').writeAsStringSync(line('D', 50));
+      File('${directory.path}/AA.native.log').writeAsStringSync(line('N', 51));
+
+      final merged = await store.mergedLines('AA').toList();
+
+      final minutes = [for (final l in merged) int.parse(l.split(' m').last)];
+      expect(minutes, [...minutes]..sort());
+      expect(minutes, hasLength(18));
+      // A reader closes a file before the next file of its kind opens.
+      final open = <String>{};
+      for (final event in events) {
+        final name = event.split(' ').last;
+        final native = name.contains('native');
+        if (event.startsWith('open')) {
+          expect(
+            open.where((n) => n.contains('native') == native),
+            isEmpty,
+            reason: 'two files of one kind are open at $event',
+          );
+          open.add(name);
+        } else {
+          open.remove(name);
+        }
+      }
+      expect(open, isEmpty);
+      store.dispose();
+    },
+  );
+
+  test('summary covers all files', () async {
+    final store = build();
+    File('${directory.path}/AA.1.log')
+        .writeAsStringSync('2026-10-08 08:00:00.000+00:00 D g1 app     a\n');
+    File('${directory.path}/AA.2.log')
+        .writeAsStringSync('2026-10-08 09:00:00.000+00:00 D g1 app     b\n');
+    File('${directory.path}/AA.native.1.log')
+        .writeAsStringSync('2026-10-08 07:00:00.000+00:00 N --  native  c\n');
+    File('${directory.path}/AA.native.log')
+        .writeAsStringSync('2026-10-08 11:00:00.000+00:00 N --  native  d\n');
+    var total = 0;
+    for (final f in directory.listSync().whereType<File>()) {
+      total += f.lengthSync();
+    }
+
+    final summary = (await store.summary('AA'))!;
+
+    expect(summary.bytes, total);
+    expect(summary.first, DateTime.parse('2026-10-08 07:00:00.000+00:00'));
+    expect(summary.last, DateTime.parse('2026-10-08 11:00:00.000+00:00'));
     store.dispose();
   });
 

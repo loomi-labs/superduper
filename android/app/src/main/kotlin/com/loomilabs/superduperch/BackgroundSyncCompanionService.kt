@@ -75,6 +75,9 @@ class BackgroundSyncCompanionService : CompanionDeviceService() {
         Log.d(logTag, "CDM BLE appeared via $callback; requesting native sync")
         DebugFileLog.log(this, address, "native", "CDM BLE appeared ($callback): request native sync")
         NativeBackgroundSync.synchronize(this, address, "bleAppeared")
+        if (BackgroundSyncRuntime.notifyBikeAppeared(address)) {
+            DebugFileLog.log(this, address, "native", "CDM BLE appeared: posted to Dart")
+        }
     }
 
     private fun eventName(event: Int): String = when (event) {

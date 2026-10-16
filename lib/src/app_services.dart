@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:superduper/src/ble/active_bike_coordinator.dart';
@@ -63,6 +65,11 @@ final class AppServices {
           debugLogFor: resolvedDebugLogStore.forBike,
           onBikesChanged: resolvedDebugLogStore.updateBikes,
           onBikeForgotten: resolvedDebugLogStore.forget,
+          onLinkHeldChanged: ({required held}) => unawaited(
+            resolvedBackgroundSyncPlatform
+                .setLinkHeld(held)
+                .catchError((Object _) {}),
+          ),
           buildSession: (bike) => BikeSession(
             debugLog: resolvedDebugLogStore.forBike(bike.bike.deviceId),
             connection: resolvedTransport.openConnection(bike.bike.deviceId),
@@ -108,6 +115,10 @@ final class AppServices {
           platform: resolvedBackgroundSyncPlatform,
           debugLogFor: resolvedDebugLogStore.forBike,
         );
+    if (resolvedBackgroundSyncPlatform
+        case final SystemBackgroundSyncPlatformGateway system) {
+      system.onBikeAppeared = resolvedActiveBikeCoordinator.onBikeAppeared;
+    }
     return AppServices._(
       database: database,
       importer: resolvedImporter,

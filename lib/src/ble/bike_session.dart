@@ -135,6 +135,8 @@ final class BikeSession {
       Duration(seconds: 2),
       Duration(seconds: 5),
       Duration(seconds: 10),
+      Duration(seconds: 20),
+      Duration(seconds: 30),
     ],
     BikeProtocolDefinition? connectedProtocol,
     this._streetLegalOnQuickRestart = false,
@@ -267,6 +269,11 @@ final class BikeSession {
   Timer? _reconnectTimer;
   var _generation = 0;
   var _reconnectAttempt = 0;
+  // From this attempt on, a reconnect writes one summary line each 5 minutes
+  // and no line for each attempt.
+  static const _quietReconnectAfter = 10;
+  static const _reconnectSummaryInterval = Duration(minutes: 5);
+  DateTime? _lastReconnectSummaryAt;
   var _disposed = false;
   var _manualReconnectPaused = false;
   var _foregroundPaused = false;
@@ -358,7 +365,7 @@ final class BikeSession {
     _foregroundPaused = false;
     _disconnectRequested = false;
     _nextGeneration('connect');
-    _reconnectAttempt = 0;
+    _resetReconnectAttempts();
     _reconnectTimer?.cancel();
     await _startConnect();
   }
@@ -746,8 +753,14 @@ final class BikeSession {
           return;
         }
         _state.value = const SessionConnected();
+        // The session is ready inside the synchronization, and that resets the
+        // counter. Read it first.
+        final attempts = _reconnectAttempt;
         await _synchronizeNow(initialConnection: true);
-        _reconnectAttempt = 0;
+        if (attempts > _quietReconnectAfter) {
+          _log('link', 'reconnected after $attempts attempts');
+        }
+        _resetReconnectAttempts();
         if (readDiagnosticsOnConnect &&
             _isCurrent(generation) &&
             _hasObservedConnection) {
@@ -769,7 +782,9 @@ final class BikeSession {
           return;
         }
         final failure = _asFailure(error);
-        _log('link', 'connect failed: ${_describeFailure(failure)}');
+        if (!_reconnectIsQuiet) {
+          _log('link', 'connect failed: ${_describeFailure(failure)}');
+        }
         if (failure case BikeBluetoothUnavailable(canRetry: false)) {
           _clearPendingConfiguration();
           _state.value = SessionFailed(failure: failure, canRetry: false);
@@ -1398,7 +1413,7 @@ final class BikeSession {
     }
     _pollTimer?.cancel();
     _reconnectTimer?.cancel();
-    _reconnectAttempt = 0;
+    _resetReconnectAttempts();
     if (completedTarget != null) {
       _clearPendingIf(completedTarget);
     }
@@ -1559,6 +1574,30 @@ final class BikeSession {
     );
   }
 
+  void _resetReconnectAttempts() {
+    _reconnectAttempt = 0;
+    _lastReconnectSummaryAt = null;
+  }
+
+  bool get _reconnectIsQuiet => _reconnectAttempt > _quietReconnectAfter;
+
+  /// Connects at once when the session waits for a reconnect timer. The
+  /// attempt counter does not reset. Other states ignore the call.
+  void reconnectNow(String reason) {
+    final state = _state.peek();
+    if (_disposed ||
+        _manualReconnectPaused ||
+        _foregroundPaused ||
+        state is! SessionReconnecting ||
+        !(_reconnectTimer?.isActive ?? false)) {
+      _log('link', 'reconnect now ignored: state=${describeState(state)}');
+      return;
+    }
+    _log('link', 'reconnect now: $reason');
+    _reconnectTimer?.cancel();
+    unawaited(_startConnect());
+  }
+
   void _scheduleReconnect(BikeSessionFailure failure) {
     if (_disposed || _manualReconnectPaused || _foregroundPaused) {
       _log(
@@ -1589,15 +1628,32 @@ final class BikeSession {
       failure: failure,
     );
     final generation = _generation;
-    _log(
-      'link',
-      'reconnect attempt=$_reconnectAttempt delay=${delay.inMilliseconds}ms',
-    );
+    if (!_reconnectIsQuiet) {
+      _log(
+        'link',
+        'reconnect attempt=$_reconnectAttempt delay=${delay.inMilliseconds}ms',
+      );
+    } else {
+      final now = _clock();
+      final last = _lastReconnectSummaryAt;
+      if (last == null || now.difference(last) >= _reconnectSummaryInterval) {
+        _lastReconnectSummaryAt = now;
+        _log(
+          'link',
+          'reconnect continues: attempt=$_reconnectAttempt '
+              'delay=${delay.inMilliseconds}ms '
+              'last failure=${_describeFailure(failure)}',
+        );
+      }
+    }
+    final quiet = _reconnectIsQuiet;
     _reconnectTimer = Timer(delay, () {
       if (_isCurrent(generation) &&
           !_manualReconnectPaused &&
           !_foregroundPaused) {
-        _log('link', 'reconnect timer fired');
+        if (!quiet) {
+          _log('link', 'reconnect timer fired');
+        }
         unawaited(_startConnect());
       } else {
         _log(
@@ -1655,7 +1711,14 @@ final class BikeSession {
     String? previous;
     _state.subscribe((value) {
       final text = describeState(value);
-      if (previous != null && previous != text) {
+      final quietStep =
+          _reconnectIsQuiet &&
+              (previous?.startsWith('Reconnecting') ?? false) &&
+              text == 'Connecting' ||
+          _reconnectIsQuiet &&
+              previous == 'Connecting' &&
+              text.startsWith('Reconnecting');
+      if (previous != null && previous != text && !quietStep) {
         _log('link', '$previous -> $text');
       }
       previous = text;

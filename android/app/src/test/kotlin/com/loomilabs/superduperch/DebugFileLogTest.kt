@@ -60,8 +60,90 @@ class DebugFileLogTest {
         val sink = sink(maxBytes = 300)
         repeat(12) { sink.log("aa:bb", "native", "line $it padding padding padding") }
         assertTrue(File(directory, "AA_BB.native.1.log").isFile)
+        assertTrue(File(directory, "AA_BB.native.2.log").isFile)
         assertTrue(File(directory, "AA_BB.native.log").length() <= 300)
-        assertEquals(2, directory.listFiles()!!.size)
+        // Each rotation keeps the old file: the files number upward.
+        assertTrue(directory.listFiles()!!.size > 2)
+    }
+
+    @Test
+    fun anOldNativeOneStaysAndTheNextRotationMakesTwo() {
+        File(directory, "AA_BB.native.1.log").writeText("old\n")
+        File(directory, "AA_BB.native.log").writeText("x".repeat(250) + "\n")
+        sink(maxBytes = 300).log("aa:bb", "native", "y".repeat(100))
+        assertEquals("old\n", File(directory, "AA_BB.native.1.log").readText())
+        assertTrue(File(directory, "AA_BB.native.2.log").readText().startsWith("xxx"))
+    }
+
+    private fun make(name: String, bytes: Int, ageMs: Long): File =
+        File(directory, name).also {
+            it.writeText("x".repeat(bytes))
+            it.setLastModified(now - ageMs)
+        }
+
+    private val day = 24L * 60 * 60 * 1000
+
+    @Test
+    fun pruneDeletesRotatedFilesOlderThanThirtyDays() {
+        make("AA.1.log", 10, 31 * day)
+        make("AA.native.1.log", 10, 31 * day)
+        make("AA.2.log", 10, 29 * day)
+        make("AA.log", 10, 60 * day)
+        DebugLogFiles.prune(directory, "AA", now)
+        assertFalse(File(directory, "AA.1.log").exists())
+        assertFalse(File(directory, "AA.native.1.log").exists())
+        assertTrue(File(directory, "AA.2.log").exists())
+        assertTrue(File(directory, "AA.log").exists())
+    }
+
+    @Test
+    fun pruneDeletesTheOldestRotatedFileFirstAboveTheLimit() {
+        make("AA.log", 100, day)
+        make("AA.3.log", 100, 2 * day)
+        make("AA.native.1.log", 100, 5 * day)
+        make("AA.1.log", 100, 9 * day)
+        make("AA.2.log", 100, 7 * day)
+        make("BB.1.log", 100, 20 * day)
+        DebugLogFiles.prune(directory, "AA", now, maxBytes = 250)
+        assertFalse(File(directory, "AA.1.log").exists())
+        assertFalse(File(directory, "AA.2.log").exists())
+        assertFalse(File(directory, "AA.native.1.log").exists())
+        assertTrue(File(directory, "AA.3.log").exists())
+        assertTrue(File(directory, "AA.log").exists())
+        assertTrue(File(directory, "BB.1.log").exists())
+    }
+
+    @Test
+    fun pruneCountsAFileThatIsGoneBeforeTheDelete() {
+        make("AA.log", 100, day)
+        make("AA.1.log", 100, 9 * day)
+        make("AA.2.log", 100, 7 * day)
+        // Another process deletes the oldest file first, so the delete fails.
+        DebugLogFiles.prune(directory, "AA", now, maxBytes = 250) { file ->
+            file.delete()
+            file.name != "AA.1.log"
+        }
+        assertFalse(File(directory, "AA.1.log").exists())
+        // 300 - 100 = 200 is below the limit: the next file stays.
+        assertTrue(File(directory, "AA.2.log").exists())
+    }
+
+    @Test
+    fun pruneNeverDeletesACurrentFile() {
+        make("AA.log", 300, day)
+        make("AA.native.log", 300, day)
+        DebugLogFiles.prune(directory, "AA", now, maxBytes = 100)
+        assertTrue(File(directory, "AA.log").exists())
+        assertTrue(File(directory, "AA.native.log").exists())
+    }
+
+    @Test
+    fun aNativeRotationPrunesTheFilesOfTheBike() {
+        make("AA_BB.1.log", 10, 40 * day)
+        File(directory, "AA_BB.native.log").writeText("x".repeat(250) + "\n")
+        sink(maxBytes = 300).log("aa:bb", "native", "y".repeat(100))
+        assertFalse(File(directory, "AA_BB.1.log").exists())
+        assertTrue(File(directory, "AA_BB.native.1.log").exists())
     }
 
     @Test

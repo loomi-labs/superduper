@@ -25,6 +25,7 @@ class MainActivity : FlutterActivity() {
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var appearedSink: ((String) -> Unit)? = null
     private var pendingAssociation: PendingAssociation? = null
     private var cancelledAssociationDeviceId: String? = null
     private val associationDiscoveryTimeout = Runnable {
@@ -39,10 +40,18 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         BackgroundCompanionManager.setConnectionPaused(applicationContext, false)
-        MethodChannel(
+        val channel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             backgroundSyncChannel,
-        ).setMethodCallHandler { call, result ->
+        )
+        val sink: (String) -> Unit = { deviceId ->
+            mainHandler.post {
+                channel.invokeMethod("bikeAppeared", mapOf("deviceId" to deviceId))
+            }
+        }
+        appearedSink = sink
+        BackgroundSyncRuntime.bikeAppearedSink = sink
+        channel.setMethodCallHandler { call, result ->
             try {
                 when (call.method) {
                     "configure" -> {
@@ -59,6 +68,12 @@ class MainActivity : FlutterActivity() {
                     "cancel" -> {
                         cancelPendingAssociation("Bike association was cancelled")
                         BackgroundCompanionManager.cancel(applicationContext)
+                        result.success(null)
+                    }
+                    "setLinkHeld" -> {
+                        val held = call.argument<Boolean>("held")
+                            ?: throw IllegalArgumentException("held is required")
+                        BackgroundSyncRuntime.dartHoldsLink = held
                         result.success(null)
                     }
                     "setConnectionPaused" -> {
@@ -79,6 +94,12 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        // A new activity may have set its own sink already. Clear only ours.
+        if (BackgroundSyncRuntime.bikeAppearedSink === appearedSink) {
+            BackgroundSyncRuntime.bikeAppearedSink = null
+            BackgroundSyncRuntime.dartHoldsLink = false
+        }
+        appearedSink = null
         cancelPendingAssociation("Bike association was interrupted")
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,

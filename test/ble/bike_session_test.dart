@@ -675,6 +675,202 @@ void main() {
     expect(session.observed.value?.mode, 3);
   });
 
+  group('long reconnect', () {
+    /// A session with the default delays. The bike is off after the first
+    /// connection, so each attempt fails. Returns the states it passed.
+    List<BikeSessionState> dropAndFail(FakeAsync async, RecordingDebugLog log) {
+      connection.readFrames.add([0, 0, 0, 0, 0, 0]);
+      session = BikeSession(
+        connection: connection,
+        setOnConnect: const BikeControlPatch(),
+        protocol: BikeProtocolVersion.v1,
+        readDiagnosticsOnConnect: false,
+        clock: () => async.getClock(DateTime(2026)).now(),
+        debugLog: log,
+      );
+      unawaited(session.connect());
+      async.flushMicrotasks();
+      final states = <BikeSessionState>[];
+      session.state.subscribe(states.add);
+      connection
+        ..connectError = StateError('bike is off')
+        ..emitState(BikeConnectionState.disconnected);
+      async.flushMicrotasks();
+      return states;
+    }
+
+    void elapse(FakeAsync async, Duration total) {
+      for (var i = 0; i < total.inSeconds; i++) {
+        async.elapse(const Duration(seconds: 1));
+      }
+    }
+
+    test('the default delays are 2, 5, 10, 20 and 30 seconds', () {
+      fakeAsync((async) {
+        final states = dropAndFail(async, RecordingDebugLog());
+
+        elapse(async, const Duration(seconds: 160));
+
+        final delays = [
+          for (final state in states)
+            if (state is SessionReconnecting) state.retryAfter.inSeconds,
+        ];
+        expect(delays.take(8), [2, 5, 10, 20, 30, 30, 30, 30]);
+        unawaited(session.dispose());
+        async.flushMicrotasks();
+      });
+    });
+
+    test('from attempt 11 the log has one summary each 5 minutes', () {
+      fakeAsync((async) {
+        final log = RecordingDebugLog();
+        dropAndFail(async, log);
+
+        elapse(async, const Duration(minutes: 22));
+
+        List<String> link(Pattern pattern) => [
+          for (final message in log.messages('link'))
+            if (message.contains(pattern)) message,
+        ];
+        expect(link('reconnect attempt='), hasLength(10));
+        expect(link('reconnect timer fired'), hasLength(10));
+        expect(link('connect failed'), hasLength(10));
+        expect(link(RegExp(r'Reconnecting.* -> Connecting$')), hasLength(10));
+        final summaries = link('reconnect continues: ');
+        expect(summaries.length, inInclusiveRange(4, 5));
+        expect(summaries.first, contains('attempt=11 delay=30000ms'));
+        expect(summaries.first, contains('last failure='));
+        unawaited(session.dispose());
+        async.flushMicrotasks();
+      });
+    });
+
+    test('a connect after attempt 10 logs the number of attempts', () {
+      fakeAsync((async) {
+        final log = RecordingDebugLog();
+        dropAndFail(async, log);
+        elapse(async, const Duration(minutes: 6));
+        connection
+          ..connectError = null
+          ..readFrames.add([0, 0, 0, 0, 0, 0]);
+
+        elapse(async, const Duration(seconds: 31));
+
+        expect(session.state.value, isA<SessionReady>());
+        expect(
+          log.has('link', RegExp(r'reconnected after \d+ attempts')),
+          isTrue,
+        );
+        unawaited(session.dispose());
+        async.flushMicrotasks();
+      });
+    });
+  });
+
+  group('reconnectNow', () {
+    Future<RecordingDebugLog> dropped({
+      Duration delay = const Duration(seconds: 30),
+    }) async {
+      final log = RecordingDebugLog();
+      connection.readFrames.addAll([
+        [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0],
+      ]);
+      session = createSession(
+        readDiagnosticsOnConnect: false,
+        reconnectDelays: [delay],
+        debugLog: log,
+      );
+      await session.connect();
+      connection.emitState(BikeConnectionState.disconnected);
+      await _waitUntil(() => session.state.value is SessionReconnecting);
+      return log;
+    }
+
+    test('connects at once while a reconnect timer runs', () async {
+      final log = await dropped();
+      expect(connection.connectCalls, 1);
+
+      session.reconnectNow('test');
+
+      await _waitUntil(() => session.state.value is SessionReady);
+      expect(connection.connectCalls, 2);
+      expect(log.has('link', 'reconnect now: test'), isTrue);
+    });
+
+    test('keeps the attempt counter', () async {
+      await dropped();
+      connection.connectError = StateError('bike is off');
+
+      session.reconnectNow('test');
+
+      await _waitUntil(
+        () =>
+            connection.connectCalls == 2 &&
+            session.state.value is SessionReconnecting &&
+            (session.state.value as SessionReconnecting).attempt == 2,
+      );
+    });
+
+    test('does nothing after the foreground pause', () async {
+      final log = await dropped();
+
+      await session.pauseForBackground();
+      session.reconnectNow('paused');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(connection.connectCalls, 1);
+      expect(log.has('link', 'reconnect now ignored'), isTrue);
+    });
+
+    test('does nothing after the manual pause', () async {
+      final log = await dropped();
+
+      await session.disconnect();
+      session.reconnectNow('manual');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(connection.connectCalls, 1);
+      expect(log.has('link', 'reconnect now ignored'), isTrue);
+    });
+
+    test('does not start a second connect while one is in flight', () async {
+      final log = await dropped(delay: const Duration(milliseconds: 10));
+      connection.connectGate = Completer<void>();
+      await _waitUntil(() => connection.connectCalls == 2);
+
+      session.reconnectNow('in flight');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(connection.connectCalls, 2);
+      expect(log.has('link', 'reconnect now ignored'), isTrue);
+      connection.connectGate!.complete();
+    });
+
+    test('does nothing in the other states', () async {
+      final log = RecordingDebugLog();
+      connection.readFrames.add([0, 0, 0, 0, 0, 0]);
+      session = createSession(
+        readDiagnosticsOnConnect: false,
+        reconnectDelays: const [Duration(seconds: 30)],
+        debugLog: log,
+      );
+      await session.connect();
+
+      session.reconnectNow('ready');
+      await session.disconnect();
+      session.reconnectNow('paused');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(connection.connectCalls, 1);
+      expect(log.has('link', 'reconnect now ignored: state=Ready'), isTrue);
+      expect(
+        log.has('link', 'reconnect now ignored: state=Disconnected'),
+        isTrue,
+      );
+    });
+  });
+
   test(
     'reconnect reads state and an acknowledged control does not reread',
     () async {

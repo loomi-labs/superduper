@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -36,27 +37,40 @@ void main() {
     directory.deleteSync(recursive: true);
   });
 
+  /// The summary reads files with real I/O. Wait for it, then redraw.
+  Future<void> settleIo(WidgetTester tester) async {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 300)),
+    );
+    await tester.pump();
+  }
+
   Future<void> pump(
     WidgetTester tester, {
     SavedBike? saved,
     Future<void> Function(bool)? onToggle,
     Future<void> Function(Rect?)? shareLog,
+    Future<DebugLogSummary?> Function()? loadSummary,
   }) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SingleChildScrollView(
-            child: DebugLogSection(
-              saved: saved ?? bike(),
-              store: store,
-              onToggle: onToggle ?? (_) async {},
-              shareLog: shareLog ?? (_) async {},
+    // The widget starts in the real zone, so its file reads can finish.
+    await tester.runAsync(
+      () => tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: DebugLogSection(
+                saved: saved ?? bike(),
+                store: store,
+                onToggle: onToggle ?? (_) async {},
+                shareLog: shareLog ?? (_) async {},
+                loadSummary: loadSummary,
+              ),
             ),
           ),
         ),
       ),
     );
-    await tester.pump();
+    await settleIo(tester);
   }
 
   void writeLog() {
@@ -117,9 +131,39 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Clear'));
     await tester.pumpAndSettle();
+    await settleIo(tester);
 
     expect(File('${directory.path}/AA_BB.log').existsSync(), isFalse);
     expect(find.text('No log yet.'), findsOneWidget);
+  });
+
+  testWidgets('an event during a refresh starts one more refresh', (
+    tester,
+  ) async {
+    final pending = <Completer<DebugLogSummary?>>[];
+    Future<DebugLogSummary?> load() {
+      final completer = Completer<DebugLogSummary?>();
+      pending.add(completer);
+      return completer.future;
+    }
+
+    await pump(tester, loadSummary: load);
+    expect(pending, hasLength(1));
+
+    // A write arrives while the first refresh runs.
+    store
+      ..setEnabled('aa:bb', enabled: true)
+      ..flush();
+    await settleIo(tester);
+    expect(pending, hasLength(1));
+
+    pending.first.complete(const DebugLogSummary(bytes: 10));
+    await settleIo(tester);
+    expect(pending, hasLength(2));
+
+    pending.last.complete(const DebugLogSummary(bytes: 2048));
+    await settleIo(tester);
+    expect(find.textContaining('Log size: 2.0 KB'), findsOneWidget);
   });
 
   testWidgets('the summary follows new lines', (tester) async {
@@ -129,8 +173,7 @@ void main() {
     store
       ..setEnabled('aa:bb', enabled: true)
       ..flush();
-    await tester.pump();
-    await tester.pump();
+    await settleIo(tester);
 
     expect(find.textContaining('Log size:'), findsOneWidget);
   });

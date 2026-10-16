@@ -94,9 +94,9 @@ internal object NativeBackgroundSync {
             record(context, "skippedConnectionPaused", null)
             return
         }
-        if (BackgroundSyncRuntime.isActivityForeground) {
+        BackgroundSyncRuntime.standDownOutcome()?.let { outcome ->
             preferences.edit().remove(BackgroundCompanionManager.pendingSyncKey).apply()
-            record(context, "skippedForeground", null)
+            record(context, outcome, null)
             return
         }
         if (loading || active != null) {
@@ -134,8 +134,8 @@ internal object NativeBackgroundSync {
     ) {
         if (loadGeneration != generation) return
         loading = false
-        if (BackgroundSyncRuntime.isActivityForeground) {
-            record(context, "skippedForeground", null)
+        BackgroundSyncRuntime.standDownOutcome()?.let { outcome ->
+            record(context, outcome, null)
             return
         }
         if (BackgroundCompanionManager.preferences(context).getBoolean(
