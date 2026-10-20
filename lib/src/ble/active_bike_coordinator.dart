@@ -102,7 +102,10 @@ final class ActiveBikeCoordinator {
     this.onBikesChanged,
     this.onBikeForgotten,
     this.onLinkHeldChanged,
-  }) : _rideModeBuilder =
+    bool startsHeadless = false,
+  }) : _headless = startsHeadless,
+       _foreground = !startsHeadless,
+       _rideModeBuilder =
            rideModeBuilder ??
            ((session, bike) => RideModeController(
              session: session,
@@ -167,10 +170,18 @@ final class ActiveBikeCoordinator {
   var _started = false;
   var _disposed = false;
   ActiveBikeDiscoveryPause? _discoveryPause;
-  var _foreground = true;
+  bool _foreground;
+
+  /// True from a start without a screen until the first `resumed`. The
+  /// coordinator then builds the session in the background and never asks for
+  /// the Bluetooth permission.
+  bool _headless;
+  var _suppressHoldPause = false;
   var _readyRecorded = false;
 
   bool get _discoveryPaused => _discoveryPause != null;
+
+  bool get _mayBuildSession => _foreground || _headless;
 
   ReadonlySignal<ActiveBikeState> get state => _state.readonly();
   ReadonlySignal<List<SavedBike>> get bikes => _bikes.readonly();
@@ -377,12 +388,16 @@ final class ActiveBikeCoordinator {
         _discoveryPause = null;
       }
     }
-    if (_foreground) {
+    if (_mayBuildSession) {
       await _reconcile(force: true);
     }
   }
 
   Future<void> setForeground(bool foreground) async {
+    if (foreground && _headless) {
+      _headless = false;
+      _log('headless start ends: the app is in the foreground');
+    }
     final changed = _foreground != foreground;
     _foreground = foreground;
     // The app reports hidden, paused and detached one after the other. Only a
@@ -445,7 +460,7 @@ final class ActiveBikeCoordinator {
     );
     // Without the hold Android stops the process at an unknown time. An
     // orderly pause matches the behaviour without a dynamic mode.
-    if (!held && !_foreground && !_discoveryPaused) {
+    if (!held && !_foreground && !_discoveryPaused && !_suppressHoldPause) {
       _log('hold ended in the background: pause the session', 'hold');
       unawaited(_session?.pauseForBackground());
     }
@@ -553,7 +568,7 @@ final class ActiveBikeCoordinator {
     bool requestPermission = true,
   }) async {
     final inputs = _inputs;
-    if (_disposed || !inputs.isReady || _discoveryPaused || !_foreground) {
+    if (_disposed || !inputs.isReady || _discoveryPaused || !_mayBuildSession) {
       return;
     }
     try {
@@ -605,18 +620,23 @@ final class ActiveBikeCoordinator {
       await _clearSession();
       if (_disposed ||
           _discoveryPaused ||
-          !_foreground ||
+          !_mayBuildSession ||
           generation != _switchGeneration) {
         return;
       }
-      final permission = await _ensurePermission(request: requestPermission);
+      final permission = await _ensurePermission(
+        request: requestPermission && !_headless,
+      );
       if (_disposed ||
           _discoveryPaused ||
-          !_foreground ||
+          !_mayBuildSession ||
           generation != _switchGeneration) {
         return;
       }
       if (permission != BluetoothPermissionState.granted) {
+        if (_headless) {
+          _log('headless start: no permission');
+        }
         _state.value = ActiveBikePermissionRequired(permission: permission);
         return;
       }
@@ -634,14 +654,17 @@ final class ActiveBikeCoordinator {
       }
       if (_disposed ||
           _discoveryPaused ||
-          !_foreground ||
+          !_mayBuildSession ||
           generation != _switchGeneration) {
         return;
+      }
+      if (_headless) {
+        _log('headless start: build the session in the background');
       }
       final next = buildSession(preparedBike);
       if (_disposed ||
           _discoveryPaused ||
-          !_foreground ||
+          !_mayBuildSession ||
           generation != _switchGeneration) {
         debugLogFor(preparedBike.bike.deviceId).log(
           'app',
@@ -669,9 +692,13 @@ final class ActiveBikeCoordinator {
           speedLimit: rideMode.holdsSpeedLimit.value,
         ),
       );
+      // The first call of the subscription runs before the connect. A headless
+      // start applies the background rule after the connect call.
+      _suppressHoldPause = true;
       final stopHold = hold.subscribe(
         (value) => _onHoldChanged(value.held, speedLimit: value.speedLimit),
       );
+      _suppressHoldPause = false;
       _holdCleanup = () {
         stopHold();
         hold.dispose();
@@ -681,6 +708,12 @@ final class ActiveBikeCoordinator {
           _publishSessionState(sessionState);
         }
       });
+      if (_headless && !rideMode.needsBackgroundHold.peek()) {
+        // No hold: the session pauses at once and connects at the first
+        // foreground. A connect now would only race with the pause.
+        await _applyForeground(false, log: true);
+        return;
+      }
       unawaited(
         next.connect().catchError((Object error) {
           _log('connect failed: $error');
@@ -689,9 +722,12 @@ final class ActiveBikeCoordinator {
           }
         }),
       );
+      if (_headless) {
+        await _applyForeground(false, log: true);
+      }
     } on Object catch (error) {
       _log('reconcile failed: $error');
-      if (!_disposed && !_discoveryPaused && _foreground) {
+      if (!_disposed && !_discoveryPaused && _mayBuildSession) {
         _state.value = ActiveBikeCoordinatorFailure(error);
       }
     }
