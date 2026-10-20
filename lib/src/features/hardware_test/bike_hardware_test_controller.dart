@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:signals/signals.dart';
 import 'package:superduper/src/ble/active_bike_coordinator.dart';
 import 'package:superduper/src/ble/bike_protocol.dart';
@@ -989,9 +990,7 @@ final class BikeHardwareTestController {
       ),
       SessionReconnecting(:final retryAfter, :final waitsForBike) => (
         'Turn the bike ON',
-        waitsForBike
-            ? 'No connection yet. Connects when the bike is on.'
-            : 'No connection yet. Trying again in ${retryAfter.inSeconds} seconds.',
+        reconnectDetail(waitsForBike: waitsForBike, retryAfter: retryAfter),
       ),
       _ => (_state.peek().title, _state.peek().detail),
     };
@@ -1325,3 +1324,12 @@ final class _DiagnosticBikeConnection implements BikeConnection {
 final class _BikeHardwareTestCancelled implements Exception {
   const new();
 }
+
+/// The hardware test text for a session that reconnects.
+@visibleForTesting
+String reconnectDetail({
+  required bool waitsForBike,
+  required Duration retryAfter,
+}) => waitsForBike
+    ? 'No connection yet. Connects when the bike is on.'
+    : 'No connection yet. Trying again in ${retryAfter.inSeconds} seconds.';

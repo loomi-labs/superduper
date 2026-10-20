@@ -882,6 +882,140 @@ void main() {
         });
       });
 
+      test('a failed background request is logged and the re-arm runs', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          connection.backgroundConnectError = StateError('no scanner');
+          waiting(async, log);
+
+          elapse(async, const Duration(minutes: 5, seconds: 30));
+
+          expect(connection.backgroundConnectCalls, 2);
+          expect(linkLines(log, 'background connect failed'), hasLength(2));
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('a dispose during the wait ends it', () {
+        fakeAsync((async) {
+          waiting(async, RecordingDebugLog());
+          final disconnects = connection.disconnectCalls;
+
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+          elapse(async, const Duration(minutes: 10));
+
+          expect(connection.disconnectCalls, greaterThan(disconnects));
+          expect(connection.backgroundConnectCalls, 1);
+        });
+      });
+
+      test('the background lines come after attempt 11 too', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          waiting(async, log);
+
+          elapse(async, const Duration(minutes: 40));
+
+          expect(
+            linkLines(
+              log,
+              RegExp('background connect re-armed: attempt=1[2-9]'),
+            ),
+            isNotEmpty,
+          );
+          expect(linkLines(log, 'background connect re-armed'), hasLength(8));
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('a failed connect flow on a live platform link ends the link '
+          'first', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          waiting(async, log);
+          final lossesBefore = linkLines(log, 'unexpected loss').length;
+          final meterBefore = log.messages('meter').length;
+          final disconnects = connection.disconnectCalls;
+          connection
+            ..connectError = null
+            ..discoveryError = StateError('no services')
+            ..readFrames.add([0, 0, 0, 0, 0, 0])
+            ..emitState(BikeConnectionState.connected);
+
+          elapse(async, const Duration(seconds: 5));
+
+          expect(session.state.value, isA<SessionReconnecting>());
+          expect(
+            (session.state.value as SessionReconnecting).waitsForBike,
+            isTrue,
+          );
+          expect(connection.disconnectCalls, disconnects + 1);
+          expect(connection.backgroundConnectCalls, 2);
+          expect(linkLines(log, 'unexpected loss'), hasLength(lossesBefore));
+          expect(log.messages('meter'), hasLength(meterBefore));
+          elapse(async, const Duration(minutes: 5, seconds: 5));
+          expect(connection.backgroundConnectCalls, 3);
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('the link of a background connect ends the platform request at the '
+          'next loss', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          waiting(async, log);
+          connection
+            ..connectError = null
+            ..readFrames.add([0, 0, 0, 0, 0, 0])
+            ..emitState(BikeConnectionState.connected);
+          elapse(async, const Duration(seconds: 5));
+          expect(session.state.value, isA<SessionReady>());
+          final disconnects = connection.disconnectCalls;
+          final directConnects = connection.connectCalls;
+
+          connection.emitState(BikeConnectionState.disconnected);
+          async.flushMicrotasks();
+
+          expect(connection.disconnectCalls, disconnects + 1);
+          expect(connection.connectCalls, directConnects);
+          expect(
+            log.has('link', 'background connect ended: link lost'),
+            isTrue,
+          );
+          elapse(async, const Duration(seconds: 3));
+          expect(connection.connectCalls, directConnects + 1);
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('a request that returns after a pause cancels the platform '
+          'request', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          connection.backgroundConnectGate = Completer<void>();
+          waiting(async, log);
+
+          unawaited(session.pauseForBackground());
+          async.flushMicrotasks();
+          final disconnects = connection.disconnectCalls;
+          connection.backgroundConnectGate!.complete();
+          async.flushMicrotasks();
+
+          expect(connection.disconnectCalls, disconnects + 1);
+          expect(
+            log.has('link', 'background connect cancelled: the wait ended'),
+            isTrue,
+          );
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
       test('a manual disconnect during the wait ends it', () {
         fakeAsync((async) {
           waiting(async, RecordingDebugLog());

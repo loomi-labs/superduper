@@ -4,7 +4,6 @@ import android.content.Context
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.embedding.engine.dart.DartExecutor
-import io.flutter.plugins.GeneratedPluginRegistrant
 
 /**
  * The main Flutter engine. It lives in the application, so the Dart session
@@ -21,7 +20,6 @@ internal object MainEngine {
         FlutterEngineCache.getInstance().get(CACHE_ID)?.let { return it }
         val applicationContext = context.applicationContext
         val engine = FlutterEngine(applicationContext)
-        GeneratedPluginRegistrant.registerWith(engine)
         channel = BackgroundSyncChannel(applicationContext, engine)
         engine.dartExecutor.executeDartEntrypoint(
             DartExecutor.DartEntrypoint.createDefault(),
@@ -44,10 +42,8 @@ internal object MainEngine {
         ensure(context, headless = true)
     }
 
-    /** Writes a `native` line to the log of the stored bike, when its log is on. */
+    /** Writes a `native` line to the log of each bike whose log is on. */
     fun logNative(context: Context, message: String) {
-        val deviceId = BackgroundCompanionManager.preferences(context)
-            .getString(BackgroundCompanionManager.deviceIdKey, null) ?: return
-        DebugFileLog.log(context, deviceId, "native", message)
+        DebugFileLog.logToEnabledBikes(context, "native", message)
     }
 }

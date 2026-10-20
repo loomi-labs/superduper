@@ -189,7 +189,10 @@ void main() {
 
       await _waitUntil(() => hold.calls.contains(true));
 
+      await Future<void>.delayed(Duration.zero);
+
       expect(hold.held, isTrue);
+      expect(hold.calls.where((held) => held), hasLength(1));
       expect(linkHeld, contains(true));
       expect(session.state.value, isNot(isA<SessionDisconnected>()));
     });
@@ -212,6 +215,20 @@ void main() {
       expect(hold.calls, isNot(contains(true)));
       expect(linkHeld, [false]);
       expect(log.has('hold', 'hold changed: held=false'), isTrue);
+    });
+
+    test('the first foreground requests the missing permission once', () async {
+      permissions.state = BluetoothPermissionState.denied;
+      await startHeadless();
+      await _waitFor(
+        coordinator.state,
+        (state) => state is ActiveBikePermissionRequired,
+      );
+      expect(permissions.requests, 0);
+
+      await coordinator.setForeground(true);
+
+      expect(permissions.requests, 1);
     });
 
     test('the first foreground keeps the same session', () async {

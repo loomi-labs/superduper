@@ -44,8 +44,98 @@ final class _HoldTaskHandler extends TaskHandler {
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
 }
 
+/// The calls of the foreground task plugin that the hold uses. A test gives
+/// its own implementation.
+abstract interface class ForegroundServiceApi {
+  void init();
+  Future<NotificationPermission> checkNotificationPermission();
+  Future<NotificationPermission> requestNotificationPermission();
+  Future<bool> get isIgnoringBatteryOptimizations;
+  Future<bool> requestIgnoreBatteryOptimization();
+  Future<bool> get isRunningService;
+  Future<void> updateService({
+    required String notificationTitle,
+    required String notificationText,
+  });
+  Future<ServiceRequestResult> startService({
+    required String notificationTitle,
+    required String notificationText,
+  });
+  Future<void> stopService();
+}
+
+final class _PluginForegroundServiceApi implements ForegroundServiceApi {
+  const new();
+
+  @override
+  void init() {
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'notification_channel_id',
+        channelName: 'Background service',
+        onlyAlertOnce: true,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: false,
+      ),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        eventAction: ForegroundTaskEventAction.nothing(),
+      ),
+    );
+  }
+
+  @override
+  Future<NotificationPermission> checkNotificationPermission() =>
+      FlutterForegroundTask.checkNotificationPermission();
+
+  @override
+  Future<NotificationPermission> requestNotificationPermission() =>
+      FlutterForegroundTask.requestNotificationPermission();
+
+  @override
+  Future<bool> get isIgnoringBatteryOptimizations =>
+      FlutterForegroundTask.isIgnoringBatteryOptimizations;
+
+  @override
+  Future<bool> requestIgnoreBatteryOptimization() =>
+      FlutterForegroundTask.requestIgnoreBatteryOptimization();
+
+  @override
+  Future<bool> get isRunningService => FlutterForegroundTask.isRunningService;
+
+  @override
+  Future<void> updateService({
+    required String notificationTitle,
+    required String notificationText,
+  }) async {
+    await FlutterForegroundTask.updateService(
+      notificationTitle: notificationTitle,
+      notificationText: notificationText,
+    );
+  }
+
+  @override
+  Future<ServiceRequestResult> startService({
+    required String notificationTitle,
+    required String notificationText,
+  }) => FlutterForegroundTask.startService(
+    serviceTypes: [ForegroundServiceTypes.connectedDevice],
+    serviceId: AndroidForegroundServiceHold.serviceId,
+    notificationTitle: notificationTitle,
+    notificationText: notificationText,
+    callback: backgroundHoldCallback,
+  );
+
+  @override
+  Future<void> stopService() async {
+    await FlutterForegroundTask.stopService();
+  }
+}
+
 final class AndroidForegroundServiceHold implements BackgroundHoldGateway {
-  new();
+  new([this._api = const _PluginForegroundServiceApi()]);
+
+  final ForegroundServiceApi _api;
 
   static const serviceId = 256;
   static const speedLimitTitle = 'Superduper CH is holding your speed limit';
@@ -79,8 +169,8 @@ final class AndroidForegroundServiceHold implements BackgroundHoldGateway {
       if (speedLimit != _speedLimit) {
         _speedLimit = speedLimit;
         debugLog.log('hold', 'update text: speedLimit=$speedLimit');
-        if (await FlutterForegroundTask.isRunningService) {
-          await FlutterForegroundTask.updateService(
+        if (await _api.isRunningService) {
+          await _api.updateService(
             notificationTitle: _title(speedLimit),
             notificationText: _text,
           );
@@ -104,48 +194,62 @@ final class AndroidForegroundServiceHold implements BackgroundHoldGateway {
         await _start(speedLimit, debugLog);
         debugLog.log('hold', 'service started');
       } on Object catch (error) {
-        // A later call starts the service again.
         debugLog.log('hold', 'service start failed: $error');
-        _held = false;
+        // A service that runs after the failed start needs a stop later. Else
+        // a later call starts the service again.
+        _held = await _serviceRuns();
         rethrow;
       }
-    } else if (await FlutterForegroundTask.isRunningService) {
-      await FlutterForegroundTask.stopService();
+    } else if (await _api.isRunningService) {
+      await _api.stopService();
       debugLog.log('hold', 'service stopped');
     } else {
       debugLog.log('hold', 'stop requested, but no service runs');
     }
   }
 
+  Future<bool> _serviceRuns() async {
+    try {
+      return await _api.isRunningService;
+    } on Object {
+      return false;
+    }
+  }
+
+  /// The permission steps never stop the start. Without an activity the
+  /// plugin throws, and the app asks for nothing.
   Future<void> _start(bool speedLimit, DebugLog debugLog) async {
-    final permission =
-        await FlutterForegroundTask.checkNotificationPermission();
-    debugLog.log('hold', 'notification permission: ${permission.name}');
-    if (permission != NotificationPermission.granted) {
-      final asked = await FlutterForegroundTask.requestNotificationPermission();
-      debugLog.log('hold', 'notification permission asked: ${asked.name}');
+    try {
+      final permission = await _api.checkNotificationPermission();
+      debugLog.log('hold', 'notification permission: ${permission.name}');
+      if (permission != NotificationPermission.granted) {
+        final asked = await _api.requestNotificationPermission();
+        debugLog.log('hold', 'notification permission asked: ${asked.name}');
+      }
+    } on Object {
+      debugLog.log('hold', 'notification permission: unknown (no activity)');
     }
-    final ignoring = await FlutterForegroundTask.isIgnoringBatteryOptimizations;
-    debugLog.log('hold', 'battery optimization ignored: $ignoring');
-    if (!ignoring) {
-      final asked =
-          await FlutterForegroundTask.requestIgnoreBatteryOptimization();
-      debugLog.log('hold', 'battery optimization asked: $asked');
+    try {
+      final ignoring = await _api.isIgnoringBatteryOptimizations;
+      debugLog.log('hold', 'battery optimization ignored: $ignoring');
+      if (!ignoring) {
+        final asked = await _api.requestIgnoreBatteryOptimization();
+        debugLog.log('hold', 'battery optimization asked: $asked');
+      }
+    } on Object {
+      debugLog.log('hold', 'battery optimization: not asked (no activity)');
     }
-    if (await FlutterForegroundTask.isRunningService) {
+    if (await _api.isRunningService) {
       // The service of an earlier start runs: its title follows the reason.
       debugLog.log('hold', 'a service runs already: update its text');
-      await FlutterForegroundTask.updateService(
+      await _api.updateService(
         notificationTitle: _title(speedLimit),
         notificationText: _text,
       );
     } else {
-      final result = await FlutterForegroundTask.startService(
-        serviceTypes: [ForegroundServiceTypes.connectedDevice],
-        serviceId: serviceId,
+      final result = await _api.startService(
         notificationTitle: _title(speedLimit),
         notificationText: _text,
-        callback: backgroundHoldCallback,
       );
       if (result case ServiceRequestFailure(:final error)) {
         throw StateError('The foreground service did not start: $error');
@@ -158,18 +262,6 @@ final class AndroidForegroundServiceHold implements BackgroundHoldGateway {
       return;
     }
     _initialized = true;
-    FlutterForegroundTask.init(
-      androidNotificationOptions: AndroidNotificationOptions(
-        channelId: 'notification_channel_id',
-        channelName: 'Background service',
-        onlyAlertOnce: true,
-      ),
-      iosNotificationOptions: const IOSNotificationOptions(
-        showNotification: false,
-      ),
-      foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.nothing(),
-      ),
-    );
+    _api.init();
   }
 }

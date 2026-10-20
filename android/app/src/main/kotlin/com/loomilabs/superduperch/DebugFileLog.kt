@@ -73,6 +73,44 @@ internal object DebugFileLog {
     /** The preference from the schema version and the stored value (null: no row). */
     fun decide(userVersion: Int, row: Int?): Boolean =
         userVersion >= minimumSchemaVersion && row != null && row != 0
+
+    /** The ids of the bikes whose log is on, from the rows (device id, stored value). */
+    fun enabledIds(userVersion: Int, rows: List<Pair<String, Int>>): List<String> =
+        rows.filter { decide(userVersion, it.second) }.map { it.first }
+
+    /**
+     * Writes one line to the native log of each bike whose log is on. A
+     * forgotten bike has no row, so it gets no file.
+     */
+    fun logToEnabledBikes(context: Context, area: String, message: String) {
+        val ids = try {
+            enabledDeviceIds(context.applicationContext)
+        } catch (_: Exception) {
+            return
+        }
+        ids.forEach { log(context, it, area, message) }
+    }
+
+    private fun enabledDeviceIds(context: Context): List<String> {
+        val databaseFile = File(PathUtils.getDataDirectory(context), databaseFilename)
+        if (!databaseFile.isFile) return emptyList()
+        val flags = SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS
+        return SQLiteDatabase.openDatabase(databaseFile.path, null, flags).use { database ->
+            val version = database.rawQuery("PRAGMA user_version", null).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
+            if (version < minimumSchemaVersion) return@use emptyList()
+            val rows = database.rawQuery(
+                "SELECT device_id, debug_log_enabled FROM bike_preferences",
+                null,
+            ).use { cursor ->
+                val list = ArrayList<Pair<String, Int>>()
+                while (cursor.moveToNext()) list.add(cursor.getString(0) to cursor.getInt(1))
+                list
+            }
+            enabledIds(version, rows)
+        }
+    }
 }
 
 /** Caches the preference of each device for [ttlMs]. */

@@ -274,6 +274,10 @@ final class BikeSession {
   Timer? _pollTimer;
   Timer? _reconnectTimer;
   bool _waitsForBike = false;
+
+  /// True while the current link came from a background connect. Its
+  /// `autoConnect` request stays on the platform until a disconnect.
+  bool _linkFromBackgroundConnect = false;
   var _generation = 0;
   var _reconnectAttempt = 0;
   // From this attempt on, a reconnect writes one summary line each 5 minutes
@@ -636,6 +640,7 @@ final class BikeSession {
     }
     _disposed = true;
     _waitsForBike = false;
+    _linkFromBackgroundConnect = false;
     _disconnectRequested = true;
     _nextGeneration('dispose');
     _expectedDisconnect = true;
@@ -1496,6 +1501,7 @@ final class BikeSession {
     // `_disconnectNow` calls `connection.disconnect()`, which ends the
     // background connect request.
     _waitsForBike = false;
+    _linkFromBackgroundConnect = false;
     _disconnectRequested = true;
     _nextGeneration(
       manuallyPaused ? 'manual disconnect' : 'pause for background',
@@ -1557,6 +1563,7 @@ final class BikeSession {
       _hasObservedConnection = true;
       if (_waitsForBike && _state.peek() is SessionReconnecting) {
         _log('link', 'background connect: the platform connected');
+        _linkFromBackgroundConnect = true;
         _reconnectTimer?.cancel();
         unawaited(_startConnect());
       }
@@ -1583,6 +1590,7 @@ final class BikeSession {
     _log('link', 'unexpected loss');
     // Only an unexpected loss can be a bike restart.
     _offTimeMeter.linkLost();
+    _endBackgroundConnect();
     _reconnectTimer?.cancel();
     _nextGeneration('link loss');
     _pollTimer?.cancel();
@@ -1590,6 +1598,25 @@ final class BikeSession {
     _scheduleReconnect(
       const BikeSessionTransportFailure('The bike disconnected.'),
     );
+  }
+
+  /// The link of a background connect keeps its `autoConnect` request. A
+  /// disconnect removes it, so the quick retries do not compete with it.
+  void _endBackgroundConnect() {
+    if (!_linkFromBackgroundConnect) {
+      return;
+    }
+    _linkFromBackgroundConnect = false;
+    _log('link', 'background connect ended: link lost');
+    unawaited(_disconnectQuietly('background connect end'));
+  }
+
+  Future<void> _disconnectQuietly(String reason) async {
+    try {
+      await connection.disconnect();
+    } on Object catch (error) {
+      _log('link', '$reason: disconnect failed: $error');
+    }
   }
 
   void _resetReconnectAttempts() {
@@ -1704,8 +1731,8 @@ final class BikeSession {
       waitsForBike: true,
     );
     _log('link', 'background connect requested: attempt=$_reconnectAttempt');
-    unawaited(_requestBackgroundConnect());
     final generation = _generation;
+    unawaited(_requestBackgroundConnect());
     _reconnectTimer = Timer.periodic(_backgroundRearmInterval, (_) {
       if (!_isCurrent(generation) || !_waitsForBike) {
         return;
@@ -1723,6 +1750,13 @@ final class BikeSession {
   }
 
   Future<void> _requestBackgroundConnect() async {
+    if (_hasObservedConnection) {
+      // The platform link is up (a connect flow failed on it). The request
+      // would cut it as an unexpected loss, so the session ends it first.
+      _expectedDisconnect = true;
+      _linkFromBackgroundConnect = false;
+      await _disconnectQuietly('background connect');
+    }
     try {
       await connection.connectInBackground();
     } on Object catch (error) {
@@ -1730,6 +1764,14 @@ final class BikeSession {
         'link',
         'background connect failed: ${_describeFailure(_asFailure(error))}',
       );
+    }
+    if (_disposed || _foregroundPaused || _manualReconnectPaused) {
+      // A pause, a disconnect or a dispose came while the request ran. Its
+      // disconnect may have come before the request, so the request may have
+      // left `autoConnect` on. A platform connect or a direct connect also
+      // ends the wait, but then the link must stay.
+      _log('link', 'background connect cancelled: the wait ended');
+      await _disconnectQuietly('background connect');
     }
   }
 

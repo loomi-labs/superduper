@@ -394,18 +394,28 @@ final class ActiveBikeCoordinator {
   }
 
   Future<void> setForeground(bool foreground) async {
+    var headlessEnded = false;
     if (foreground && _headless) {
       _headless = false;
+      headlessEnded = true;
       _log('headless start ends: the app is in the foreground');
     }
     final changed = _foreground != foreground;
     _foreground = foreground;
     // The app reports hidden, paused and detached one after the other. Only a
     // change gets log lines.
-    await _applyForeground(foreground, log: changed);
+    await _applyForeground(
+      foreground,
+      log: changed,
+      requestPermission: headlessEnded,
+    );
   }
 
-  Future<void> _applyForeground(bool foreground, {required bool log}) async {
+  Future<void> _applyForeground(
+    bool foreground, {
+    required bool log,
+    bool requestPermission = false,
+  }) async {
     void note(String message, [String area = 'app']) {
       if (log) {
         _log(message, area);
@@ -420,7 +430,7 @@ final class ActiveBikeCoordinator {
       final current = _session;
       if (current == null) {
         note('setForeground(true): no session, reconcile');
-        await _reconcile(force: true, requestPermission: false);
+        await _reconcile(force: true, requestPermission: requestPermission);
       } else {
         note('setForeground(true): resume the session');
         await current.resumeFromBackground();
@@ -723,7 +733,8 @@ final class ActiveBikeCoordinator {
         }),
       );
       if (_headless) {
-        await _applyForeground(false, log: true);
+        // The first value of the hold subscription started the hold already.
+        _log('headless start: hold wanted, the session stays connected');
       }
     } on Object catch (error) {
       _log('reconcile failed: $error');

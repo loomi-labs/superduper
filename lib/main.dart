@@ -22,7 +22,12 @@ void main(List<String> args) {
 
   runApp(
     SuperduperBootstrap(
-      createServices: () => AppServices.standard(startsHeadless: headless),
+      // A restart of the services in a running app is no headless start.
+      createServices: () => AppServices.standard(
+        startsHeadless:
+            headless &&
+            WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed,
+      ),
     ),
   );
 }
