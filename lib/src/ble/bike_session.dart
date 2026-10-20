@@ -91,11 +91,17 @@ final class SessionReconnecting extends BikeSessionState {
     required this.attempt,
     required this.retryAfter,
     required this.failure,
+    this.waitsForBike = false,
   });
 
   final int attempt;
   final Duration retryAfter;
   final BikeSessionFailure failure;
+
+  /// True while the session waits for a platform background connect. Then
+  /// [retryAfter] is the interval to request it again, and no direct attempt
+  /// follows.
+  final bool waitsForBike;
 }
 
 final class SessionDisconnected extends BikeSessionState {
@@ -267,11 +273,17 @@ final class BikeSession {
   BikeControlPatch _connectionIntent;
   Timer? _pollTimer;
   Timer? _reconnectTimer;
+  bool _waitsForBike = false;
+
+  /// True while the current link came from a background connect. Its
+  /// `autoConnect` request stays on the platform until a disconnect.
+  bool _linkFromBackgroundConnect = false;
   var _generation = 0;
   var _reconnectAttempt = 0;
   // From this attempt on, a reconnect writes one summary line each 5 minutes
   // and no line for each attempt.
   static const _quietReconnectAfter = 10;
+  static const _backgroundRearmInterval = Duration(minutes: 5);
   static const _reconnectSummaryInterval = Duration(minutes: 5);
   DateTime? _lastReconnectSummaryAt;
   var _disposed = false;
@@ -627,6 +639,8 @@ final class BikeSession {
       return;
     }
     _disposed = true;
+    _waitsForBike = false;
+    _linkFromBackgroundConnect = false;
     _disconnectRequested = true;
     _nextGeneration('dispose');
     _expectedDisconnect = true;
@@ -709,6 +723,7 @@ final class BikeSession {
         _log('link', 'connect dropped: generation $generation is stale');
         return;
       }
+      _waitsForBike = false;
       _expectedDisconnect = false;
       _connectionIntent = _nextConnectionIntent;
       _pollTimer?.cancel();
@@ -1483,6 +1498,10 @@ final class BikeSession {
     final previousGeneration = _generation;
     final hadPendingConnect =
         abortPendingConnect && _platformConnectGeneration == previousGeneration;
+    // `_disconnectNow` calls `connection.disconnect()`, which ends the
+    // background connect request.
+    _waitsForBike = false;
+    _linkFromBackgroundConnect = false;
     _disconnectRequested = true;
     _nextGeneration(
       manuallyPaused ? 'manual disconnect' : 'pause for background',
@@ -1542,6 +1561,12 @@ final class BikeSession {
     _log('link', 'platform link state: ${connectionState.name}');
     if (connectionState == BikeConnectionState.connected) {
       _hasObservedConnection = true;
+      if (_waitsForBike && _state.peek() is SessionReconnecting) {
+        _log('link', 'background connect: the platform connected');
+        _linkFromBackgroundConnect = true;
+        _reconnectTimer?.cancel();
+        unawaited(_startConnect());
+      }
       return;
     }
     if (!_hasObservedConnection) {
@@ -1565,6 +1590,7 @@ final class BikeSession {
     _log('link', 'unexpected loss');
     // Only an unexpected loss can be a bike restart.
     _offTimeMeter.linkLost();
+    _endBackgroundConnect();
     _reconnectTimer?.cancel();
     _nextGeneration('link loss');
     _pollTimer?.cancel();
@@ -1572,6 +1598,25 @@ final class BikeSession {
     _scheduleReconnect(
       const BikeSessionTransportFailure('The bike disconnected.'),
     );
+  }
+
+  /// The link of a background connect keeps its `autoConnect` request. A
+  /// disconnect removes it, so the quick retries do not compete with it.
+  void _endBackgroundConnect() {
+    if (!_linkFromBackgroundConnect) {
+      return;
+    }
+    _linkFromBackgroundConnect = false;
+    _log('link', 'background connect ended: link lost');
+    unawaited(_disconnectQuietly('background connect end'));
+  }
+
+  Future<void> _disconnectQuietly(String reason) async {
+    try {
+      await connection.disconnect();
+    } on Object catch (error) {
+      _log('link', '$reason: disconnect failed: $error');
+    }
   }
 
   void _resetReconnectAttempts() {
@@ -1585,6 +1630,10 @@ final class BikeSession {
   /// attempt counter does not reset. Other states ignore the call.
   void reconnectNow(String reason) {
     final state = _state.peek();
+    if (_waitsForBike) {
+      _log('link', 'reconnect now ignored: background connect waits');
+      return;
+    }
     if (_disposed ||
         _manualReconnectPaused ||
         _foregroundPaused ||
@@ -1622,6 +1671,11 @@ final class BikeSession {
         : _reconnectDelays.length - 1;
     final delay = _reconnectDelays[delayIndex];
     _reconnectAttempt++;
+    if (connection.supportsBackgroundConnect &&
+        delayIndex == _reconnectDelays.length - 1) {
+      _waitForBike(failure);
+      return;
+    }
     _state.value = SessionReconnecting(
       attempt: _reconnectAttempt,
       retryAfter: delay,
@@ -1663,6 +1717,62 @@ final class BikeSession {
         );
       }
     });
+  }
+
+  /// Stops the direct attempts. The platform connects when the bike
+  /// advertises. A timer requests this again, because Android can lose the
+  /// request without an event.
+  void _waitForBike(BikeSessionFailure failure) {
+    _waitsForBike = true;
+    _state.value = SessionReconnecting(
+      attempt: _reconnectAttempt,
+      retryAfter: _backgroundRearmInterval,
+      failure: failure,
+      waitsForBike: true,
+    );
+    _log('link', 'background connect requested: attempt=$_reconnectAttempt');
+    final generation = _generation;
+    unawaited(_requestBackgroundConnect());
+    _reconnectTimer = Timer.periodic(_backgroundRearmInterval, (_) {
+      if (!_isCurrent(generation) || !_waitsForBike) {
+        return;
+      }
+      _reconnectAttempt++;
+      _log('link', 'background connect re-armed: attempt=$_reconnectAttempt');
+      _state.value = SessionReconnecting(
+        attempt: _reconnectAttempt,
+        retryAfter: _backgroundRearmInterval,
+        failure: failure,
+        waitsForBike: true,
+      );
+      unawaited(_requestBackgroundConnect());
+    });
+  }
+
+  Future<void> _requestBackgroundConnect() async {
+    if (_hasObservedConnection) {
+      // The platform link is up (a connect flow failed on it). The request
+      // would cut it as an unexpected loss, so the session ends it first.
+      _expectedDisconnect = true;
+      _linkFromBackgroundConnect = false;
+      await _disconnectQuietly('background connect');
+    }
+    try {
+      await connection.connectInBackground();
+    } on Object catch (error) {
+      _log(
+        'link',
+        'background connect failed: ${_describeFailure(_asFailure(error))}',
+      );
+    }
+    if (_disposed || _foregroundPaused || _manualReconnectPaused) {
+      // A pause, a disconnect or a dispose came while the request ran. Its
+      // disconnect may have come before the request, so the request may have
+      // left `autoConnect` on. A platform connect or a direct connect also
+      // ends the wait, but then the link must stay.
+      _log('link', 'background connect cancelled: the wait ended');
+      await _disconnectQuietly('background connect');
+    }
   }
 
   Future<T> _timed<T>(Future<T> operation, String name) async {
@@ -1736,9 +1846,15 @@ final class BikeSession {
       SessionReady(:final configuration) =>
         'Ready(mode=${configuration.mode} light=${configuration.light} '
             'assist=${configuration.assist})',
-      SessionReconnecting(:final attempt, :final retryAfter, :final failure) =>
+      SessionReconnecting(
+        :final attempt,
+        :final retryAfter,
+        :final failure,
+        :final waitsForBike,
+      ) =>
         'Reconnecting(attempt=$attempt retryAfter=${retryAfter.inMilliseconds}'
-            'ms failure=${_describeFailure(failure)})',
+            'ms${waitsForBike ? ' waitsForBike' : ''} '
+            'failure=${_describeFailure(failure)})',
       SessionDisconnected(:final manuallyPaused) =>
         'Disconnected(manuallyPaused=$manuallyPaused)',
       SessionFailed(:final failure, :final canRetry) =>

@@ -116,6 +116,135 @@ void main() {
     expect(hold.logs, contains(same(logs['first'])));
   });
 
+  group('headless start', () {
+    late RecordingHold hold;
+    late List<bool> linkHeld;
+    late RecordingDebugLog log;
+
+    Future<void> startHeadless({bool failHold = false}) async {
+      await coordinator.dispose();
+      hold = RecordingHold()..failNext = failHold;
+      linkHeld = [];
+      log = RecordingDebugLog();
+      coordinator = ActiveBikeCoordinator(
+        bikeRepository: bikes,
+        settingsRepository: settings,
+        permissions: permissions,
+        buildSession: buildTestSession,
+        backgroundHold: hold,
+        debugLogFor: (_) => log,
+        onLinkHeldChanged: ({required held}) => linkHeld.add(held),
+        startsHeadless: true,
+      );
+      await coordinator.start();
+    }
+
+    Future<BikeSession> builtSession() async {
+      await _waitFor(
+        coordinator.state,
+        (state) => state is ActiveBikeSessionStatus,
+      );
+      return (coordinator.state.value as ActiveBikeSessionStatus).session;
+    }
+
+    test('builds a session with the app not in the foreground', () async {
+      await startHeadless();
+
+      final session = await builtSession();
+
+      expect(session.deviceId, 'first');
+      expect(connections['first'], hasLength(1));
+      expect(
+        log.has('app', 'headless start: build the session in the background'),
+        isTrue,
+      );
+    });
+
+    test('never requests the permission', () async {
+      await startHeadless();
+      await builtSession();
+
+      expect(permissions.checks, greaterThan(0));
+      expect(permissions.requests, 0);
+    });
+
+    test('builds no session without the permission', () async {
+      permissions.state = BluetoothPermissionState.denied;
+      await startHeadless();
+
+      await _waitFor(
+        coordinator.state,
+        (state) => state is ActiveBikePermissionRequired,
+      );
+
+      expect(connections, isEmpty);
+      expect(permissions.requests, 0);
+      expect(log.has('app', 'headless start: no permission'), isTrue);
+    });
+
+    test('starts the hold when the hold is wanted', () async {
+      await bikes.setStreetLegalOnQuickRestart('first', true);
+      await startHeadless();
+      final session = await builtSession();
+
+      await _waitUntil(() => hold.calls.contains(true));
+
+      await Future<void>.delayed(Duration.zero);
+
+      expect(hold.held, isTrue);
+      expect(hold.calls.where((held) => held), hasLength(1));
+      expect(linkHeld, contains(true));
+      expect(session.state.value, isNot(isA<SessionDisconnected>()));
+    });
+
+    test('keeps the session connected when the hold start fails', () async {
+      await bikes.setStreetLegalOnQuickRestart('first', true);
+      await startHeadless(failHold: true);
+      final session = await builtSession();
+
+      await _waitUntil(() => log.has('hold', 'hold gateway failed'));
+
+      expect(session.state.value, isNot(isA<SessionDisconnected>()));
+    });
+
+    test('pauses the session when no hold is wanted', () async {
+      await startHeadless();
+      final session = await builtSession();
+
+      await _waitUntil(() => session.state.value is SessionDisconnected);
+      expect(hold.calls, isNot(contains(true)));
+      expect(linkHeld, [false]);
+      expect(log.has('hold', 'hold changed: held=false'), isTrue);
+    });
+
+    test('the first foreground requests the missing permission once', () async {
+      permissions.state = BluetoothPermissionState.denied;
+      await startHeadless();
+      await _waitFor(
+        coordinator.state,
+        (state) => state is ActiveBikePermissionRequired,
+      );
+      expect(permissions.requests, 0);
+
+      await coordinator.setForeground(true);
+
+      expect(permissions.requests, 1);
+    });
+
+    test('the first foreground keeps the same session', () async {
+      await startHeadless();
+      final session = await builtSession();
+      await _waitUntil(() => session.state.value is SessionDisconnected);
+
+      await coordinator.setForeground(true);
+
+      final state = coordinator.state.value as ActiveBikeSessionStatus;
+      expect(state.session, same(session));
+      expect(connections['first'], hasLength(1));
+      expect(permissions.requests, 0);
+    });
+  });
+
   group('bike appeared', () {
     final logs = <String, RecordingDebugLog>{};
 

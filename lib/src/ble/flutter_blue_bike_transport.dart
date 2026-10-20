@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'package:superduper/src/ble/bike_protocol.dart';
@@ -192,6 +193,30 @@ final class _FlutterBlueBikeConnection implements BikeConnection {
     } on Object catch (error) {
       throw BikeConnectionFailure(
         'Connection',
+        'The bike could not be reached.',
+        cause: error,
+      );
+    }
+  }
+
+  @override
+  bool get supportsBackgroundConnect => Platform.isAndroid;
+
+  @override
+  Future<void> connectInBackground() async {
+    _ensureNotDisposed();
+    try {
+      if (_device.isAutoConnectEnabled) {
+        await _device.disconnect(queue: false);
+      }
+      await _device.connect(
+        license: fbp.License.nonprofit,
+        autoConnect: true,
+        mtu: null,
+      );
+    } on Object catch (error) {
+      throw BikeConnectionFailure(
+        'Background connect',
         'The bike could not be reached.',
         cause: error,
       );

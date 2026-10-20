@@ -60,6 +60,14 @@ abstract interface class BikeConnection {
   Stream<BikeConnectionState> get states;
 
   Future<void> connect();
+
+  /// True when the platform can connect later, when the bike advertises.
+  bool get supportsBackgroundConnect;
+
+  /// Asks the platform to connect when the bike advertises. It returns when
+  /// the platform accepted the request. [states] reports the connect. A
+  /// running request ends first. [disconnect] ends the request.
+  Future<void> connectInBackground();
   Future<void> discoverRequiredGatt();
   bool hasCharacteristic({
     required String serviceUuid,

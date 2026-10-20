@@ -50,7 +50,11 @@ final class BikeSessionPresentation {
             '$bikeName is connected and its Set on connect values are confirmed.',
         canRetry: false,
       ),
-      SessionReconnecting(:final retryAfter, :final failure) =>
+      SessionReconnecting(
+        :final retryAfter,
+        :final failure,
+        :final waitsForBike,
+      ) =>
         BikeSessionPresentation(
           icon: Icons.refresh_rounded,
           label: 'Reconnecting',
@@ -58,8 +62,9 @@ final class BikeSessionPresentation {
           title: failure is BikeBluetoothUnavailable
               ? 'Bluetooth is unavailable'
               : 'Trying to reconnect…',
-          detail:
-              '${userFacingError(failure, context: UserErrorContext.reconnect)} Trying again in ${retryAfter.inSeconds} seconds.',
+          detail: waitsForBike
+              ? '${userFacingError(failure, context: UserErrorContext.reconnect)} Connects when the bike is on.'
+              : '${userFacingError(failure, context: UserErrorContext.reconnect)} Trying again in ${retryAfter.inSeconds} seconds.',
           canRetry: false,
         ),
       SessionDisconnected(:final manuallyPaused) => BikeSessionPresentation(

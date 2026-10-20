@@ -33,8 +33,12 @@ final class AppServices {
     BackgroundSyncCoordinator? backgroundSyncCoordinator,
     BackgroundHoldGateway? backgroundHold,
     DebugLogStore? debugLogStore,
+    bool startsHeadless = false,
   }) {
     final resolvedDebugLogStore = debugLogStore ?? DebugLogStore();
+    if (startsHeadless) {
+      resolvedDebugLogStore.inBackground = true;
+    }
     final resolvedImporter =
         importer ?? InstalledDataImporter(database: database);
     final resolvedBikeRepository =
@@ -63,6 +67,7 @@ final class AppServices {
           identityResolver: resolvedIdentityResolver,
           backgroundHold: resolvedBackgroundHold,
           debugLogFor: resolvedDebugLogStore.forBike,
+          startsHeadless: startsHeadless,
           onBikesChanged: resolvedDebugLogStore.updateBikes,
           onBikeForgotten: resolvedDebugLogStore.forget,
           onLinkHeldChanged: ({required held}) => unawaited(
@@ -157,12 +162,13 @@ final class AppServices {
     required this.startup,
   });
 
-  factory standard() {
+  factory standard({bool startsHeadless = false}) {
     final debugLogStore = DebugLogStore.app();
     return AppServices(
       database: AppDatabase.open(),
       backgroundSyncPlatform: SystemBackgroundSyncPlatformGateway(),
       debugLogStore: debugLogStore,
+      startsHeadless: startsHeadless,
       backgroundHold: defaultTargetPlatform == TargetPlatform.android
           ? AndroidForegroundServiceHold()
           : const NoopBackgroundHoldGateway(),

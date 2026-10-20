@@ -193,6 +193,13 @@ class DebugFileLogTest {
     }
 
     @Test
+    fun enabledIdsKeepsOnlyBikesWithTheFlag() {
+        val rows = listOf("AA" to 1, "BB" to 0, "CC" to 1)
+        assertEquals(listOf("AA", "CC"), DebugFileLog.enabledIds(8, rows))
+        assertEquals(emptyList<String>(), DebugFileLog.enabledIds(7, rows))
+    }
+
+    @Test
     fun aMessageWithLineBreaksStaysOneLine() {
         sink().log("aa:bb", "native", "a\nb\r\nc")
         val lines = File(directory, "AA_BB.native.log").readLines()
