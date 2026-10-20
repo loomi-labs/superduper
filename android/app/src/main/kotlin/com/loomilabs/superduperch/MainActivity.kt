@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.le.ScanResult
 import android.companion.AssociationInfo
 import android.companion.CompanionDeviceManager
+import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
 import android.os.Build
@@ -25,7 +26,6 @@ class MainActivity : FlutterActivity() {
     )
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var appearedSink: ((String) -> Unit)? = null
     private var pendingAssociation: PendingAssociation? = null
     private var cancelledAssociationDeviceId: String? = null
     private val associationDiscoveryTimeout = Runnable {
@@ -37,75 +37,35 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun provideFlutterEngine(context: Context): FlutterEngine =
+        MainEngine.ensure(context)
+
+    // The application owns the engine. It outlives the activity.
+    override fun shouldDestroyEngineWithHost(): Boolean = false
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MainEngine.channel()?.associationHost = this
         BackgroundCompanionManager.setConnectionPaused(applicationContext, false)
-        val channel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            backgroundSyncChannel,
-        )
-        val sink: (String) -> Unit = { deviceId ->
-            mainHandler.post {
-                channel.invokeMethod("bikeAppeared", mapOf("deviceId" to deviceId))
-            }
-        }
-        appearedSink = sink
-        BackgroundSyncRuntime.bikeAppearedSink = sink
-        channel.setMethodCallHandler { call, result ->
-            try {
-                when (call.method) {
-                    "configure" -> {
-                        val deviceId = call.argument<String>("deviceId")
-                            ?: throw IllegalArgumentException("deviceId is required")
-                        val requestAssociation =
-                            call.argument<Boolean>("requestAssociation") ?: false
-                        configureBackgroundSync(
-                            deviceId,
-                            requestAssociation,
-                            result,
-                        )
-                    }
-                    "cancel" -> {
-                        cancelPendingAssociation("Bike association was cancelled")
-                        BackgroundCompanionManager.cancel(applicationContext)
-                        result.success(null)
-                    }
-                    "setLinkHeld" -> {
-                        val held = call.argument<Boolean>("held")
-                            ?: throw IllegalArgumentException("held is required")
-                        BackgroundSyncRuntime.dartHoldsLink = held
-                        result.success(null)
-                    }
-                    "setConnectionPaused" -> {
-                        val paused = call.argument<Boolean>("paused")
-                            ?: throw IllegalArgumentException("paused is required")
-                        BackgroundCompanionManager.setConnectionPaused(
-                            applicationContext,
-                            paused,
-                        )
-                        result.success(null)
-                    }
-                    else -> result.notImplemented()
-                }
-            } catch (error: Exception) {
-                result.error("background_sync", error.message, null)
-            }
-        }
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
-        // A new activity may have set its own sink already. Clear only ours.
-        if (BackgroundSyncRuntime.bikeAppearedSink === appearedSink) {
-            BackgroundSyncRuntime.bikeAppearedSink = null
-            BackgroundSyncRuntime.dartHoldsLink = false
-        }
-        appearedSink = null
-        cancelPendingAssociation("Bike association was interrupted")
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            backgroundSyncChannel,
-        ).setMethodCallHandler(null)
+        releaseAssociationHost()
         super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    override fun onDestroy() {
+        releaseAssociationHost()
+        super.onDestroy()
+    }
+
+    // A new activity may have taken the host already. Clear only ours.
+    private fun releaseAssociationHost() {
+        cancelPendingAssociation("Bike association was interrupted")
+        val channel = MainEngine.channel() ?: return
+        if (channel.associationHost === this) {
+            channel.associationHost = null
+        }
     }
 
     override fun onStart() {
@@ -148,7 +108,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun configureBackgroundSync(
+    internal fun configureBackgroundSync(
         deviceId: String,
         requestAssociation: Boolean,
         result: MethodChannel.Result,
@@ -258,7 +218,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun cancelPendingAssociation(message: String) {
+    internal fun cancelPendingAssociation(message: String) {
         val pending = pendingAssociation ?: return
         pendingAssociation = null
         clearAssociationDiscoveryTimeout()
@@ -372,7 +332,6 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
-        private const val backgroundSyncChannel = "io.kbl.superduper/background_sync"
         private const val logTag = "BackgroundSync"
         private const val companionAssociationRequestCode = 8107
         private const val associationPersistenceAttempts = 100

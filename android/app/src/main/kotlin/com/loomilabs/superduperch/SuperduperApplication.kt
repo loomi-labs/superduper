@@ -18,12 +18,14 @@ class SuperduperApplication : FlutterApplication() {
             if (state == BluetoothAdapter.STATE_ON) {
                 BackgroundCompanionManager.restoreStored(context)
                 NativeBackgroundSync.resumePending(context)
+                MainEngine.startIfHoldWanted(context)
             }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        MainEngine.startIfHoldWanted(this)
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(bluetoothStateReceiver, filter, RECEIVER_EXPORTED)
