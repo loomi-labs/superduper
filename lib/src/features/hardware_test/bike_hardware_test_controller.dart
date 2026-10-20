@@ -987,9 +987,11 @@ final class BikeHardwareTestController {
         'Applying bike settings',
         'Reading versions and applying saved settings.',
       ),
-      SessionReconnecting(:final retryAfter) => (
+      SessionReconnecting(:final retryAfter, :final waitsForBike) => (
         'Turn the bike ON',
-        'No connection yet. Trying again in ${retryAfter.inSeconds} seconds.',
+        waitsForBike
+            ? 'No connection yet. Connects when the bike is on.'
+            : 'No connection yet. Trying again in ${retryAfter.inSeconds} seconds.',
       ),
       _ => (_state.peek().title, _state.peek().detail),
     };
@@ -1161,6 +1163,12 @@ final class _DiagnosticBikeConnection implements BikeConnection {
       rethrow;
     }
   }
+
+  @override
+  bool get supportsBackgroundConnect => _delegate.supportsBackgroundConnect;
+
+  @override
+  Future<void> connectInBackground() => _delegate.connectInBackground();
 
   @override
   Future<void> discoverRequiredGatt() async {

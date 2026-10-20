@@ -765,6 +765,139 @@ void main() {
         async.flushMicrotasks();
       });
     });
+
+    group('background connect', () {
+      List<BikeSessionState> waiting(FakeAsync async, RecordingDebugLog log) {
+        connection.supportsBackgroundConnect = true;
+        final states = dropAndFail(async, log);
+        elapse(async, const Duration(seconds: 160));
+        return states;
+      }
+
+      List<String> linkLines(RecordingDebugLog log, Pattern pattern) => [
+        for (final message in log.messages('link'))
+          if (message.contains(pattern)) message,
+      ];
+
+      test('after the quick retries the session waits for a background '
+          'connect', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          final states = waiting(async, log);
+          final directAttempts = connection.connectCalls;
+
+          elapse(async, const Duration(minutes: 2));
+
+          expect(connection.backgroundConnectCalls, 1);
+          expect(connection.connectCalls, directAttempts);
+          final last = session.state.value as SessionReconnecting;
+          expect(last.waitsForBike, isTrue);
+          expect(last.retryAfter, const Duration(minutes: 5));
+          final delays = [
+            for (final state in states)
+              if (state is SessionReconnecting) state.retryAfter.inSeconds,
+          ];
+          expect(delays, [2, 5, 10, 20, 300]);
+          expect(
+            log.has('link', 'background connect requested: attempt=5'),
+            isTrue,
+          );
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('a platform connect during the wait connects the session', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          waiting(async, log);
+
+          connection
+            ..connectError = null
+            ..readFrames.add([0, 0, 0, 0, 0, 0])
+            ..emitState(BikeConnectionState.connected);
+          elapse(async, const Duration(seconds: 5));
+
+          expect(session.state.value, isA<SessionReady>());
+          expect(
+            log.has('link', 'background connect: the platform connected'),
+            isTrue,
+          );
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('the wait requests the background connect again each 5 minutes', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          waiting(async, log);
+          final failuresBefore = linkLines(log, 'connect failed').length;
+
+          elapse(async, const Duration(minutes: 10));
+
+          expect(connection.backgroundConnectCalls, 3);
+          expect(
+            linkLines(log, RegExp(r'background connect re-armed: attempt=\d+')),
+            hasLength(2),
+          );
+          expect(linkLines(log, 'connect failed'), hasLength(failuresBefore));
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('reconnectNow during the wait does nothing', () {
+        fakeAsync((async) {
+          final log = RecordingDebugLog();
+          waiting(async, log);
+          final directAttempts = connection.connectCalls;
+
+          session.reconnectNow('test');
+          async.flushMicrotasks();
+
+          expect(connection.connectCalls, directAttempts);
+          expect(
+            log.has('link', 'reconnect now ignored: background connect waits'),
+            isTrue,
+          );
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('a pause during the wait ends it', () {
+        fakeAsync((async) {
+          waiting(async, RecordingDebugLog());
+          final disconnects = connection.disconnectCalls;
+
+          unawaited(session.pauseForBackground());
+          async.flushMicrotasks();
+          elapse(async, const Duration(minutes: 10));
+
+          expect(connection.disconnectCalls, disconnects + 1);
+          expect(connection.backgroundConnectCalls, 1);
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+
+      test('a manual disconnect during the wait ends it', () {
+        fakeAsync((async) {
+          waiting(async, RecordingDebugLog());
+          final disconnects = connection.disconnectCalls;
+
+          unawaited(session.disconnect());
+          async.flushMicrotasks();
+          elapse(async, const Duration(minutes: 10));
+
+          expect(connection.disconnectCalls, disconnects + 1);
+          expect(connection.backgroundConnectCalls, 1);
+          unawaited(session.dispose());
+          async.flushMicrotasks();
+        });
+      });
+    });
   });
 
   group('reconnectNow', () {

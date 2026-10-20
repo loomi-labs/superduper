@@ -263,6 +263,15 @@ final class FakeBikeConnection implements BikeConnection {
   void emitState(BikeConnectionState state) => _states.add(state);
 
   @override
+  bool supportsBackgroundConnect = false;
+  int backgroundConnectCalls = 0;
+
+  @override
+  Future<void> connectInBackground() async {
+    backgroundConnectCalls++;
+  }
+
+  @override
   Future<void> connect() async {
     connectCalls++;
     final gate = connectGate;
